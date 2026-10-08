@@ -53,3 +53,13 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# 容器构建专用 profile：镜像里的瓶颈是 IO 而不是 CPU，
+# 但双架构要编译 300 个 crate，release 的 thin-LTO + codegen-units=1
+# 会把构建时间推到不可接受（实测让 arm64 跑 QEMU 时一小时都没编完）。
+# 关掉 LTO、放开 codegen-units 能显著缩短编译时间，运行开销几乎无感。
+[profile.docker]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 2
