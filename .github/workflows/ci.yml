@@ -89,19 +89,29 @@ jobs:
       - name: 准备音乐目录
         run: mkdir -p /tmp/metatidy-music
 
-      - name: 生成真实音频样本（ffmpeg，供标签读写测试用）
+      # 编译放在样本生成之前：样本生成属于测试的准备工作，
+      # 一旦它失败会连带跳过后面所有步骤，导致拿不到编译反馈、白等一整轮 CI。
+      - name: 编译
+        run: cargo build --release
+
+      - name: 生成真实音频样本（供标签读写测试用）
         run: |
+          set -e
           mkdir -p /tmp/metatidy-fixtures
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "runner 上没有 ffmpeg，现场安装"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ffmpeg
+          fi
           ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=44100:cl=mono -t 2 \
             -map_metadata -1 -c:a flac -y /tmp/metatidy-fixtures/sample.flac
           ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=44100:cl=mono -t 2 \
             -map_metadata -1 -c:a libmp3lame -q:a 9 -y /tmp/metatidy-fixtures/sample.mp3
           ls -l /tmp/metatidy-fixtures
+          test -s /tmp/metatidy-fixtures/sample.flac
+          test -s /tmp/metatidy-fixtures/sample.mp3
           echo "METATIDY_TEST_FLAC=/tmp/metatidy-fixtures/sample.flac" >> "$GITHUB_ENV"
           echo "METATIDY_TEST_MP3=/tmp/metatidy-fixtures/sample.mp3" >> "$GITHUB_ENV"
-
-      - name: 编译
-        run: cargo build --release
 
       - name: 单元测试
         run: cargo test --release

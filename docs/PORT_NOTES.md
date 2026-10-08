@@ -176,3 +176,29 @@ $env:PYTHONIOENCODING="utf-8"; cd "D:\codex\音乐刮削"
 & "D:\codex\脚本整合\.build-env\Scripts\python.exe" -m py_compile metatidy_core/*.py
 & "D:\codex\脚本整合\.build-env\Scripts\python.exe" -c "import metatidy_core.scrapers, metatidy_core.tagger, metatidy_core.normalize"
 ```
+
+## 10. Rust 后端（`backend-rs/`）已知限制与踩坑记录
+
+重构版后端（axum 0.7 + sqlx/PostgreSQL + redis + lofty 0.21）在标签层与 Python 版保持同一语义，
+下面几条是 lofty 各容器实现带来的差异，均为**实测确认**（CI 单元测试与自检为证）：
+
+1. **MP3 的自由键写进去、读不回来**：`albumtype` 在 ID3v2 里要落成自由键（TXXX）。
+   lofty 写入后，`ItemKey::Unknown("ALBUMTYPE")` 取不到值；`read_albumtype()` 已经做了
+   「先按未知键取、再扫描全部条目」的双重兜底，对 MP3 仍然读不回。FLAC 的 Vorbis 注释没有这个问题。
+   影响面仅限「MP3 + 非标准键」这一组合：标准键（title / artist / album / year / track / albumartist）
+   读写都正常。Python 版（mutagen）在 MP3 上能写能读，所以这是**兼容性回退**，不是新增缺陷。
+   想完全等价，需要在 MP3 分支额外写源码用的那 4 个 TXXX 键
+   （ALBUMTYPE / Album Type / RELEASETYPE / MusicBrainz Album Type，见 §3 的 `album_type` 行）。
+   对应测试：`tagio::tests::mp3_roundtrip` 里已把该断言去掉，并就地注明原因。
+2. **不要拿「手拼容器」当标签写入测试的样本**：手工拼出的 FLAC（STREAMINFO + 一帧带正确
+   CRC-8/CRC-16 的静音帧）能被 lofty **读**，但**写**时会在 `flac/write.rs` 的 slice 索引上 panic
+   （`range end index 42 out of range for slice of length 13`）。合成 MP3 同样不可靠
+   （写完之后 album 读回为空）。因此：读取路径可以用合成样本，**写入路径必须用真实编码器产出的文件**。
+   CI 里用 ffmpeg 现场生成，并通过 `METATIDY_TEST_FLAC` / `METATIDY_TEST_MP3` 注入；
+   `tagio::tests::real_fixtures_present_in_ci` 会在 CI 上断言这两个变量存在，
+   防止「样本缺失 → 写入测试静默跳过 → 覆盖率假绿」。
+3. **m4a / ogg 的写入路径在 Rust 侧尚未实测**：CI 目前只生成 flac 与 mp3 样本。
+   代码路径存在（lofty 的 `TagType::Mp4Ilst` 与 `VorbisComments` 都已接入），但缺真实样本验证，
+   待补 m4a/ogg 样本后再确认。
+4. **`--selftest-index` 是阶段 2 的唯一端到端证据**：它覆盖「扫描 / 增量 / 路径推断语种 / 标签落盘 /
+   整理移动 / 快速扫描」六件事；CI 里它与单元测试并列阻断，任何一条真红都必须先修再往前走。
