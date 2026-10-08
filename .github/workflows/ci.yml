@@ -122,6 +122,19 @@ jobs:
       - name: 索引层端到端自检（扫描 / 增量 / 标签编辑 / 整理移动 / 快速扫描）
         run: cargo run --release -- --selftest-index
 
+      # 阶段 3 的唯一端到端证据：真实联网打 4 个源 + 取歌词 + 取封面。
+      # 允许重试一次：MusicBrainz 偶发握手失败/503（本机对照实验约 20%，Python 版同样如此）；
+      # 真坏了第二次仍会失败，不会把红灯洗白。
+      - name: 刮削层自检（真实联网：MusicBrainz / iTunes / 网易云 / Deezer）
+        run: |
+          for attempt in 1 2; do
+            if ./target/release/metatidy-server --selftest-scrape; then exit 0; fi
+            echo "第 $attempt 次失败，5 秒后重试"
+            sleep 5
+          done
+          echo "两次都失败"
+          exit 1
+
       - name: 冒烟：起服务并断言状态接口
         run: |
           ./target/release/metatidy-server &

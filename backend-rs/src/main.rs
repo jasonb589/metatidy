@@ -22,6 +22,7 @@ mod templates;
 mod mover;
 mod repo;
 mod scanner;
+mod scrapers;
 mod tagio;
 
 use axum::{
@@ -62,6 +63,12 @@ async fn main() -> anyhow::Result<()> {
         let path = args.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--probe-tags 需要文件路径"))?;
         let tags = tag_probe(path)?;
         println!("{}", serde_json::to_string_pretty(&tags)?);
+        return Ok(());
+    }
+
+    // 子命令：刮削层真实联网自检（不需要数据库；CI 也会跑）
+    if args.iter().any(|a| a == "--selftest-scrape") {
+        run_scrape_selftest(&config).await?;
         return Ok(());
     }
 
@@ -181,6 +188,116 @@ fn tag_probe(path: &str) -> anyhow::Result<Value> {
         out["picture_count"] = json!(tag.pictures().len());
     }
     Ok(out)
+}
+
+/// 刮削层真实联网自检：四个免 Key 源（musicbrainz / itunes / netease / deezer）+ 歌词 + 封面。
+///
+/// 刻意不走数据库：CI 里只验证「联网 + 解析 + 打分」这条链路；
+/// 需要 API Key 的源只打印跳过原因，不作断言。
+async fn run_scrape_selftest(config: &Config) -> anyhow::Result<()> {
+    use crate::scrapers::{self, ScrapeQuery};
+
+    println!("=== metatidy rust 刮削层自检（真实联网）===");
+    println!("  源清单 {} 个（/api/status 的 scraper.count 用）", scrapers::known_sources().len());
+
+    for name in ["spotify", "genius", "discogs"] {
+        if let Some(reason) = config.source_skip_reason(name) {
+            println!("  [--] 跳过 {name}：{reason}");
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent("metatidy/0.1 (rust selftest)")
+
+        .build()?;
+
+    let query = ScrapeQuery {
+        title: "稻香".to_string(),
+        artist: "周杰伦".to_string(),
+        album: Some("魔杰座".to_string()),
+        duration: Some(223.0),
+        sources: ["musicbrainz", "itunes", "netease", "deezer"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        limit: 5,
+    };
+    let mut outcome = scrapers::search_all(&client, &query).await;
+    print_scrape_statuses(&outcome);
+
+    // MusicBrainz 在小网络环境下实测约 20% 概率握手失败或返回 503（对照实验：Python requests
+    // 12 次里失败 3 次）——**生产路径不重试**（与 Python 的 /api/search 一致），
+    // 只有这个联网自检为了 CI 稳定在 MB 空结果时补一次（间隔 2 秒，尊重 1 req/s 限速）。
+    if scrapers::count_source(&outcome, "musicbrainz") == 0 {
+        println!("  [..] MusicBrainz 这次没返回候选，2 秒后重试一次");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        outcome = scrapers::search_all(&client, &query).await;
+        print_scrape_statuses(&outcome);
+    }
+
+    if outcome.candidates.is_empty() {
+        anyhow::bail!("四个源都没返回候选（网络不可用？源状态见上）");
+    }
+    if scrapers::count_source(&outcome, "musicbrainz") == 0 {
+        anyhow::bail!("MusicBrainz 没返回候选（e2e 与两个 pytest 断言都依赖它）");
+    }
+    for cand in &outcome.candidates {
+        if cand.title.trim().is_empty() {
+            anyhow::bail!("候选缺少标题：source={} artist={}", cand.source, cand.artist);
+        }
+    }
+    for window in outcome.candidates.windows(2) {
+        if window[0].score < window[1].score {
+            anyhow::bail!(
+                "候选没有按分数降序：{} < {}",
+                window[0].score,
+                window[1].score
+            );
+        }
+    }
+
+    let top = &outcome.candidates[0];
+    println!("  共 {} 条候选", outcome.candidates.len());
+    println!(
+        "  top1: source={} title={} score={} confidence={}",
+        top.source, top.title, top.score, top.confidence
+    );
+    match scrapers::fetch_lyrics(&client, "稻香", "周杰伦", Some("魔杰座"), Some(223.0)).await {
+        Some((text, source)) => {
+            let head: String = text.chars().take(40).collect();
+            println!(
+                "  [ok] 歌词 {} 行，来源 {}，开头：{}",
+                text.lines().count(),
+                source,
+                head.replace('\n', " ")
+            );
+        }
+        None => println!("  [--] 歌词：LRCLIB 与酷狗都没取到（不视为失败）"),
+    }
+
+    match outcome.candidates.iter().find(|c| !c.cover.is_empty()) {
+        Some(cand) => match scrapers::fetch_cover(&client, &cand.cover).await {
+            Some((bytes, mime)) => {
+                println!("  [ok] 封面 {} 字节 {mime}（{}）", bytes.len(), cand.cover)
+            }
+            None => println!("  [--] 封面下载失败：{}", cand.cover),
+        },
+        None => println!("  [--] 候选里没有封面 URL"),
+    }
+
+    println!("=== 刮削层自检通过 ===");
+    Ok(())
+}
+
+/// 打印每源状态（`--selftest-scrape` 用）。
+fn print_scrape_statuses(outcome: &crate::scrapers::ScrapeOutcome) {
+    for status in &outcome.source_status {
+        if status.error.is_empty() {
+            println!("  [{}] count={}", status.source, status.count);
+        } else {
+            println!("  [{}] count={} error={}", status.source, status.count, status.error);
+        }
+    }
 }
 
 /// 依赖自检：Postgres 建表读写、Redis 读写、外部 HTTP 请求、lofty 版本。
