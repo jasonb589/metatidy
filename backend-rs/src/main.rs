@@ -349,7 +349,14 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
     assert_eq!(summary.failed, 0, "不应有失败：{:?}", summary.errors);
 
     // 2) 增量扫描：没变动的文件不该被重新解析
-    let again = scanner::scan(db, &opts, |_, _, _| {}).await?;
+    //
+    //    必须显式关掉 full：full=true 的语义是「忽略 mtime/size，强制重扫全部文件」，
+    //    直接复用上面那套参数就不是在测增量了（第一次跑这条自检就是这么翻车的）。
+    let incremental = ScanOptions {
+        full: false,
+        ..opts.clone()
+    };
+    let again = scanner::scan(db, &incremental, |_, _, _| {}).await?;
     println!("  [ok] 增量扫描  解析 {} / 跳过 {}", again.parsed, again.skipped);
     assert_eq!(again.parsed, 0, "增量扫描不该重新解析任何文件");
     assert_eq!(again.skipped, 3);
