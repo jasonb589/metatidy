@@ -206,3 +206,26 @@ $env:PYTHONIOENCODING="utf-8"; cd "D:\codex\音乐刮削"
    本地已能用 `libsndfile`（Python `soundfile`）生成 OGG 复核，m4a 还没有现成的零依赖样本来源。
 4. **`--selftest-index` 是阶段 2 的唯一端到端证据**：它覆盖「扫描 / 增量 / 路径推断语种 / 标签落盘 /
    整理移动 / 快速扫描」六件事；CI 里它与单元测试并列阻断，任何一条真红都必须先修再往前走。
+
+### 10.1 阶段 2 收尾时抓到的三个真问题（都已在 CI + 本地双向验证）
+
+5. **「拿 full=true 去测增量扫描」是个假测试**：`ScanOptions.full` 的语义是
+   「忽略 mtime/size，强制重扫全部文件」，第一版 `--selftest-index` 第 2 步直接复用了
+   第 1 步的 `opts`（`full: true`），于是「增量扫描」实际测的还是全量——
+   第一次跑 CI 就是这里红了（`解析 3 / 跳过 0`）。修法是显式构造 `full: false` 的副本。
+   教训：断言必须能区分「被测行为」与「兜底行为」，否则红灯只是把 bug 换个位置藏。
+6. **路径必须归一成本机原生分隔符**（`models::path_key`）：Windows 上
+   `D:\库\中文/周杰伦/x.flac` 与 `D:\库\中文\周杰伦\x.flac` 是同一个文件，
+   但索引里存的是字符串、查询也是字符串相等，混用分隔符就会「明明扫过却查不到」。
+   现在扫描器写入索引、`repo::get_track_by_path` / `repo::set_track_path` 都先过 `path_key`。
+   **这条 CI 永远发现不了（Linux 只有 `/`）**，是本地用 Windows + 便携 PostgreSQL
+   跑 `--selftest-index` 才暴露的；已补 `models::tests::path_key_normalises_separators` 钉住。
+7. **本地复现 `--selftest-index` 的办法**（不需要 Docker，也不影响交付构建）：
+   ```
+   rustup toolchain install stable-x86_64-pc-windows-gnu   # 配合解压在临时目录的 MinGW-w64
+   cargo +stable-x86_64-pc-windows-gnu test --release      # 需要 METATIDY_TEST_FLAC/MP3 真实样本
+   # PostgreSQL 便携二进制解压后 initdb + 起在 55432，DATABASE_URL 指过去，再跑 --selftest-index
+   ```
+   注意两个坑：MinGW 的 `ar`/`dlltool` 处理不了含中文的路径（工作区目录名是中文，
+   必须把 `CARGO_TARGET_DIR` 指到纯 ASCII 路径）；Windows 便携 PostgreSQL 的端口
+   在 recovery 阶段就会打开，就绪判断要用 `pg_isready`，不能只测 TCP 连通。
