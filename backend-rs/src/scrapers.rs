@@ -774,8 +774,33 @@ struct HttpFetch {
 impl HttpFetch {
     /// 响应体前 n 个字符（写进诊断说明用，避免把整个响应体塞进状态里）。
     fn head(&self, n: usize) -> String {
-        prefix_chars(&self.body, n)
+        // 响应体也可能反过来带上请求串（少数上游会回显），所以同样过一遍遮密钥
+        redact_secrets(&prefix_chars(&self.body, n))
     }
+}
+
+/// 敏感查询参数（大小写不敏感）：命中就把值遮成 `***`，只留参数名。
+static SECRET_QUERY: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(
+        r#"(?i)([?&](?:api[_-]?key|access[_-]?token|auth[_-]?token|token|key|client[_-]?secret|secret|password)=)[^&\s)"']+"#,
+    )
+    .expect("遮密钥用的正则写错了")
+});
+
+/// URL 里的 `user:pass@` 部分（Redis/Postgres 连接串里很常见）。
+static URL_USERINFO: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?i)([a-z][a-z0-9+.\-]*://)[^/@\s]+@").expect("遮密钥用的正则写错了")
+});
+
+/// 把文本里可能出现的密钥遮成 `***`，参数名与主机名保留。
+///
+/// 为什么必须有它：`reqwest` 的错误 Display 会带完整 URL，而 Last.fm / Genius / Discogs
+/// 的密钥就写在查询串里（`?api_key=…`、`?token=…`）。这些文本会进 `SourceStatus.error`，
+/// 也就是会随 `/api/search` 的响应回到前端，还会被日志收走。
+/// 遮掉之后排障信息依然够用：看得出是哪个参数、哪台主机出了什么问题。
+pub fn redact_secrets(text: &str) -> String {
+    let step1 = SECRET_QUERY.replace_all(text, "${1}***");
+    URL_USERINFO.replace_all(&step1, "${1}***@").into_owned()
 }
 
 /// 失败时把 reqwest 的原始错误文本带出来（TLS 根证书 / DNS / 连接被重置 / URL 不合法
@@ -792,9 +817,14 @@ async fn fetch_json(
         .headers(headers)
         .send()
         .await
-        .map_err(|e| format!("{e}"))?;
+        // reqwest 的错误文本会带完整 URL，而 Last.fm / Genius / Discogs 的密钥就在
+        // 查询串里，所以出去之前先遮掉（见 redact_secrets）。
+        .map_err(|e| redact_secrets(&format!("{e}")))?;
     let status = resp.status().as_u16();
-    let body = resp.text().await.map_err(|e| format!("{e}"))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| redact_secrets(&format!("{e}")))?;
     let data = serde_json::from_str(&body).ok();
     Ok(HttpFetch {
         status,
@@ -4923,5 +4953,69 @@ mod tests {
                 "qq/kugou/kuwo/lastfm/theaudiodb 在这次真实联网探针里全部 0 条候选（见上面的 [live] 行）"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    /// 真实形态：Last.fm / Genius / Discogs 的密钥都在查询串里，Redis 连接串在 userinfo 里。
+    #[test]
+    fn redacts_secrets_in_urls() {
+        let cases = [
+            (
+                "error sending request for url (https://ws.audioscrobbler.com/2.0/?method=track.search&api_key=abcSECRET123&format=json)",
+                "api_key=***",
+            ),
+            (
+                "url (https://api.genius.com/search?q=x&access_token=tok_9f8e7d6c)",
+                "access_token=***",
+            ),
+            (
+                "url (https://api.discogs.com/database/search?q=y&token=dscSECRETVAL&type=release)",
+                "token=***",
+            ),
+            ("连接失败 redis://:p4ssw0rd@127.0.0.1:6379", "://***@"),
+        ];
+        for (raw, expect) in cases {
+            let out = redact_secrets(raw);
+            assert!(out.contains(expect), "「{raw}」遮后是「{out}」，应含「{expect}」");
+            assert!(
+                !out.contains("SECRET") && !out.contains("9f8e7d6c") && !out.contains("p4ssw0rd"),
+                "还有敏感值没遮住：{out}"
+            );
+        }
+    }
+
+    /// 不含密钥的文本必须原样保留（否则排障信息会被误伤）。
+    #[test]
+    fn leaves_normal_text_untouched() {
+        for plain in [
+            "url (https://musicbrainz.org/ws/2/recording?query=dao&fmt=json)",
+            "HTTP 403 / error 10：Invalid API key",
+            "url (http://search.kuwo.cn/r.s?all=dao&rn=30&pn=0)",
+        ] {
+            assert_eq!(redact_secrets(plain), plain, "不该被改动：{plain}");
+        }
+    }
+
+    /// 用**真 reqwest 错误**跑一遍，确认整条链路是遮住的（而不是只测了纯字符串函数）。
+    #[tokio::test]
+    async fn real_reqwest_error_carries_no_key() {
+        let client = reqwest::Client::new();
+        let url = "http://127.0.0.1:1/2.0/?method=track.search&api_key=SENTINELLEAKPROBE&format=json";
+        let raw = client
+            .get(url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect_err("127.0.0.1:1 应该连不上");
+        let redacted = redact_secrets(&format!("{raw}"));
+        println!("reqwest 原始：{raw}\n遮后：{redacted}");
+        assert!(
+            !redacted.contains("SENTINELLEAKPROBE"),
+            "密钥还是漏出去了：{redacted}"
+        );
     }
 }

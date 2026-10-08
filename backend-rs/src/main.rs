@@ -156,7 +156,8 @@ async fn connect_redis(config: &Config) -> Option<redis::aio::ConnectionManager>
             }
         },
         Err(err) => {
-            warn!("Redis URL 无效：{err}");
+            // Redis 连接串里通常带密码，错误文本可能原样回显它，所以先过一遍遮密钥
+            warn!("Redis URL 无效：{}", crate::scrapers::redact_secrets(&err.to_string()));
             None
         }
     }
