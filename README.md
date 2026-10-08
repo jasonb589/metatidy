@@ -15,10 +15,13 @@ Web 界面，单容器部署，适合放在 NAS / 小主机上长期跑。
 同类工具卡在「每次打开列表都去读音频文件」。metatidy 的做法是**索引优先**：
 
 - 扫描只做一次，之后按 `mtime + size` **增量**跳过未变动文件；解析多线程、写入单线程。
-- 浏览、搜索、过滤、排序**全部只查 SQLite**（WAL 模式），音频文件一个都不碰。
+- 浏览、搜索、过滤、排序**全部只查 PostgreSQL**（`pg_trgm` 索引），音频文件一个都不碰。
+- 有个**快速扫描**模式：只从目录结构建索引、完全不打开文件。云盘上「首次读标签约 10 秒/文件」，
+  一万首要 20 多小时；快速扫描下先出列表，等你真要编辑某几首时只读那几首。
 - 列表接口不返回封面二进制；封面走独立接口并在磁盘缓存缩略图。
-- 扫描 / 批量刮削 / 整理移动都是后台任务，进度写库、前端轮询，HTTP 请求永不阻塞。
-- 每个数据源独立线程 + 独立超时，慢源最多拖 20 秒，不影响其它源出结果。
+- 扫描 / 批量刮削 / 整理移动都是后台任务：任务行落 PostgreSQL，实时进度写 Redis，
+  前端轮询，HTTP 请求永不阻塞。
+- 每个数据源独立并发 + 独立超时（整源 20 秒上限），慢源不影响其它源出结果。
 
 两万首规模下列表翻页与搜索基本无感。
 
@@ -33,24 +36,32 @@ Web 界面，单容器部署，适合放在 NAS / 小主机上长期跑。
 > ```
 >
 > 想让别人匿名拉取，去 GitHub → Packages → metatidy → Package settings 把可见性改成 Public。
-> 但请注意：**Python 镜像里一定包含源码**（可反编译），公开镜像等于公开源码。
+> 后端是 Rust 的编译产物，**镜像里只有二进制、没有源码**，所以「闭源」和「镜像可匿名拉取」
+> 这两件事第一次可以同时成立（Python 版做不到这点）。
 
 ### docker compose（推荐）
 
 ```bash
 git clone https://github.com/jasonb589/metatidy.git   # 或者自己写一份 compose
 cd metatidy
-# 编辑 docker-compose.yml，把 ./music 换成你的真实音乐目录
+# 编辑 docker-compose.yml：把 ./music 换成你的真实音乐目录；生产环境记得改掉 postgres 默认密码
 docker compose up -d
 ```
 
-### docker run
+compose 里已经带上两个依赖服务，不用你另外装：
+
+- `postgres`：索引本体（曲目、任务、整理计划、设置、别名库），数据落在宿主的 `./pgdata`。
+- `redis`：后台任务的实时进度（键 `metatidy:job:{id}`，TTL 7 天），数据落在 `./redisdata`。
+
+### docker run（单容器，Postgres 与 Redis 自己准备）
 
 ```bash
 docker run -d --name metatidy \
   -p 8080:8080 \
   -v /你的/音乐目录:/music \
-  -v /你的/数据目录:/data \
+  -v /你的/缓存目录:/data \
+  -e DATABASE_URL="postgres://user:pass@你的PG:5432/metatidy" \
+  -e REDIS_URL="redis://你的Redis:6379" \
   -e METATIDY_SCAN_WORKERS=4 \
   -e TZ=Asia/Shanghai \
   --restart unless-stopped \
@@ -60,8 +71,9 @@ docker run -d --name metatidy \
 打开 `http://<主机IP>:8080/`。
 
 - `/music`：要扫描和整理的库，**需要读写权限**（写标签、移动文件）。
-- `/data`：索引库、缩略图缓存、任务记录。删掉它就等于清空索引（不会碰音乐文件）。
-- 首次进入界面点「扫描库」。一万首以内通常几分钟；之后每次都是增量。
+- `/data`：封面与缩略图缓存（索引在 Postgres 里，不在这）。
+- 首次进界面点「扫描库」。云盘用户建议先用界面上的**快速扫描**：只从目录结构建索引，
+  一万首约 24 秒，之后再按需读某几首的真实标签。
 
 ---
 
@@ -162,59 +174,76 @@ docker run -d --name metatidy \
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `DATABASE_URL` | 无（**必须给**） | PostgreSQL 连接串，如 `postgres://metatidy:metatidy@postgres:5432/metatidy` |
+| `REDIS_URL` | 无（可选） | Redis 连接串；不配也能跑，只是任务进度只落数据库、不进 Redis |
 | `METATIDY_MUSIC_DIR` | `/music` | 音乐库根目录（扫描范围） |
-| `METATIDY_DATA_DIR` | `/data` | 索引与缓存目录 |
 | `METATIDY_LIBRARY_ROOT` | 同 `METATIDY_MUSIC_DIR` | 整理移动的库根（可在界面里改） |
+| `METATIDY_DATA_DIR` | `/data` | 封面/缩略图缓存目录（索引在 Postgres，不在这） |
+| `METATIDY_STATIC_DIR` | 自动探测 | 前端静态文件目录（镜像里已设为 `/app/static`） |
 | `METATIDY_HOST` / `METATIDY_PORT` | `0.0.0.0` / `8080` | 监听地址与端口 |
 | `METATIDY_SCAN_WORKERS` | `4` | 扫描并发（机械硬盘用 2，NVMe 可 8） |
-| `METATIDY_LOG_LEVEL` | `info` | 日志级别 |
+| `RUST_LOG` | `info` | 日志级别（`METATIDY_LOG_LEVEL` 也兼容） |
 
-用户可改的设置（目录模板、冲突策略、默认数据源、别名库等）存在 `/data/metatidy.db` 里，重启不丢。
+用户可改的设置（目录模板、冲突策略、默认数据源）与别名库存在 PostgreSQL 里，重启不丢。
 
 ---
 
 ## 本地开发
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows；Linux/macOS 用 source .venv/bin/activate
-pip install -r requirements.txt pytest httpx
-
-# 指向一个小目录试跑，别一上来就指整个库
-export METATIDY_MUSIC_DIR=/path/to/test-library   # Windows: $env:METATIDY_MUSIC_DIR="..."
-export METATIDY_DATA_DIR=./data
-python -m app.cli --port 8080
-```
-
-跑测试：
+Rust 后端（需要 Rust 1.80+；依赖服务用容器起最省事）：
 
 ```bash
-pytest -q                        # 全部（含真实联网的数据源用例）
-METATIDY_OFFLINE=1 pytest -q     # 只跑离线用例，CI 的阻断门禁用这个
+docker compose up -d postgres redis      # 只起依赖，不跑应用
+export DATABASE_URL="postgres://metatidy:metatidy@127.0.0.1:5432/metatidy"
+export REDIS_URL="redis://127.0.0.1:6379"
+export METATIDY_MUSIC_DIR=/path/to/test-library   # 指向小目录试跑，别一上来就指整库
+cargo run --manifest-path backend-rs/Cargo.toml --release
 ```
 
-测试不需要任何真实音乐文件：`tests/audiofix.py` 会现场合成最小的合法 FLAC 与 MP3
-（仅 STREAMINFO 的 FLAC、静音 MPEG 帧的 MP3），标签读写、扫描、整理移动全部可离线验证。
+自检与测试（都不需要真实音乐文件，真实音频样本由 ffmpeg 现场生成）：
+
+```bash
+cd backend-rs
+cargo test --release                       # 单元测试：打分表/模板/移动安全底线/标签读写…
+cargo run --release -- --selftest          # 真 Postgres + 真 Redis + 真实 HTTP + lofty
+cargo run --release -- --selftest-index    # 扫描/增量/语言推断/标签落盘/整理移动/快速扫描
+cargo run --release -- --selftest-scrape   # 真实联网：4 个源 + 歌词 + 封面
+```
+
+端到端验收（31 项，与 Python 版用的是**同一套检查**；脚本会自己起服务）：
+
+```bash
+# 验收 Rust 二进制
+E2E_SERVER_CMD="./backend-rs/target/release/metatidy-server" METATIDY_PORT=8097 \
+  python tests/e2e_acceptance.py "$PWD" /tmp/metatidy-e2e
+
+# 不设 E2E_SERVER_CMD 则用 Python 版（python -m uvicorn app.main:app）
+python tests/e2e_acceptance.py "$PWD" /tmp/metatidy-e2e
+```
 
 ---
 
 ## 项目结构
 
 ```
-app/
-  main.py          HTTP 接口（三个功能的路由都在这里）
-  db.py            SQLite 索引层（WAL + 分页 + 任务 + 整理计划）
-  index.py         增量扫描器（mtime+size 跳过未变动文件）
-  tagio.py         标签读写（mp3/flac/m4a/ogg-opus，含 preview 差异计算）
-  scrapebridge.py  多源搜索编排（并发、超时、打分、结果归一化）
-  templates.py     目录/文件名模板引擎
-  mover.py         整理移动执行器（预览 + 安全搬运）
-  language.py      从路径推断语言
-  normalize.py     多歌手归一化（& 规则）
-  jobs.py          后台任务与进度
-  static/          无构建前端（原生 HTML/CSS/JS，完全离线可用）
-metatidy_core/     从既有产线项目迁移的 13 个数据源实现（已剥离 GUI 依赖）
-tests/             79 个用例
+backend-rs/           Rust 后端（现役，镜像就是它编译出来的）
+  src/main.rs         启动、环境变量、三个自检入口
+  src/api/            HTTP 路由（21 条）与请求/响应形状
+  src/jobs.rs         后台任务：任务落 Postgres，实时进度写 Redis
+  src/repo.rs         PostgreSQL 访问层（运行时 query，不用编译期宏）
+  src/scanner.rs      增量扫描 + 快速（仅路径）扫描
+  src/tagio.rs        标签读写（lofty：mp3/flac/m4a/ogg/opus + 预览差异）
+  src/scrapers.rs     13 个数据源 + 打分 + 歌词 + 封面
+  src/mover.rs        整理移动（预览 + 安全底线，失败绝不删源）
+  src/templates.rs    目录/文件名模板引擎
+  src/language.rs     从路径推断语言
+  src/normalize.rs    多歌手归一化（& 规则）
+  migrations/         Postgres 建表与索引
+  Dockerfile          镜像定义（构建上下文是仓库根，因为要带 app/static）
+app/                  Python 版本：**参考实现**，接口契约以它为准（镜像已不再用它）
+  static/             无构建前端（原生 HTML/CSS/JS，完全离线可用；两个版本共用）
+metatidy_core/        Python 版的数据源实现（从既有产线项目迁移，已剥离 GUI 依赖）
+tests/                Python 单元测试 + e2e_acceptance.py（31 项端到端验收）
 ```
 
 前端是**零构建**的原生实现：没有 npm、没有 CDN、没有打包步骤，镜像断网也能正常用。
@@ -223,11 +252,14 @@ tests/             79 个用例
 
 ## 构建与发布
 
-推到 `main` 或打 `v*` 标签，GitHub Actions 会：先跑离线测试（阻断门禁）→ 再构建
-`linux/amd64` + `linux/arm64` 双架构镜像 → 推送到 `ghcr.io/jasonb589/metatidy`。
+推到 `main` 或打 `v*` 标签，GitHub Actions 会依次：单元测试 + 三个自检 + **31 项端到端验收**
+（打真实二进制，带真 Postgres / Redis / 真实数据源）→ 构建 `linux/amd64` + `linux/arm64`
+双架构镜像 → 推送到 `ghcr.io/jasonb589/metatidy`。
+
+镜像用 `backend-rs/Dockerfile` 构建：里面**只有编译后的二进制**与无构建前端，没有源码；
+依赖版本由 `backend-rs/Cargo.lock` 固定，构建可复现。
 
 标签规则：`latest`（默认分支）、`sha-xxxxx`、以及打 tag 时的语义化版本号。
-
 镜像可见性跟着仓库走（私有仓库 → 私有包），要公开需到 Package settings 手动改。
 
 想同时发 Docker Hub，在 `.github/workflows/ci.yml` 里加一次 `docker/login-action` +
@@ -238,8 +270,14 @@ tests/             79 个用例
 ## 已知限制
 
 - 支持写标签的格式：**mp3 / flac / m4a / ogg(oga/opus)**。wav/aiff/wma/ape 不写。
+  mp3 与 flac 的写入路径有真实样本的自动化测试；m4a/ogg 目前没有样本，属**未验证**。
 - 部分细节字段（碟号 `TPOS`、版权 `TCOP`）某些源拿不到，会留空而不是瞎填。
-- 网易云 / QQ音乐有风控，高峰期可能返回空——不会影响其它源，界面上会显示每个源的状态。
+- 数据源现状（都是**实测**结论，不是推测）：
+  - 直接可用：MusicBrainz、iTunes（4 区）、网易云、QQ音乐、酷狗、酷我、Deezer、TheAudioDB。
+  - Last.fm：内置 key 已被上游吊销（HTTP 403），要用请自备 `LASTFM_API_KEY`。
+  - TheAudioDB：上游没有中文曲库数据，中文歌只能靠其它源。
+  - 需自备 key：Spotify / Genius / Discogs；YouTube Music 未实现（Python 版依赖的可选库本来也拿不到结果）。
+  - 酷我的封面 URL 在上游普遍 404，它的候选可能没有封面。
 - 语言兜底只认「已知语言目录名」，自造目录名不会被当成语言（宁可不猜）。
 - 服务本身没有账号体系，**不要直接暴露到公网**；放在内网或前面套一层带认证的反代。
 
