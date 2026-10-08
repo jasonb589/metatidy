@@ -153,8 +153,14 @@ pub async fn get_track(pool: &PgPool, id: i64) -> anyhow::Result<Option<Track>> 
 }
 
 pub async fn get_track_by_path(pool: &PgPool, path: &str) -> anyhow::Result<Option<Track>> {
+    // 先归一成本机原生写法再查：Windows 上混用 '/' 与 '\' 的同一个文件
+    // 在字符串比较里并不相等（见 models::path_key）。
+    let key = crate::models::path_key(std::path::Path::new(path));
     let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE path = $1");
-    let row = sqlx::query_as::<_, Track>(&sql).bind(path).fetch_optional(pool).await?;
+    let row = sqlx::query_as::<_, Track>(&sql)
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -204,7 +210,7 @@ pub async fn set_track_path(pool: &PgPool, id: i64, new_path: &str) -> anyhow::R
         .unwrap_or_default()
         .to_lowercase();
     sqlx::query("UPDATE tracks SET path = $1, dir = $2, filename = $3, ext = $4 WHERE id = $5")
-        .bind(new_path)
+        .bind(crate::models::path_key(p))
         .bind(dir)
         .bind(filename)
         .bind(ext)

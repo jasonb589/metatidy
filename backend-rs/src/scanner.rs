@@ -187,7 +187,7 @@ pub async fn scan(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let size = meta.len() as i64;
-        let key = path.to_string_lossy().to_string();
+        let key = crate::models::path_key(path);
         let unchanged = known
             .get(&key)
             .map(|(prev_mtime, prev_size)| (prev_mtime - mtime).abs() < 1e-6 && *prev_size == size)
@@ -266,7 +266,8 @@ pub async fn scan(
 
     let mut removed = 0u64;
     if opts.prune {
-        let on_disk: HashSet<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let on_disk: HashSet<String> =
+            files.iter().map(|p| crate::models::path_key(p)).collect();
         let indexed = repo::all_paths(pool).await?;
         let gone: Vec<String> = indexed.into_iter().filter(|p| !on_disk.contains(p)).collect();
         removed = repo::delete_paths(pool, &gone).await?;
@@ -316,7 +317,7 @@ fn build_upsert(
         .unwrap_or_default();
 
     let mut row = TrackUpsert {
-        path: path.to_string_lossy().to_string(),
+        path: crate::models::path_key(path),
         dir,
         filename: filename.clone(),
         ext,

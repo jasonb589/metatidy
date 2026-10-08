@@ -10,6 +10,19 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+
+/// 把路径渲染成「索引里存的那种写法」：统一用本机原生分隔符。
+///
+/// 为什么需要它：Windows 上 `/` 与 `\` 都合法，`D:\库\中文/周杰伦/x.flac` 与
+/// `D:\库\中文\周杰伦\x.flac` 指的是同一个文件，但按字符串查索引会查不到
+/// （Linux 上两者本来就只有 `/`，所以这个差异只在 Windows 暴露）。
+/// 凡是「路径 → 字符串」要落库或参与比较的地方都走这个函数。
+pub fn path_key(p: &Path) -> String {
+    p.as_os_str()
+        .to_string_lossy()
+        .replace('/', std::path::MAIN_SEPARATOR_STR)
+}
 
 /// 一条曲目。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, sqlx::FromRow)]
@@ -164,3 +177,23 @@ pub struct FieldChange {
 
 /// 预览结果：字段 -> (旧值, 新值)。
 pub type FieldDiff = HashMap<String, FieldChange>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 索引里的路径必须只用本机原生分隔符。
+    ///
+    /// 为什么值得一条测试：Windows 上 `/` 与 `\` 混用的路径指向同一个文件，
+    /// 但按字符串查索引会查不到（`--selftest-index` 就是这么翻的车）；
+    /// Linux 上只有 `/`，这个差异永远不会在 CI 里暴露。
+    #[test]
+    fn path_key_normalises_separators() {
+        let native = Path::new("a").join("b").join("c.flac");
+        let native_str = native.to_string_lossy().to_string();
+        assert_eq!(path_key(Path::new("a/b/c.flac")), native_str);
+        assert_eq!(path_key(&native), native_str);
+        // 已经是原生写法的路径不该被改动
+        assert_eq!(path_key(Path::new(&native_str)), native_str);
+    }
+}
