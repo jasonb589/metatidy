@@ -98,6 +98,9 @@ jobs:
       - name: 依赖自检（真 Postgres + 真 Redis + 真实 HTTP + lofty）
         run: cargo run --release -- --selftest
 
+      - name: 索引层端到端自检（扫描 / 增量 / 标签编辑 / 整理移动 / 快速扫描）
+        run: cargo run --release -- --selftest-index
+
       - name: 冒烟：起服务并断言状态接口
         run: |
           ./target/release/metatidy-server &

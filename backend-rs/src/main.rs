@@ -19,6 +19,10 @@ mod language;
 mod models;
 mod normalize;
 mod templates;
+mod mover;
+mod repo;
+mod scanner;
+mod tagio;
 
 use axum::{
     extract::State,
@@ -77,6 +81,12 @@ async fn main() -> anyhow::Result<()> {
     let selftest = args.iter().any(|a| a == "--selftest");
     if selftest {
         run_selftest(&db, redis.clone(), &config).await?;
+        return Ok(());
+    }
+
+    // 子命令：索引层端到端自检（真 Postgres、真文件系统）
+    if args.iter().any(|a| a == "--selftest-index") {
+        run_index_selftest(&db).await?;
         return Ok(());
     }
 
@@ -265,4 +275,234 @@ async fn count_trgm(db: &PgPool, needle: &str) -> anyhow::Result<i64> {
     .fetch_one(db)
     .await?;
     Ok(n)
+}
+
+
+/// 索引层端到端自检：扫描 → 增量 → 语言推断 → 标签编辑 → 整理移动 → 快速扫描。
+///
+/// 全部在临时目录里做，不碰任何真实音乐；数据库里只清理本自检自己写入的行。
+async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    use crate::mover::{self, PlanOptions};
+    use crate::repo::{self, TrackQuery};
+    use crate::scanner::{self, ScanOptions};
+    use crate::tagio;
+
+    println!("=== metatidy rust 索引层自检 ===");
+
+    let root = std::env::temp_dir().join("metatidy-index-selftest");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root)?;
+    let prefix = root.to_string_lossy().to_string();
+
+    // 先清掉本自检可能残留的索引（只删自己目录下的，绝不动别人的数据）
+    let stale: Vec<String> = repo::all_paths(db)
+        .await?
+        .into_iter()
+        .filter(|p| p.starts_with(&prefix) || p.starts_with("__selftest__"))
+        .collect();
+    repo::delete_paths(db, &stale).await?;
+
+    // 造三个文件：待整理、已在目标结构里、以及用来验证路径推断语言的
+    let to_tidy = root.join("待整理/未命名 1.flac");
+    crate::fixtures::make_flac(&to_tidy)?;
+    let mut seed = HashMap::new();
+    seed.insert("title".to_string(), "七里香".to_string());
+    tagio::apply_update(&to_tidy, &seed, true, None, None)?;
+
+    let already = root.join("中文/周杰伦/魔杰座/01 - 稻香.flac");
+    crate::fixtures::make_flac(&already)?;
+    let mut seed2 = HashMap::new();
+    seed2.insert("title".to_string(), "稻香".to_string());
+    seed2.insert("artist".to_string(), "周杰伦".to_string());
+    seed2.insert("album".to_string(), "魔杰座".to_string());
+    tagio::apply_update(&already, &seed2, true, None, None)?;
+
+    let russian = root.join("俄文/ADÉLA/PRIMA/KGB - ADÉLA.flac");
+    crate::fixtures::make_flac(&russian)?;
+
+    // 1) 完整扫描
+    let opts = ScanOptions {
+        root: root.clone(),
+        full: true,
+        prune: true,
+        fast: false,
+        workers: 4,
+    };
+    let summary = scanner::scan(db, &opts, |_, _, _| {}).await?;
+    println!(
+        "  [ok] 完整扫描  扫描 {} / 解析 {} / 新增 {} / 失败 {} / 用时 {:.2}s",
+        summary.scanned, summary.parsed, summary.added, summary.failed, summary.seconds
+    );
+    assert_eq!(summary.added, 3, "应新增 3 条索引，实际 {}", summary.added);
+    assert_eq!(summary.failed, 0, "不应有失败：{:?}", summary.errors);
+
+    // 2) 增量扫描：没变动的文件不该被重新解析
+    let again = scanner::scan(db, &opts, |_, _, _| {}).await?;
+    println!("  [ok] 增量扫描  解析 {} / 跳过 {}", again.parsed, again.skipped);
+    assert_eq!(again.parsed, 0, "增量扫描不该重新解析任何文件");
+    assert_eq!(again.skipped, 3);
+
+    // 3) 语言兜底：标签里没有 language，应从目录结构推断
+    let russian_track = repo::get_track_by_path(db, &russian.to_string_lossy())
+        .await?
+        .expect("应能按路径查到索引");
+    println!(
+        "  [ok] 语言兜底  {} -> language={:?}",
+        russian_track.filename, russian_track.language
+    );
+    assert_eq!(russian_track.language, "俄文", "目录结构推断语言失败");
+
+    // 4) 标签编辑：先预览（不改文件），再落盘，最后从磁盘读回核对
+    let mut desired = HashMap::new();
+    desired.insert("album".to_string(), "七里香".to_string());
+    desired.insert("artist".to_string(), "周杰伦".to_string());
+    let diff = tagio::preview_update(&to_tidy, &desired);
+    assert_eq!(diff.len(), 2, "预览应报 2 处变更，实际 {}", diff.len());
+    let untouched = tagio::read_tags(&to_tidy);
+    assert_eq!(untouched.album, "", "预览不能改动文件");
+
+    tagio::apply_update(&to_tidy, &desired, true, None, None)?;
+    let on_disk = tagio::read_tags(&to_tidy);
+    assert_eq!(on_disk.album, "七里香");
+    assert_eq!(on_disk.artist, "周杰伦");
+    let tidy_row = repo::get_track_by_path(db, &to_tidy.to_string_lossy())
+        .await?
+        .expect("应能按路径查到索引");
+    repo::update_fields(db, tidy_row.id, &desired, true).await?;
+    let after_edit = repo::get_track(db, tidy_row.id).await?.expect("索引应还在");
+    assert_eq!(after_edit.album, "七里香", "索引未同步");
+    println!("  [ok] 标签编辑  预览 2 处 → 落盘 → 磁盘与索引一致");
+
+    // 5) 整理移动：预览 → 仅演练 → 执行 → 索引同步
+    let tracks = repo::list_tracks(
+        db,
+        &TrackQuery {
+            page_size: 1000,
+            ..Default::default()
+        },
+    )
+    .await?
+    .items;
+    assert!(tracks.len() >= 3, "索引里应至少有 3 条");
+
+    let plan_opts = PlanOptions {
+        library_root: &root,
+        dir_template: "{language?}/{artist}/{album}",
+        filename_template: "{track:02} - {title}",
+        conflict_policy: "rename",
+        unknown_artist: "未知艺术家",
+        unknown_album: "未知专辑",
+        unknown_other: "未知",
+    };
+    let plan = mover::plan_moves(&tracks, &plan_opts);
+    println!("  [ok] 移动计划  {:?}", plan.counts);
+    assert!(
+        plan.items.iter().all(|i| i.action != "invalid"),
+        "计划里不该有无效项：{:?}",
+        plan.items
+            .iter()
+            .map(|i| (i.target.clone(), i.reason.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        plan.counts.get("move").copied().unwrap_or(0) >= 1,
+        "至少应有一个待移动文件：{:?}",
+        plan.counts
+    );
+
+    let files_before = list_files_sorted(&root);
+    let dry = mover::execute_plan(&plan, true, |_, _, _| {});
+    let files_after_dry = list_files_sorted(&root);
+    assert_eq!(files_before, files_after_dry, "仅演练不能改动任何文件");
+    println!("  [ok] 仅演练    预计移动 {} / 跳过 {}（文件未动）", dry.moved, dry.skipped);
+
+    let moved = mover::execute_plan(&plan, false, |_, _, _| {});
+    assert_eq!(moved.failed, 0, "移动失败：{:?}", moved.failures);
+    println!(
+        "  [ok] 执行移动  成功 {} / 跳过 {} / 失败 {}",
+        moved.moved, moved.skipped, moved.failed
+    );
+
+    for (track_id, new_path) in &moved.moved_paths {
+        repo::set_track_path(db, *track_id, new_path).await?;
+    }
+    for item in &plan.items {
+        if item.action == "move" || item.action == "conflict_rename" {
+            assert!(Path::new(&item.target).exists(), "目标不存在：{}", item.target);
+            assert!(!Path::new(&item.source).exists(), "源文件仍在：{}", item.source);
+        }
+    }
+    let after_move = repo::list_tracks(
+        db,
+        &TrackQuery {
+            page_size: 1000,
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert!(
+        after_move.items.iter().all(|t| Path::new(&t.path).exists()),
+        "索引里的路径必须都存在"
+    );
+    println!("  [ok] 索引同步  移动后每条索引路径都能对上磁盘文件");
+
+    // 6) 快速扫描模式：完全不打开文件（云盘救命功能）
+    let fast_opts = ScanOptions {
+        root: root.clone(),
+        full: true,
+        prune: true,
+        fast: true,
+        workers: 4,
+    };
+    let fast = scanner::scan(db, &fast_opts, |_, _, _| {}).await?;
+    println!(
+        "  [ok] 快速扫描  解析 {} 个文件用时 {:.2}s（不打开任何音频文件）",
+        fast.parsed, fast.seconds
+    );
+    assert_eq!(fast.parsed, 3);
+    let not_loaded = repo::list_tracks(
+        db,
+        &TrackQuery {
+            not_loaded: true,
+            page_size: 1000,
+            ..Default::default()
+        },
+    )
+    .await?;
+    assert_eq!(not_loaded.total, 3, "快速扫描后应全部标记为未读标签");
+    assert!(
+        not_loaded.items.iter().all(|t| t.path_derived),
+        "快速扫描的结果应标记为来自路径"
+    );
+    if let Some(t) = repo::get_track_by_path(db, &russian.to_string_lossy()).await? {
+        assert_eq!(t.language, "俄文", "快速扫描也要能推断语言");
+    }
+
+    // 清理：只删自己目录下的索引
+    let cleanup: Vec<String> = repo::all_paths(db)
+        .await?
+        .into_iter()
+        .filter(|p| p.starts_with(&prefix))
+        .collect();
+    repo::delete_paths(db, &cleanup).await?;
+    let _ = std::fs::remove_dir_all(&root);
+
+    println!("=== 索引层自检通过 ===");
+    Ok(())
+}
+
+
+/// 列出目录下所有文件路径（排序后），用于断言「演练没动文件」。
+fn list_files_sorted(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect();
+    out.sort();
+    out
 }

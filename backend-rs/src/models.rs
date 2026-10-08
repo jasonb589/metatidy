@@ -147,6 +147,12 @@ pub struct ScanSummary {
     pub removed: usize,
     pub fast_mode: bool,
     pub seconds: f64,
+    /// 真正花在解析标签上的累计秒数（不含等待与写库）
+    pub parse_seconds: f64,
+    /// 解析/入库失败的个数
+    pub failed: usize,
+    /// 失败原因（最多保留 20 条，避免响应体过大）
+    pub errors: Vec<String>,
 }
 
 /// 标签更新的一处差异。
