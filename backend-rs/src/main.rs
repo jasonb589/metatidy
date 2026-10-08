@@ -306,22 +306,31 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
     repo::delete_paths(db, &stale).await?;
 
     // 造三个文件：待整理、已在目标结构里、以及用来验证路径推断语言的
-    let to_tidy = root.join("待整理/未命名 1.flac");
-    crate::fixtures::make_flac(&to_tidy)?;
+    // 写入路径必须用真实编码器产出的样本：手拼容器扛不住 lofty 的写入路径
+    let Some(template_flac) = crate::fixtures::real_fixture("METATIDY_TEST_FLAC", "selftest.flac") else {
+        anyhow::bail!("索引层自检需要真实 FLAC 样本：请设置 METATIDY_TEST_FLAC（CI 里由 ffmpeg 生成）");
+    };
+    let place = |rel: &str| -> anyhow::Result<std::path::PathBuf> {
+        let dst = root.join(rel);
+        if let Some(dir) = dst.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::copy(&template_flac, &dst)?;
+        Ok(dst)
+    };
+    let to_tidy = place("待整理/未命名 1.flac")?;
     let mut seed = HashMap::new();
     seed.insert("title".to_string(), "七里香".to_string());
     tagio::apply_update(&to_tidy, &seed, true, None, None)?;
 
-    let already = root.join("中文/周杰伦/魔杰座/01 - 稻香.flac");
-    crate::fixtures::make_flac(&already)?;
+    let already = place("中文/周杰伦/魔杰座/01 - 稻香.flac")?;
     let mut seed2 = HashMap::new();
     seed2.insert("title".to_string(), "稻香".to_string());
     seed2.insert("artist".to_string(), "周杰伦".to_string());
     seed2.insert("album".to_string(), "魔杰座".to_string());
     tagio::apply_update(&already, &seed2, true, None, None)?;
 
-    let russian = root.join("俄文/ADÉLA/PRIMA/KGB - ADÉLA.flac");
-    crate::fixtures::make_flac(&russian)?;
+    let russian = place("俄文/ADÉLA/PRIMA/KGB - ADÉLA.flac")?;
 
     // 1) 完整扫描
     let opts = ScanOptions {
@@ -477,9 +486,11 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
         not_loaded.items.iter().all(|t| t.path_derived),
         "快速扫描的结果应标记为来自路径"
     );
-    if let Some(t) = repo::get_track_by_path(db, &russian.to_string_lossy()).await? {
-        assert_eq!(t.language, "俄文", "快速扫描也要能推断语言");
-    }
+    assert!(
+        not_loaded.items.iter().any(|t| t.language == "俄文"),
+        "快速扫描也要能从目录推断语言：{:?}",
+        not_loaded.items.iter().map(|t| (t.path.clone(), t.language.clone())).collect::<Vec<_>>()
+    );
 
     // 清理：只删自己目录下的索引
     let cleanup: Vec<String> = repo::all_paths(db)

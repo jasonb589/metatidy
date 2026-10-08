@@ -89,6 +89,17 @@ jobs:
       - name: 准备音乐目录
         run: mkdir -p /tmp/metatidy-music
 
+      - name: 生成真实音频样本（ffmpeg，供标签读写测试用）
+        run: |
+          mkdir -p /tmp/metatidy-fixtures
+          ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=44100:cl=mono -t 2 \
+            -map_metadata -1 -c:a flac -y /tmp/metatidy-fixtures/sample.flac
+          ffmpeg -hide_banner -loglevel error -f lavfi -i anullsrc=r=44100:cl=mono -t 2 \
+            -map_metadata -1 -c:a libmp3lame -q:a 9 -y /tmp/metatidy-fixtures/sample.mp3
+          ls -l /tmp/metatidy-fixtures
+          echo "METATIDY_TEST_FLAC=/tmp/metatidy-fixtures/sample.flac" >> "$GITHUB_ENV"
+          echo "METATIDY_TEST_MP3=/tmp/metatidy-fixtures/sample.mp3" >> "$GITHUB_ENV"
+
       - name: 编译
         run: cargo build --release
 

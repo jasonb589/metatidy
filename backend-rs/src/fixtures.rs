@@ -181,3 +181,30 @@ mod tests {
         fs::remove_file(&path).ok();
     }
 }
+
+
+/// 取一个「真实编码器产出的」样本：从 `env_key` 指向的路径复制一份到临时目录。
+///
+/// 为什么需要真实样本：手拼的容器（尤其是 FLAC）虽然能被解析，
+/// 但写标签时不一定扛得住 lofty 的写入路径——真实编码器产出的文件才是可信基准。
+/// CI 里由 ffmpeg 现场生成（见 .github/workflows/ci.yml），本地没有就跳过相关测试。
+///
+/// 每次都复制成唯一文件名，避免并行测试互相踩。
+pub fn real_fixture(env_key: &str, dst_name: &str) -> Option<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let source = std::env::var(env_key)
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())?;
+
+    let dir = std::env::temp_dir().join("metatidy-real-fixtures");
+    fs::create_dir_all(&dir).ok()?;
+
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dst = dir.join(format!("{}-{seq}-{dst_name}", std::process::id()));
+    let _ = fs::remove_file(&dst);
+    fs::copy(&source, &dst).ok()?;
+    Some(dst)
+}
