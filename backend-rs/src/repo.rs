@@ -246,7 +246,17 @@ pub struct TrackQuery {
     pub missing_lyrics: bool,
     pub no_artist: bool,
     pub no_album: bool,
+    /// Rust 侧新增：只取「还没读过标签」的索引（快速扫描的产物）。
+    /// Python 版没有这个查询参数，前端也没有对应控件，纯属增量能力。
     pub not_loaded: bool,
+    /// 只取这些 id（空 = 不限制）。用于移动预览的 `ids` 分支与批量预览。
+    pub ids: Vec<i64>,
+}
+
+/// 绑定参数：文本与数字 id 混排时必须按位置区分类型。
+enum Param {
+    Text(String),
+    Ids(Vec<i64>),
 }
 
 /// 分页结果。
@@ -262,14 +272,21 @@ pub struct PagedTracks {
 /// 分页列出曲目。**只查索引，绝不读音频文件**——这是「歌一多就卡」的解法。
 pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<PagedTracks> {
     let mut clauses: Vec<String> = Vec::new();
-    let mut values: Vec<String> = Vec::new();
+    let mut params: Vec<Param> = Vec::new();
+    // 刚 push 进去的那个参数在 SQL 里的下标：Postgres 从 1 开始，push 之后
+    // `params.len()` 正好就是它。**不能写成 len()+1** —— 调用点全都在 push 之后，
+    // 那样第一个参数会被写成 $2，于是「只绑了 1 个参数却引用 $2」直接 500
+    // （本地端到端第一次跑就是卡在这里：preview / move-preview / 任意带过滤的列表全挂）。
+    let placeholder = |params: &[Param]| params.len();
 
     if !query.q.trim().is_empty() {
-        values.push(format!("%{}%", query.q.trim()));
-        let idx = values.len();
+        params.push(Param::Text(format!("%{}%", query.q.trim())));
+        let idx = placeholder(&params);
+        // 8 列子串匹配（Python 版同样是这 8 列）
         clauses.push(format!(
             "(title ILIKE ${idx} OR artist ILIKE ${idx} OR album ILIKE ${idx} \
-             OR albumartist ILIKE ${idx} OR filename ILIKE ${idx} OR path ILIKE ${idx})"
+             OR albumartist ILIKE ${idx} OR filename ILIKE ${idx} OR path ILIKE ${idx} \
+             OR genre ILIKE ${idx} OR year ILIKE ${idx})"
         ));
     }
     for (column, value) in [
@@ -281,8 +298,8 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         ("album", &query.album),
     ] {
         if !value.trim().is_empty() {
-            values.push(value.trim().to_string());
-            clauses.push(format!("{column} = ${}", values.len()));
+            params.push(Param::Text(value.trim().to_string()));
+            clauses.push(format!("{column} = ${}", placeholder(&params)));
         }
     }
     if query.missing_cover {
@@ -300,6 +317,10 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     if query.not_loaded {
         clauses.push("tags_loaded = false".to_string());
     }
+    if !query.ids.is_empty() {
+        params.push(Param::Ids(query.ids.clone()));
+        clauses.push(format!("id = ANY(${})", placeholder(&params)));
+    }
 
     let where_sql = if clauses.is_empty() {
         String::new()
@@ -308,12 +329,16 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     };
 
     let sort_expr = match query.sort.as_str() {
+        // 8 个白名单值，未知值静默回落 artist（与 Python 一致）。
+        // 注意：Python 的 indexed/edited 因白名单值自带 DESC、SQL 又拼一次方向而实测 500
+        // （契约 K.13）——这里**有意修好**：SQL 只拼一次方向，方向完全由 `order` 决定。
         "title" => "title",
         "album" => "album",
         "year" => "year",
         "path" => "path",
         "track" => "track",
         "indexed" => "indexed_at",
+        "edited" => "edited_at",
         _ => "artist",
     };
     let direction = if query.order_desc { "DESC" } else { "ASC" };
@@ -323,19 +348,25 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
 
     let count_sql = format!("SELECT count(*) FROM tracks{where_sql}");
     let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-    for v in &values {
-        count_query = count_query.bind(v);
+    for p in &params {
+        count_query = match p {
+            Param::Text(v) => count_query.bind(v),
+            Param::Ids(v) => count_query.bind(v),
+        };
     }
     let total = count_query.fetch_one(pool).await?;
 
     let list_sql = format!(
         "SELECT {TRACK_COLUMNS} FROM tracks{where_sql} ORDER BY {sort_expr} {direction}, id ASC LIMIT ${} OFFSET ${}",
-        values.len() + 1,
-        values.len() + 2
+        params.len() + 1,
+        params.len() + 2
     );
     let mut list_query = sqlx::query_as::<_, Track>(&list_sql);
-    for v in &values {
-        list_query = list_query.bind(v);
+    for p in &params {
+        list_query = match p {
+            Param::Text(v) => list_query.bind(v),
+            Param::Ids(v) => list_query.bind(v),
+        };
     }
     let items = list_query
         .bind(page_size)
@@ -364,6 +395,10 @@ pub struct LibraryStats {
     pub no_album: i64,
     pub not_loaded: i64,
     pub bytes: i64,
+    /// 非空 language 去重（排序），前端用来填下拉框
+    pub languages: Vec<String>,
+    /// 非空 albumtype 去重（排序）
+    pub albumtypes: Vec<String>,
 }
 
 pub async fn library_stats(pool: &PgPool) -> anyhow::Result<LibraryStats> {
@@ -382,6 +417,16 @@ pub async fn library_stats(pool: &PgPool) -> anyhow::Result<LibraryStats> {
     )
     .fetch_one(pool)
     .await?;
+    let languages: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT language FROM tracks WHERE language <> '' ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+    let albumtypes: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT albumtype FROM tracks WHERE albumtype <> '' ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(LibraryStats {
         tracks: row.0,
         artists: row.1,
@@ -392,6 +437,8 @@ pub async fn library_stats(pool: &PgPool) -> anyhow::Result<LibraryStats> {
         no_album: row.6,
         not_loaded: row.7,
         bytes: row.8,
+        languages,
+        albumtypes,
     })
 }
 
@@ -478,3 +525,97 @@ pub async fn replace_aliases(
     tx.commit().await?;
     Ok(saved)
 }
+
+/// 按 from_name 升序读别名（前端列表要稳定顺序；Python 是插入顺序，这里用字典序）。
+pub async fn aliases_ordered(pool: &PgPool, table: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let sql = match table {
+        "artist" => "SELECT from_name, to_name FROM alias_artist ORDER BY from_name",
+        "album" => "SELECT from_name, to_name FROM alias_album ORDER BY from_name",
+        other => anyhow::bail!("未知别名表：{other}"),
+    };
+    let rows: Vec<(String, String)> = sqlx::query_as(sql).fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// 写盘之后同步索引：文本字段 + 文件元数据 + 时间戳/封面歌词标志。
+///
+/// 为什么单独一个函数：`update_fields` 只认 16 个文本列，而三条写路径
+/// （编辑落库 / 刮削写盘 / 封面歌词）还要更新 `mtime`/`size`/`scraped_at`/
+/// `has_cover`/`has_lyrics`，这些列都得一次性写进去（Python 版也是拼一个大 dict）。
+pub async fn sync_after_write(
+    pool: &PgPool,
+    id: i64,
+    fields: &HashMap<String, String>,
+    mtime: Option<f64>,
+    size: Option<i64>,
+    scraped: bool,
+    has_cover: Option<bool>,
+    has_lyrics: Option<bool>,
+    touch_edited: bool,
+) -> anyhow::Result<()> {
+    let allowed = [
+        "title", "artist", "album", "albumartist", "genre", "year", "track", "disc",
+        "language", "composer", "lyricist", "copyright", "albumtype", "comment",
+        "mb_artist_id", "release_group_id",
+    ];
+    let mut sets: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    for key in allowed {
+        if let Some(v) = fields.get(key) {
+            texts.push(v.clone());
+            sets.push(format!("{key} = ${}", texts.len()));
+        }
+    }
+    // 可选列按固定顺序追加，绑定顺序与占位符顺序必须一致
+    let mut next = texts.len();
+    let mut numeric_binds: u8 = 0;
+    if mtime.is_some() {
+        next += 1;
+        numeric_binds |= 1;
+        sets.push(format!("mtime = ${next}"));
+    }
+    if size.is_some() {
+        next += 1;
+        numeric_binds |= 2;
+        sets.push(format!("size = ${next}"));
+    }
+    if has_cover.is_some() {
+        next += 1;
+        numeric_binds |= 4;
+        sets.push(format!("has_cover = ${next}"));
+    }
+    if has_lyrics.is_some() {
+        next += 1;
+        numeric_binds |= 8;
+        sets.push(format!("has_lyrics = ${next}"));
+    }
+    if scraped {
+        sets.push("scraped_at = now()".to_string());
+    }
+    if touch_edited {
+        sets.push("edited_at = now()".to_string());
+    }
+    if sets.is_empty() {
+        return Ok(());
+    }
+    let sql = format!("UPDATE tracks SET {} WHERE id = ${}", sets.join(", "), next + 1);
+    let mut query = sqlx::query(&sql);
+    for v in &texts {
+        query = query.bind(v);
+    }
+    if numeric_binds & 1 != 0 {
+        query = query.bind(mtime.unwrap_or_default());
+    }
+    if numeric_binds & 2 != 0 {
+        query = query.bind(size.unwrap_or_default());
+    }
+    if numeric_binds & 4 != 0 {
+        query = query.bind(has_cover.unwrap_or(false));
+    }
+    if numeric_binds & 8 != 0 {
+        query = query.bind(has_lyrics.unwrap_or(false));
+    }
+    query.bind(id).execute(pool).await?;
+    Ok(())
+}
+

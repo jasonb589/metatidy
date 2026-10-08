@@ -86,6 +86,13 @@ jobs:
         with:
           workspaces: backend-rs
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装验收脚本依赖（requests + mutagen）
+        run: python -m pip install --quiet --disable-pip-version-check requests mutagen
+
       - name: 准备音乐目录
         run: mkdir -p /tmp/metatidy-music
 
@@ -134,6 +141,18 @@ jobs:
           done
           echo "两次都失败"
           exit 1
+
+      # 端到端验收：与 Python 版**同一套 31 项检查**，这次打的是编译出来的 Rust 二进制。
+      # E2E_SERVER_CMD 用「相对仓库根」的路径（脚本以仓库根为 cwd 启动服务端），
+      # 端口由 METATIDY_PORT 传给服务端（脚本自身固定轮询 8097）。
+      # 先清库：验收里断言「索引 5 首」，前面的自检留下的行会让它假红。
+      - name: 端到端验收（31 项：真实服务 + Postgres + Redis + 真实数据源）
+        env:
+          METATIDY_PORT: "8097"
+          E2E_SERVER_CMD: ./backend-rs/target/release/metatidy-server
+        run: |
+          psql "$DATABASE_URL" -c 'TRUNCATE tracks, jobs, move_plans, alias_artist, alias_album RESTART IDENTITY;' || true
+          python "$GITHUB_WORKSPACE/tests/e2e_acceptance.py" "$GITHUB_WORKSPACE" /tmp/metatidy-e2e
 
       - name: 冒烟：起服务并断言状态接口
         run: |

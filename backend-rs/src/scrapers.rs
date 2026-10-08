@@ -47,9 +47,18 @@ const CHROME_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 /// MusicBrainz 要求可识别 UA（`config.MB_USER_AGENT`）。
 const MB_USER_AGENT: &str = "MusicScraper/10.0";
 /// `config.LASTFM_API_KEY`：源码里写死的免费 Key（`SOURCE_CREDENTIALS["Last.fm"] = ()`）。
+///
+/// **2026-10-08 实测：这个 Key 已被 Last.fm 拒绝**（`track.search` → HTTP 403
+/// `{"error":10,"message":"Invalid API key - You must be granted a valid key by last.fm"}`），
+/// 所以 lastfm 现在只能靠环境变量 `LASTFM_API_KEY` 出候选（见 `search_lastfm` 的可读错误）。
 const LASTFM_BUILTIN_API_KEY: &str = "2bd6d4b4f7d439b7c41f0fd8b7e3b8e1";
 /// `config.THEAUDIODB_API_KEY`：公开测试 Key。
-const THEAUDIODB_BUILTIN_API_KEY: &str = "2";
+///
+/// **2026-10-08 实测：`"2"` 已被上游拒绝**（`/api/v1/json/2/…` → HTTP 404 `{"Message":"Not found"}`；
+/// `search.php` / `searchtrack.php` / `album.php` 都是这样），同一路径换 TheAudioDB 文档里的另一个
+/// 公开示例 Key `"123"` 能拿到真实数据（见 `parse_theaudiodb_*` 单测里的真实报文）。用环境变量
+/// `THEAUDIODB_API_KEY` 可覆盖。
+const THEAUDIODB_BUILTIN_API_KEY: &str = "123";
 
 /// 单个源的整体超时（`scrapebridge.PER_SOURCE_TIMEOUT`）。
 pub const PER_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -106,9 +115,11 @@ static FUZZ_SPLIT: Lazy<Regex> = Lazy::new(|| {
 static RE_ITUNES_ARTWORK: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"/\d+x\d+[a-z]*\.([a-z]+)").expect("iTunes 封面正则必须合法"));
 
-/// 酷我响应里的 `jsondata = {...}`。
-static RE_KUWO_JSON: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)jsondata\s*=\s*(\{.*?\})").expect("酷我正则必须合法"));
+/// 酷我 `r.s` 响应里被「多层 repr」加倍过的 unicode 转义：真实报文里 `TFBOYS&TF家族` 是
+/// `TFBOYS\\\\u0026TF家族`（4 个反斜杠 + `u0026`，2026-10-08 抓取），归一成 `\u0026` 后
+/// 由 `parse_repr_dict` 解出 `&`。
+static RE_DOUBLED_UNICODE_ESCAPE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"\\{2,}u([0-9a-fA-F]{4})").expect("酷我转义正则必须合法"));
 
 /// 从文本里抓 4 位年份（Last.fm / Kugou / Discogs 等）。
 static RE_YEAR: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\d{4})").expect("年份正则必须合法"));
@@ -434,6 +445,22 @@ fn local_date_year(ts_secs: f64) -> Option<(String, String)> {
     ))
 }
 
+/// **UTC** 的 `(YYYY-MM-DD, YYYY)`，只给 QQ 新接口的 `pubtime`（unix 秒）用。
+///
+/// 用 UTC 而不是本地时区：实测《稻香》`pubtime=1224000000`，UTC 解释是 `2008-10-14`，
+/// 与老接口同一首歌的 `time_public="2008-10-14"` 一致；按 Asia/Shanghai 会算成
+/// `2008-10-15`，反而差一天。
+fn utc_date_year(ts_secs: f64) -> Option<(String, String)> {
+    if !ts_secs.is_finite() {
+        return None;
+    }
+    let dt = chrono::Utc.timestamp_opt(ts_secs as i64, 0).single()?;
+    Some((
+        dt.format("%Y-%m-%d").to_string(),
+        dt.format("%Y").to_string(),
+    ))
+}
+
 /// 取歌手列表并归一成 `A & B`（`normalize_artist_credit([...])`）。
 fn normalize_artist_credit_list(names: &[String]) -> String {
     let joined = names
@@ -494,6 +521,188 @@ fn pct_encode(text: &str) -> String {
     out
 }
 
+/// 把参数拼成查询串（`pct_encode` 自己编码，中文/空格的行为与其余源一致）。
+fn with_query(url: &str, params: &[(&str, &str)]) -> String {
+    let mut out = String::from(url);
+    out.push(if url.contains('?') { '&' } else { '?' });
+    for (i, (k, v)) in params.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(&pct_encode(k));
+        out.push('=');
+        out.push_str(&pct_encode(v));
+    }
+    out
+}
+
+/// 只处理上游实际用到的几个 HTML 实体（酷我 `r.s` 把 `&` 写成 `&nbsp;` / `&amp;` / `&apos;`）。
+fn html_unescape_light(text: &str) -> String {
+    text.replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+/// `\\\\u0026` 这类「反斜杠被多层 repr 加倍」的 unicode 转义收敛回 `\u0026`
+/// （酷我 2026-10-08 的真实报文：`'ARTIST':'TFBOYS\\\\u0026TF家族'` → `TFBOYS&TF家族`）。
+fn normalize_repr_escapes(text: &str) -> String {
+    RE_DOUBLED_UNICODE_ESCAPE
+        .replace_all(text, |caps: &regex::Captures| format!("\\u{}", &caps[1]))
+        .to_string()
+}
+
+/// 从响应体里切出第一个**花括号配平**的对象（字符串里的花括号不参与配平）。
+///
+/// 不能用非贪婪正则（`\{.*?\}`）——`abslist` 里是嵌套对象，非贪婪会在第一个 `}` 处截断
+/// （Python 与旧实现的病灶，见 `kuwo_parse_real_response_json()` 单测）。
+fn first_balanced_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (offset, c) in text[start..].char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return text.get(start..start + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 把已解码的字符写进 JSON 文本（转义 `"`、`\` 与控制字符）。
+fn push_json_char(out: &mut String, ch: char) {
+    match ch {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+        c => out.push(c),
+    }
+}
+
+/// 「Python/JS 字面量风格」的字典文本 → 合法 JSON 文本。
+///
+/// 只做**最小归一**，结构交给 `serde_json`：
+/// * 单引号字符串 → 双引号字符串（`\'` `\"` `\\` `\n` `\t` `\xNN` `\uXXXX` 等转义按字面量解出后
+///   再按 JSON 规则重新转义，含代理对）；
+/// * 反斜杠加倍的 unicode 转义先收敛（`normalize_repr_escapes`）；
+/// * 裸词 `True` / `False` / `None` → `true` / `false` / `null`。
+fn repr_literal_to_json(text: &str) -> Option<String> {
+    let text = normalize_repr_escapes(text);
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        let Some(q) = quote else {
+            match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    out.push('"');
+                }
+                _ if c.is_ascii_alphabetic() => {
+                    let mut word = String::from(c);
+                    while i < chars.len() && chars[i].is_ascii_alphabetic() {
+                        word.push(chars[i]);
+                        i += 1;
+                    }
+                    match word.as_str() {
+                        "True" => out.push_str("true"),
+                        "False" => out.push_str("false"),
+                        "None" => out.push_str("null"),
+                        other => out.push_str(other),
+                    }
+                }
+                _ => out.push(c),
+            }
+            continue;
+        };
+        if c == '\\' {
+            let esc = *chars.get(i)?;
+            i += 1;
+            match esc {
+                'u' | 'x' => {
+                    let width = if esc == 'u' { 4 } else { 2 };
+                    let hex: String = chars.get(i..i + width)?.iter().collect();
+                    i += width;
+                    let mut code = u32::from_str_radix(&hex, 16).ok()?;
+                    // 代理对（`\uD83D\uDE00`）：高代理后紧跟低代理时合成一个码点。
+                    if (0xD800..0xDC00).contains(&code)
+                        && chars.get(i) == Some(&'\\')
+                        && chars.get(i + 1) == Some(&'u')
+                    {
+                        let low_hex: String = chars.get(i + 2..i + 6)?.iter().collect();
+                        if let Ok(low) = u32::from_str_radix(&low_hex, 16) {
+                            if (0xDC00..0xE000).contains(&low) {
+                                code = 0x1_0000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                i += 6;
+                            }
+                        }
+                    }
+                    match char::from_u32(code) {
+                        Some(ch) => push_json_char(&mut out, ch),
+                        None => out.push('\u{FFFD}'),
+                    }
+                }
+                'n' => out.push_str("\\n"),
+                't' => out.push_str("\\t"),
+                'r' => out.push_str("\\r"),
+                'b' => out.push_str("\\b"),
+                'f' => out.push_str("\\f"),
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\'' => out.push('\''),
+                '/' => out.push('/'),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+        } else if c == q {
+            quote = None;
+            out.push('"');
+        } else if c == '"' {
+            out.push_str("\\\"");
+        } else if (c as u32) < 0x20 {
+            out.push_str(&format!("\\u{:04x}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    if quote.is_some() {
+        return None; // 字符串没闭合：响应被截断
+    }
+    Some(out)
+}
+
+/// 酷我响应体 → `Value`：兼容旧的 `jsondata = ` 前缀与现在的「裸单引号字典」两种形态。
+fn parse_repr_dict(text: &str) -> Option<Value> {
+    let obj = first_balanced_object(text)?;
+    let json = repr_literal_to_json(obj)?;
+    serde_json::from_str(&json).ok()
+}
+
 // ==================== HTTP 助手 ====================
 
 async fn get_json(
@@ -549,6 +758,49 @@ async fn get_text(
     let status = resp.status().as_u16();
     let body = resp.text().await.ok()?;
     Some((status, body))
+}
+
+/// 一次「带状态码」的 JSON 拉取结果。
+///
+/// qq / kugou / kuwo / lastfm / theaudiodb 这 5 个源在 2026-10-08 的真实探针里暴露出的是
+/// **上游改版**（HTTP 500、404、非 JSON 响应体、Key 被拒），这些都要能把状态码和响应体
+/// 一起写进 `SourceStatus`，所以它们不用 `get_json`（那个函数的语义保持不变）。
+struct HttpFetch {
+    status: u16,
+    body: String,
+    data: Option<Value>,
+}
+
+impl HttpFetch {
+    /// 响应体前 n 个字符（写进诊断说明用，避免把整个响应体塞进状态里）。
+    fn head(&self, n: usize) -> String {
+        prefix_chars(&self.body, n)
+    }
+}
+
+/// 失败时把 reqwest 的原始错误文本带出来（TLS 根证书 / DNS / 连接被重置 / URL 不合法
+/// 都会走到这里，2026-10-08 的探针就是靠它定位酷狗与 TheAudioDB 的间歇性失败）。
+async fn fetch_json(
+    client: &reqwest::Client,
+    url: &str,
+    headers: HeaderMap,
+    timeout: Duration,
+) -> Result<HttpFetch, String> {
+    let resp = client
+        .get(url)
+        .timeout(timeout)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.map_err(|e| format!("{e}"))?;
+    let data = serde_json::from_str(&body).ok();
+    Ok(HttpFetch {
+        status,
+        body,
+        data,
+    })
 }
 
 // ==================== 归一：模糊匹配 / 简繁 ====================
@@ -935,15 +1187,27 @@ fn parse_qq(data: &Value, keyword: &str, hint: &str) -> Option<Raw> {
         } else {
             format!("https://y.gtimg.cn/music/photo_new/T002R1000x1000M000{album_mid}.jpg?max_age=2592000")
         };
-        let pub_time = {
-            let a = s_of(song.get("time_public"));
-            if !a.is_empty() {
-                a
+        // 三个候选字段：老版 `time_public`（"2008-10-14"）、`pub_time`（字符串），
+        // 以及新接口 `search_for_qq_cp` 的 `pubtime`（unix 秒，实测 1224000000 → 2008-10-14）。
+        let (pub_time, year) = {
+            let text_time = {
+                let t = s_of(song.get("time_public"));
+                if !t.is_empty() {
+                    t
+                } else {
+                    s_of(song.get("pub_time"))
+                }
+            };
+            if !text_time.is_empty() {
+                let y = prefix_chars(&text_time, 4);
+                (text_time, y)
+            } else if let Some(ts) = i_of(song.get("pubtime")).filter(|v| *v > 1_000_000_000) {
+                let (d, y) = utc_date_year(ts as f64).unwrap_or_default();
+                (d, y)
             } else {
-                s_of(song.get("pub_time"))
+                (String::new(), String::new())
             }
         };
-        let year = prefix_chars(&pub_time, 4);
         let s_title = norm_simple(&s_of(song.get("songname")));
         let s_album = norm_simple(&s_of(song.get("albumname")));
         let is_single = s_title == s_album || s_album.is_empty();
@@ -973,24 +1237,38 @@ fn parse_qq(data: &Value, keyword: &str, hint: &str) -> Option<Raw> {
     all.into_iter().next()
 }
 
-/// 酷我：`jsondata = {...}` → 候选。
+/// 酷我 `r.s` 响应 → 候选。
+///
+/// **2026-10-08 上游改版实测**：
+/// * 响应体不再有 `jsondata = ` 前缀，直接就是「单引号风格字典」
+///   （`{'ARTISTPIC':'','HIT':'1317',…,'abslist':[{…}]}`），所以改成配平切片 + 字面量归一 +
+///   `serde_json`（旧的非贪婪正则 `\{.*?\}` 会被 `abslist` 的嵌套对象截断）；
+/// * 不带 `rn`/`pn` 时上游返回 `HIT=0 / HITMODE=nores`（调用方必须带，见 `search_kuwo`）；
+/// * `'ARTIST':'TFBOYS\\\\u0026TF家族'` 这类转义要解出 `&`（`normalize_repr_escapes`）。
+///
+/// 封面：`ALBUMID` 能拼出封面 URL 就填（best effort，见 `kuwo_cover_url`）；拼不出就留空。
+///
+/// 两条对 Python 的**有意偏离**（Python 都是整条丢弃，于是这个源对中文歌恒为 0 条）：
+/// 1. 不再要求「必须有封面」——实测 `稻香` 下 `周杰伦` 的条目全是用户上传，`ALBUMID='0'`；
+/// 2. 不再为了封面去挑「某个带 `ALBUMID` 的条目」，因为那个 URL 模式 2026-10-08 实测已 404
+///    （见 `kuwo_cover_url`），挑它只会把「翻唱合辑」这类元数据更差的条目顶上来。
+///
+/// 文本入口（单测 / 取证测试用；生产路径 `search_kuwo` 直接吃已解析的 `Value`，省一次解析）。
+#[allow(dead_code)]
 fn parse_kuwo(text: &str, hint: &str) -> Option<Raw> {
-    let content = text.replace('\'', "\"");
-    let caps = RE_KUWO_JSON.captures(&content)?;
-    let data: Value = serde_json::from_str(caps.get(1)?.as_str()).ok()?;
+    let data = parse_repr_dict(text)?;
+    kuwo_from_value(&data, hint)
+}
+/// 已解析的酷我响应 → 候选（返回**第一个**歌手匹配的命中，见 `parse_kuwo` 的封面说明）。
+fn kuwo_from_value(data: &Value, hint: &str) -> Option<Raw> {
     let songs = data.get("abslist").and_then(|v| v.as_array())?;
     for song in songs {
-        let artist_name = norm_simple(&s_of(song.get("ARTIST")).replace("&nbsp;", " "));
+        let artist_name = norm_simple(&html_unescape_light(&s_of(song.get("ARTIST"))));
         if !is_fuzzy_match(hint, &artist_name) {
             continue;
         }
-        let web_id = s_of(song.get("ALBUMID"));
-        let cover_url = kuwo_cover_url(&web_id);
-        if cover_url.is_empty() {
-            continue;
-        }
-        let s_title = norm_simple(&s_of(song.get("SONGNAME")).replace("&nbsp;", " "));
-        let s_album = norm_simple(&s_of(song.get("ALBUM")).replace("&nbsp;", " "));
+        let s_title = norm_simple(&html_unescape_light(&s_of(song.get("SONGNAME"))));
+        let s_album = norm_simple(&html_unescape_light(&s_of(song.get("ALBUM"))));
         let release_date = {
             let a = s_of(song.get("RELEASE_DATE"));
             if !a.is_empty() {
@@ -1011,7 +1289,7 @@ fn parse_kuwo(text: &str, hint: &str) -> Option<Raw> {
         };
         return Some(Raw {
             source: "Kuwo".to_string(),
-            cover_url,
+            cover_url: kuwo_cover_url(&s_of(song.get("ALBUMID"))),
             song_id: s_of(song.get("MUSICRID")).replace("MUSIC_", ""),
             album_type: "专辑".to_string(),
             title: s_title,
@@ -1027,7 +1305,12 @@ fn parse_kuwo(text: &str, hint: &str) -> Option<Raw> {
     None
 }
 
-/// 酷我封面 URL：`ALBUMID` 后两位/中两位都不一定是数字，失败即 `""`（该条被丢弃）。
+/// 酷我封面 URL：`ALBUMID` 后两位/中两位不一定是数字，失败即 `""`（Python 同款口径）。
+///
+/// **2026-10-08 实测：这个 URL 模式已经 404**（`img4.kuwo.cn` / `img1.kuwo.cn` / `star.kuwo.cn`
+/// 上的 `.../star/albumcover/1080/{a}/{b}/{ALBUMID}.jpg`，以及去掉 `1080`、换成 `.webp` 的变体
+/// 全是 404），搜索响应里的 `PICPATH`/`MVPIC` 也恒为空。这里保留拼接是为了「上游修好后自动生效」，
+/// 但调用方不再拿它当筛条（见 `parse_kuwo`）——候选宁可封面留空也照样返回。
 fn kuwo_cover_url(album_id: &str) -> String {
     if album_id.is_empty() {
         return String::new();
@@ -1042,34 +1325,102 @@ fn kuwo_cover_url(album_id: &str) -> String {
 }
 
 /// 酷狗第 2 跳详情 → 候选（无封面返回 `None`，调用方继续下一条）。
-fn parse_kugou_detail(body: &Value) -> Option<Raw> {
-    let d = body.get("data").cloned().unwrap_or(Value::Object(Default::default()));
-    let cover_url = s_of(d.get("img")).replace("{size}", "480");
+///
+/// **2026-10-08 上游改版实测**：`www.kugou.com/yy/index.php?r=play/getdata`（旧路径）现在固定返回
+/// `{"status":0,"err_code":30020}`（要签名 Cookie），改用手机版
+/// `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=<hash>`：响应是**扁平的**
+/// （没有 `data` 包一层），字段名是 `songName` / `author_name` / `album_img` / `imgUrl` /
+/// `timeLength`（毫秒）；专辑名/发行日期/时长要拿第 1 跳搜索命中（`hit`）当兜底，
+/// 因为手机版详情里没有 `album_name`、`timeLength` 对部分歌曲是 0（实测周杰伦《稻香》
+/// 的 `timeLength=0`，但 `extra.320timelength=223503`）。
+fn parse_kugou_detail(body: &Value, hit: Option<&Value>) -> Option<Raw> {
+    // 兼容旧的两层形态（`{"data": {...}}`）与现在的扁平形态。
+    let d = body.get("data").unwrap_or(body);
+    let hit = hit.cloned().unwrap_or(Value::Object(Default::default()));
+    let cover_url = {
+        let candidates = [
+            s_of(d.get("album_img")),
+            s_of(d.get("imgUrl")),
+            s_of(d.get("img")),
+            s_of(first_truthy(&[d.get("trans_param")]).and_then(|t| t.get("union_cover"))),
+        ];
+        let picked = candidates
+            .into_iter()
+            .find(|u| !u.is_empty())
+            .unwrap_or_default();
+        picked.replace("{size}", "480")
+    };
     if cover_url.is_empty() {
         return None;
     }
-    let s_title = norm_simple(&s_of(d.get("song_name")));
-    let mut s_album = norm_simple(&s_of(d.get("album_name")));
+    // 手机版详情用 `songName`，旧形态用 `song_name`；都没有就用搜索命中的歌名。
+    let s_title = {
+        let a = norm_simple(&s_of(d.get("songName")));
+        if !a.is_empty() {
+            a
+        } else {
+            let b = norm_simple(&s_of(d.get("song_name")));
+            if !b.is_empty() {
+                b
+            } else {
+                norm_simple(&s_of(hit.get("SongName")))
+            }
+        }
+    };
+    let mut s_album = norm_simple(&s_of(hit.get("AlbumName")));
+    if s_album.is_empty() {
+        s_album = norm_simple(&s_of(d.get("album_name")));
+    }
     if s_album.is_empty() {
         s_album = s_title.clone();
     }
     let trans_param = first_truthy(&[d.get("trans_param")])
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
-    let mut pub_time = f_of(trans_param.get("publish_time")).unwrap_or(0.0);
-    if pub_time == 0.0 {
-        pub_time = f_of(trans_param.get("ctime")).unwrap_or(0.0);
-    }
-    let (mut date_str, mut year_str) = (String::new(), String::new());
-    if pub_time != 0.0 {
-        let ts = if pub_time as i64 > 1_000_000_000_000 {
-            pub_time / 1000.0
+    let extra = first_truthy(&[d.get("extra")])
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    let millis = {
+        // 手机版 `timeLength`（毫秒）→ 旧形态 `timelength` → `extra.320/128timelength`
+        // → 最后才用第 1 跳搜索命中的 `Duration`（**秒**）。
+        let candidates = [
+            f_of(d.get("timeLength")).unwrap_or(0.0),
+            f_of(d.get("timelength")).unwrap_or(0.0),
+            f_of(extra.get("320timelength")).unwrap_or(0.0),
+            f_of(extra.get("128timelength")).unwrap_or(0.0),
+        ];
+        let picked = candidates
+            .into_iter()
+            .find(|v| *v > 0.0)
+            .unwrap_or(0.0);
+        if picked > 0.0 {
+            picked
         } else {
-            pub_time
-        };
-        if let Some((d, y)) = local_date_year(ts) {
-            date_str = d;
-            year_str = y;
+            f_of(hit.get("Duration")).unwrap_or(0.0) * 1000.0
+        }
+    };
+    let (mut date_str, mut year_str) = (String::new(), String::new());
+    // 优先级：搜索命中的 `PublishDate`（"2012-11-08"）→ trans_param 时间戳 → publish_info/pub_time。
+    let publish_date = s_of(hit.get("PublishDate"));
+    if !publish_date.is_empty() {
+        date_str = prefix_chars(&publish_date, 10);
+        year_str = prefix_chars(&date_str, 4);
+    }
+    if year_str.is_empty() {
+        let mut pub_time = f_of(trans_param.get("publish_time")).unwrap_or(0.0);
+        if pub_time == 0.0 {
+            pub_time = f_of(trans_param.get("ctime")).unwrap_or(0.0);
+        }
+        if pub_time != 0.0 {
+            let ts = if pub_time as i64 > 1_000_000_000_000 {
+                pub_time / 1000.0
+            } else {
+                pub_time
+            };
+            if let Some((d_str, y_str)) = local_date_year(ts) {
+                date_str = d_str;
+                year_str = y_str;
+            }
         }
     }
     if year_str.is_empty() {
@@ -1092,7 +1443,19 @@ fn parse_kugou_detail(body: &Value) -> Option<Raw> {
             }
         }
     }
-    let author = norm_simple(&s_of(d.get("author_name")));
+    let author = {
+        let a = norm_simple(&s_of(d.get("author_name")));
+        if !a.is_empty() {
+            a
+        } else {
+            let b = norm_simple(&s_of(d.get("singerName")));
+            if !b.is_empty() {
+                b
+            } else {
+                norm_simple(&s_of(hit.get("SingerName")))
+            }
+        }
+    };
     Some(Raw {
         source: "Kugou".to_string(),
         cover_url,
@@ -1103,7 +1466,7 @@ fn parse_kugou_detail(body: &Value) -> Option<Raw> {
         album_artist: author,
         date: date_str,
         year: year_str,
-        duration: (f_of(d.get("timelength")).unwrap_or(0.0) as i64).div_euclid(1000) as f64,
+        duration: (millis as i64).div_euclid(1000) as f64,
         ..Default::default()
     })
 }
@@ -1893,85 +2256,280 @@ async fn search_netease(client: &reqwest::Client, keyword: &str, hint: &str) -> 
     all.into_iter().next()
 }
 
-async fn search_qq(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
-    let params = vec![
-        ("w".to_string(), keyword.to_string()),
-        ("n".to_string(), "10".to_string()),
-        ("p".to_string(), "1".to_string()),
-        ("format".to_string(), "json".to_string()),
-        ("cr".to_string(), "1".to_string()),
-        ("t".to_string(), "0".to_string()),
-    ];
-    let headers = hdrs(&[
-        ("Referer", "https://y.qq.com/"),
-        ("User-Agent", "Mozilla/5.0"),
-    ]);
-    let (_, data) = get_json(
-        client,
-        "https://c.y.qq.com/soso/fcgi-bin/client_search_cp",
-        &params,
-        headers,
-        REQUEST_TIMEOUT,
-    )
-    .await?;
-    parse_qq(&data, keyword, hint)
+/// 单源结果：候选 + 上游诊断 + 结构性失败原因。
+///
+/// * `note`：一行「上游情况」（HTTP 状态 / 命中数 / 失败原因），正常时也填。
+///   `live_verify_extra_sources` 直接打印它，`SourceStatus` 不展示。
+/// * `error`：**只在结构性失败**时非空（接口下线 / 凭据被拒 / 响应无法解析），会进
+///   `SourceStatus.error`；单纯「没命中」不算错误。
+#[derive(Debug, Default, Clone)]
+struct SourceRun {
+    raws: Vec<Raw>,
+    /// 生产路径只写不读（`--selftest-scrape` 走 `print_scrape_statuses` 打的是 `error`）；
+    /// 真实读数的人是 `live_verify_extra_sources`，所以这里显式关掉 dead_code 提示。
+    #[allow(dead_code)]
+    note: String,
+    error: String,
 }
 
-async fn search_kuwo(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
-    let mut text: Option<String> = None;
-    for proto in ["https", "http"] {
-        let url = format!(
-            "{proto}://search.kuwo.cn/r.s?all={keyword}&ft=music&itemset=web_2013&client=kt&rformat=json&encoding=utf8"
-        );
-        if let Some((_, body)) = get_text(client, &url, HeaderMap::new(), REQUEST_TIMEOUT).await {
-            text = Some(body);
-            break;
+impl SourceRun {
+    /// 没有异常（可能命中 0 条）。
+    fn ok(raws: Vec<Raw>, note: impl Into<String>) -> Self {
+        SourceRun {
+            raws,
+            note: note.into(),
+            error: String::new(),
         }
     }
-    // 两个协议都失败 → 无候选（契约 H-6：不复刻 Python 的隐式 NameError）
-    let text = text?;
-    parse_kuwo(&text, hint)
+
+    /// 单个候选的包装。
+    fn single(raw: Option<Raw>, note: impl Into<String>) -> Self {
+        SourceRun::ok(raw.into_iter().collect(), note)
+    }
+
+    /// 结构性失败：同一句话同时进 `note` 与 `error`。
+    fn fail(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        SourceRun {
+            raws: Vec::new(),
+            note: reason.clone(),
+            error: reason,
+        }
+    }
 }
 
-async fn search_kugou(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
-    let search_url = format!(
-        "https://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword={keyword}&page=1&pagesize=5"
+/// QQ 音乐搜索。
+///
+/// **2026-10-08 上游改版实测**：老的 `https://c.y.qq.com/soso/fcgi-bin/client_search_cp`
+/// 现在固定返回 **HTTP 500 + 空响应体**（带不带参数、Referer、UA 都一样）——这就是这个源
+/// 「有解析单测但真实联网恒为 0」的原因。同域下的 `search_for_qq_cp` 仍然可用
+/// （200 + `data.song.list`，形状与原实现一致），只是发布时间字段从 `time_public`
+/// 变成 `pubtime`（unix 秒，`parse_qq` 已兼容）。
+async fn search_qq(client: &reqwest::Client, keyword: &str, hint: &str) -> SourceRun {
+    let url = with_query(
+        "https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp",
+        &[
+            ("w", keyword),
+            ("n", "10"),
+            ("p", "1"),
+            ("format", "json"),
+            ("cr", "1"),
+            ("t", "0"),
+            ("remoteplace", "txt.yqq.center"),
+            ("g_tk", "5381"),
+            ("loginUin", "0"),
+            ("hostUin", "0"),
+            ("inCharset", "utf8"),
+            ("outCharset", "utf-8"),
+            ("notice", "0"),
+            ("platform", "yqq.json"),
+            ("needNewCode", "0"),
+        ],
     );
-    let (_, data) = get_json(
-        client,
-        &search_url,
-        &[],
-        HeaderMap::new(),
-        REQUEST_TIMEOUT,
+    let headers = hdrs(&[("Referer", "https://y.qq.com/"), ("User-Agent", CHROME_UA)]);
+    let fetch = match fetch_json(client, &url, headers, REQUEST_TIMEOUT).await {
+        Ok(fetch) => fetch,
+        Err(err) => return SourceRun::fail(format!("QQ 音乐：请求失败（{err}）")),
+    };
+    if fetch.status != 200 {
+        return SourceRun::fail(format!(
+            "QQ 音乐：HTTP {}（上游改版？响应前 80 字符：{}）",
+            fetch.status,
+            fetch.head(80)
+        ));
+    }
+    let Some(data) = fetch.data.as_ref() else {
+        return SourceRun::fail(format!(
+            "QQ 音乐：HTTP 200 但响应不是 JSON（前 80 字符：{}）",
+            fetch.head(80)
+        ));
+    };
+    let hits = data
+        .pointer("/data/song/list")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let raw = parse_qq(data, keyword, hint);
+    SourceRun::single(
+        raw,
+        format!("HTTP 200，data.song.list={hits} 条（关键词只用标题）"),
     )
-    .await?;
+}
+
+/// 酷我搜索。
+///
+/// **2026-10-08 上游改版实测**：`search.kuwo.cn/r.s` 仍然可用，但**必须带 `rn`/`pn`**——不带时
+/// 上游返回 `HIT=0 / HITMODE=nores`（这是老实现恒为 0 的第二个原因，第一个是响应体不再有
+/// `jsondata = ` 前缀）。关键词只用**标题**：真实探针里 `all=稻香` 命中 1317 条，
+/// `all=稻香 周杰伦` 命中 1564 条但把用户上传（`ALBUMID=0`）顶到前面、附带信息反而更少。
+async fn search_kuwo(client: &reqwest::Client, keyword: &str, hint: &str) -> SourceRun {
+    let mut failure = String::new();
+    for proto in ["https", "http"] {
+        let url = format!(
+            "{proto}://search.kuwo.cn/r.s?all={}&ft=music&itemset=web_2013&client=kt&rformat=json&encoding=utf8&rn=30&pn=0",
+            pct_encode(keyword)
+        );
+        let Some((status, body)) = get_text(client, &url, HeaderMap::new(), REQUEST_TIMEOUT).await
+        else {
+            failure = format!("酷我：{proto} 请求失败（网络 / DNS / TLS）");
+            continue;
+        };
+        if status != 200 {
+            failure = format!(
+                "酷我：HTTP {status}（响应前 80 字符：{}）",
+                prefix_chars(&body, 80)
+            );
+            continue;
+        }
+        let Some(data) = parse_repr_dict(&body) else {
+            failure = format!(
+                "酷我：响应不是可解析的字面量字典（前 80 字符：{}）",
+                prefix_chars(&body, 80)
+            );
+            continue;
+        };
+        let hits = i_of(data.get("HIT")).unwrap_or(0);
+        let hitmode = s_of(data.get("HITMODE"));
+        let list_len = data
+            .get("abslist")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let raw = kuwo_from_value(&data, hint);
+        return SourceRun::single(
+            raw,
+            format!("HTTP 200，HIT={hits} HITMODE={hitmode}，abslist={list_len} 条"),
+        );
+    }
+    // 两个协议都失败（契约 H-6：不复刻 Python 的隐式 NameError）
+    SourceRun::fail(failure)
+}
+
+/// 酷狗搜索 + 详情（第 1 跳搜索，第 2 跳手机版详情）。
+///
+/// **2026-10-08 上游改版实测**：
+/// * 旧第 1 跳 `https://mobilecdn.kugou.com/api/v3/search/song` 的证书是 `*.kugou.com`，
+///   **不匹配 `mobilecdn.kugou.com`**（curl -k 能拿到 200 + 真实数据，但 rustls/schannel
+///   校验失败 `SEC_E_WRONG_PRINCIPAL`）→ 换成 TLS 正常的
+///   `https://songsearch.kugou.com/song_search_v2`（200 + `data.lists[]`）；
+/// * 旧第 2 跳 `https://www.kugou.com/yy/index.php?r=play/getdata` 现在要签名 Cookie，
+///   固定返回 `{"status":0,"err_code":30020}`（`wwwapi` 同款也一样）→ 换成
+///   `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=<hash>`（200，扁平 JSON）。
+async fn search_kugou(client: &reqwest::Client, keyword: &str, hint: &str) -> SourceRun {
+    let search_url = with_query(
+        "https://songsearch.kugou.com/song_search_v2",
+        &[
+            ("format", "json"),
+            ("keyword", keyword),
+            ("page", "1"),
+            ("pagesize", "20"),
+        ],
+    );
+    let headers = hdrs(&[
+        ("Referer", "https://www.kugou.com/"),
+        ("User-Agent", CHROME_UA),
+    ]);
+    let fetch = match fetch_json(client, &search_url, headers, REQUEST_TIMEOUT).await {
+        Ok(fetch) => fetch,
+        Err(err) => return SourceRun::fail(format!("酷狗：搜索请求失败（{err}）")),
+    };
+    if fetch.status != 200 {
+        return SourceRun::fail(format!(
+            "酷狗：搜索 HTTP {}（响应前 80 字符：{}）",
+            fetch.status,
+            fetch.head(80)
+        ));
+    }
+    let Some(data) = fetch.data.as_ref() else {
+        return SourceRun::fail(format!(
+            "酷狗：搜索 HTTP 200 但响应不是 JSON（前 80 字符：{}）",
+            fetch.head(80)
+        ));
+    };
     let candidates = data
-        .pointer("/data/info")
+        .pointer("/data/lists")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let detail_headers = hdrs(&[("Cookie", "kg_mid=12345"), ("User-Agent", "Mozilla/5.0")]);
+    let detail_headers = hdrs(&[("Referer", "https://m.kugou.com/"), ("User-Agent", CHROME_UA)]);
+    let mut matched = 0usize;
+    let mut detail_error = String::new();
     for song in &candidates {
-        let artist_name = norm_simple(&s_of(song.get("singername")));
+        let artist_name = norm_simple(&s_of(song.get("SingerName")));
         if !is_fuzzy_match(hint, &artist_name) {
             continue;
         }
-        let file_hash = s_of(song.get("hash"));
-        let detail_url = format!("https://www.kugou.com/yy/index.php?r=play/getdata&hash={file_hash}");
-        // Python：详情请求的异常会中止整个源（在同一个 try 里）
-        let (_, detail) = get_json(
+        matched += 1;
+        let file_hash = s_of(song.get("FileHash"));
+        if file_hash.is_empty() {
+            continue;
+        }
+        let detail_url = with_query(
+            "https://m.kugou.com/app/i/getSongInfo.php",
+            &[("cmd", "playInfo"), ("hash", &file_hash)],
+        );
+        let detail = match fetch_json(
             client,
             &detail_url,
-            &[],
             detail_headers.clone(),
             REQUEST_TIMEOUT,
         )
-        .await?;
-        if let Some(raw) = parse_kugou_detail(&detail) {
-            return Some(raw);
+        .await
+        {
+            Ok(detail) => detail,
+            Err(err) => {
+                detail_error = format!("酷狗：详情请求失败（{err}）");
+                continue;
+            }
+        };
+        if detail.status != 200 {
+            detail_error = format!(
+                "酷狗：详情 HTTP {}（前 80 字符：{}）",
+                detail.status,
+                detail.head(80)
+            );
+            continue;
+        }
+        let Some(detail_data) = detail.data.as_ref() else {
+            detail_error = format!(
+                "酷狗：详情 HTTP 200 但响应不是 JSON（前 80 字符：{}）",
+                detail.head(80)
+            );
+            continue;
+        };
+        if let Some(raw) = parse_kugou_detail(detail_data, Some(song)) {
+            return SourceRun::single(
+                Some(raw),
+                format!(
+                    "HTTP {}，lists={} 条（歌手匹配 {matched} 条），详情 HTTP {}",
+                    fetch.status,
+                    candidates.len(),
+                    detail.status
+                ),
+            );
         }
     }
-    None
+    if candidates.is_empty() {
+        return SourceRun::fail(format!(
+            "酷狗：HTTP 200 但 data.lists 为空（上游改版？前 80 字符：{}）",
+            fetch.head(80)
+        ));
+    }
+    if !detail_error.is_empty() {
+        return SourceRun {
+            raws: Vec::new(),
+            note: detail_error.clone(),
+            error: detail_error,
+        };
+    }
+    SourceRun::single(
+        None,
+        format!(
+            "HTTP {}，lists={} 条，歌手匹配 {matched} 条，但没有带封面的详情",
+            fetch.status,
+            candidates.len()
+        ),
+    )
 }
 
 async fn search_musicbrainz(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
@@ -2088,107 +2646,176 @@ fn lastfm_api_key() -> String {
     }
 }
 
-async fn search_lastfm(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
+/// Last.fm 的错误响应 → 可读原因（真实报文：HTTP 403 +
+/// `{"message":"Invalid API key - You must be granted a valid key by last.fm","error":10}`）。
+fn lastfm_error_reason(status: u16, body: &Value) -> String {
+    let message = s_of(body.get("message"));
+    let code = i_of(body.get("error")).unwrap_or(0);
+    if code == 10 {
+        return format!(
+            "Last.fm：API Key 被上游拒绝（HTTP {status} / error 10：{message}）；\
+             请设置环境变量 LASTFM_API_KEY"
+        );
+    }
+    if !message.is_empty() {
+        return format!("Last.fm：HTTP {status} / error {code}：{message}");
+    }
+    format!("Last.fm：HTTP {status}（上游没给 message 字段）")
+}
+
+/// Last.fm 搜索（`track.search` → `track.getInfo`）。
+///
+/// **2026-10-08 实测**：内置 Key（`LASTFM_BUILTIN_API_KEY`）已被上游拒绝，`track.search`
+/// 恒定返回 HTTP 403 + `error:10`，所以**不提供 `LASTFM_API_KEY` 时这个源恒为 0 条**
+/// （这里如实暴露成 `SourceStatus.error`，不假装成功）。带有效 Key 时链路与原来一致。
+async fn search_lastfm(client: &reqwest::Client, keyword: &str, hint: &str) -> SourceRun {
     let api_key = lastfm_api_key();
-    let params = vec![
-        ("method".to_string(), "track.search".to_string()),
-        ("track".to_string(), keyword.to_string()),
-        ("api_key".to_string(), api_key.clone()),
-        ("format".to_string(), "json".to_string()),
-        ("limit".to_string(), "5".to_string()),
-    ];
-    let (_, data) = get_json(
-        client,
+    let search_url = with_query(
         "https://ws.audioscrobbler.com/2.0/",
-        &params,
-        hdrs(&[("User-Agent", CHROME_UA)]),
-        REQUEST_TIMEOUT,
-    )
-    .await?;
+        &[
+            ("method", "track.search"),
+            ("track", keyword),
+            ("api_key", &api_key),
+            ("format", "json"),
+            ("limit", "5"),
+        ],
+    );
+    let headers = hdrs(&[("User-Agent", CHROME_UA)]);
+    let fetch = match fetch_json(client, &search_url, headers.clone(), REQUEST_TIMEOUT).await {
+        Ok(fetch) => fetch,
+        Err(err) => return SourceRun::fail(format!("Last.fm：请求失败（{err}）")),
+    };
+    let Some(data) = fetch.data.as_ref() else {
+        return SourceRun::fail(format!(
+            "Last.fm：HTTP {} 响应不是 JSON（前 80 字符：{}）",
+            fetch.status,
+            fetch.head(80)
+        ));
+    };
+    // 鉴权/参数错误：上游用非 200 + `error` 字段表达
+    if data.get("error").is_some() {
+        return SourceRun::fail(lastfm_error_reason(fetch.status, data));
+    }
     let results = data
         .pointer("/results/trackmatches/track")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    if results.is_empty() {
-        return None;
-    }
+    let mut matched = 0usize;
     for track in &results {
         let artist_name = s_of(track.get("artist"));
         if !is_fuzzy_match(hint, &artist_name) {
             continue;
         }
-        let info_params = vec![
-            ("method".to_string(), "track.getInfo".to_string()),
-            ("api_key".to_string(), api_key.clone()),
-            ("artist".to_string(), artist_name.clone()),
-            ("track".to_string(), s_of(track.get("name"))),
-            ("format".to_string(), "json".to_string()),
-        ];
-        let track_info: Option<Value> = match get_json(
-            client,
+        matched += 1;
+        let info_url = with_query(
             "https://ws.audioscrobbler.com/2.0/",
-            &info_params,
-            hdrs(&[("User-Agent", CHROME_UA)]),
-            REQUEST_TIMEOUT,
-        )
-        .await
-        {
-            Some((_, value)) => Some(
-                value
-                    .get("track")
+            &[
+                ("method", "track.getInfo"),
+                ("api_key", &api_key),
+                ("artist", &artist_name),
+                ("track", &s_of(track.get("name"))),
+                ("format", "json"),
+            ],
+        );
+        let track_info: Option<Value> = fetch_json(client, &info_url, headers.clone(), REQUEST_TIMEOUT)
+            .await
+            .ok()
+            .and_then(|f| f.data)
+            .map(|v| {
+                v.get("track")
                     .cloned()
-                    .unwrap_or(Value::Object(Default::default())),
-            ),
-            None => None,
-        };
+                    .unwrap_or(Value::Object(Default::default()))
+            });
         if let Some(raw) = parse_lastfm_info(track_info.as_ref(), track, &artist_name) {
-            return Some(raw);
+            return SourceRun::single(
+                Some(raw),
+                format!(
+                    "HTTP {}，trackmatches={} 条（歌手匹配 {matched} 条）",
+                    fetch.status,
+                    results.len()
+                ),
+            );
         }
     }
-    None
+    SourceRun::single(
+        None,
+        format!(
+            "HTTP {}，trackmatches={} 条（歌手匹配 {matched} 条）",
+            fetch.status,
+            results.len()
+        ),
+    )
 }
 
-async fn search_theaudiodb(client: &reqwest::Client, keyword: &str, hint: &str) -> Option<Raw> {
-    let key = THEAUDIODB_BUILTIN_API_KEY;
-    let url = format!("https://www.theaudiodb.com/api/v1/json/{key}/searchtrack.php");
-    let query = if !hint.is_empty() { hint } else { keyword };
-    let (_, data) = get_json(
-        client,
-        &url,
-        &[("s".to_string(), query.to_string())],
-        hdrs(&[("User-Agent", CHROME_UA)]),
-        REQUEST_TIMEOUT,
-    )
-    .await?;
+/// TheAudioDB Key（环境变量 `THEAUDIODB_API_KEY` 优先）。
+fn theaudiodb_api_key() -> String {
+    match std::env::var("THEAUDIODB_API_KEY") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => THEAUDIODB_BUILTIN_API_KEY.to_string(),
+    }
+}
+
+/// TheAudioDB 搜索（`searchtrack.php` → `album.php` 取封面/年份）。
+///
+/// **2026-10-08 上游改版实测**：
+/// * 内置 Key `"2"` 现在被拒绝（`/api/v1/json/2/…` → HTTP 404 `{"Message":"Not found"}`），
+///   换成公开示例 Key `"123"`（200 + 真实数据）；
+/// * `searchtrack.php` 现在**必须同时给 `s`（歌手）与 `t`（曲名）**：只给 `s` 时上游回
+///   HTTP 200 + **0 字节**（旧实现只给 `s`，所以恒为 0 条）；
+/// * 该库以欧美曲目为主，中文歌（如周杰伦《稻香》）上游本身没有数据（`search.php` 返回
+///   `{"artists":null}`），这时是「没命中」而不是错误。
+async fn search_theaudiodb(client: &reqwest::Client, keyword: &str, hint: &str) -> SourceRun {
+    let key = theaudiodb_api_key();
+    let artist_query = if hint.is_empty() { keyword } else { hint };
+    let url = with_query(
+        &format!("https://www.theaudiodb.com/api/v1/json/{key}/searchtrack.php"),
+        &[("s", artist_query), ("t", keyword)],
+    );
+    let headers = hdrs(&[("User-Agent", CHROME_UA)]);
+    let fetch = match fetch_json(client, &url, headers.clone(), REQUEST_TIMEOUT).await {
+        Ok(fetch) => fetch,
+        Err(err) => return SourceRun::fail(format!("TheAudioDB：请求失败（{err}）")),
+    };
+    if fetch.status != 200 {
+        return SourceRun::fail(format!(
+            "TheAudioDB：HTTP {}（API Key 被拒？响应前 80 字符：{}）",
+            fetch.status,
+            fetch.head(80)
+        ));
+    }
+    let Some(data) = fetch.data.as_ref() else {
+        return SourceRun::fail(format!(
+            "TheAudioDB：HTTP 200 但响应不是 JSON（空响应体？前 80 字符：{}）",
+            fetch.head(80)
+        ));
+    };
     let tracks = data
         .get("track")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    if tracks.is_empty() {
-        return None;
-    }
+    let mut matched = 0usize;
     for track in &tracks {
         let track_artist = s_of(track.get("strArtist"));
         if !is_fuzzy_match(hint, &track_artist) {
             continue;
         }
+        matched += 1;
         let album_id = s_of(track.get("idAlbum"));
         let mut album_info: Option<Value> = None;
         if !album_id.is_empty() {
-            let album_url = format!("https://www.theaudiodb.com/api/v1/json/{key}/album.php");
-            if let Some((_, album_data)) = get_json(
-                client,
-                &album_url,
-                &[("m".to_string(), album_id.clone())],
-                hdrs(&[("User-Agent", CHROME_UA)]),
-                REQUEST_TIMEOUT,
-            )
-            .await
+            let album_url = with_query(
+                &format!("https://www.theaudiodb.com/api/v1/json/{key}/album.php"),
+                &[("m", &album_id)],
+            );
+            if let Ok(album_fetch) =
+                fetch_json(client, &album_url, headers.clone(), REQUEST_TIMEOUT).await
             {
-                if let Some(first) = album_data
-                    .get("album")
+                if let Some(first) = album_fetch
+                    .data
+                    .as_ref()
+                    .and_then(|v| v.get("album"))
                     .and_then(|v| v.as_array())
                     .and_then(|a| a.first())
                 {
@@ -2197,10 +2824,22 @@ async fn search_theaudiodb(client: &reqwest::Client, keyword: &str, hint: &str) 
             }
         }
         if let Some(raw) = parse_theaudiodb(track, album_info.as_ref()) {
-            return Some(raw);
+            return SourceRun::single(
+                Some(raw),
+                format!(
+                    "HTTP 200，s={artist_query} t={keyword}，track={} 条（歌手匹配 {matched} 条）",
+                    tracks.len()
+                ),
+            );
         }
     }
-    None
+    SourceRun::single(
+        None,
+        format!(
+            "HTTP 200，s={artist_query} t={keyword}，track={} 条（歌手匹配 {matched} 条）",
+            tracks.len()
+        ),
+    )
 }
 
 /// Spotify access token（进程内缓存 + 提前 60 秒刷新）。
@@ -2399,33 +3038,36 @@ async fn mb_throttle() {
     *guard = Some(Instant::now());
 }
 
-/// 单源执行（engine key → 候选）。
+/// 单源执行（engine key → 候选 + 诊断）。
+///
+/// qq / kugou / kuwo / lastfm / theaudiodb 这 5 个源自己返回 `SourceRun`（带 HTTP 诊断与
+/// 结构性失败原因），其余源仍然只是「候选」，这里统一包成 `SourceRun`（note/error 为空）。
 async fn run_source(
     client: &reqwest::Client,
     name: &str,
     keyword: &str,
     hint: &str,
     limit: usize,
-) -> Vec<Raw> {
-    let single = |raw: Option<Raw>| -> Vec<Raw> { raw.into_iter().collect() };
+) -> SourceRun {
+    let single = |raw: Option<Raw>| -> SourceRun { SourceRun::single(raw, "") };
     match name {
         "musicbrainz" => single(search_musicbrainz(client, keyword, hint).await),
         "netease" => single(search_netease(client, keyword, hint).await),
-        "qq" => single(search_qq(client, keyword, hint).await),
-        "kugou" => single(search_kugou(client, keyword, hint).await),
-        "kuwo" => single(search_kuwo(client, keyword, hint).await),
+        "qq" => search_qq(client, keyword, hint).await,
+        "kugou" => search_kugou(client, keyword, hint).await,
+        "kuwo" => search_kuwo(client, keyword, hint).await,
         "itunes" => {
             let found = search_itunes(client, keyword, hint, limit.max(1)).await;
-            truncate_per_source(found, limit)
+            SourceRun::ok(truncate_per_source(found, limit), "")
         }
         "deezer" => single(search_deezer(client, keyword, hint).await),
-        "lastfm" => single(search_lastfm(client, keyword, hint).await),
-        "theaudiodb" => single(search_theaudiodb(client, keyword, hint).await),
+        "lastfm" => search_lastfm(client, keyword, hint).await,
+        "theaudiodb" => search_theaudiodb(client, keyword, hint).await,
         "spotify" => single(search_spotify(client, keyword, hint).await),
         "genius" => single(search_genius(client, keyword, hint).await),
         "ytmusic" => single(search_ytmusic(client, keyword, hint).await),
         "discogs" => single(search_discogs(client, keyword, hint).await),
-        _ => Vec::new(),
+        _ => SourceRun::default(),
     }
 }
 
@@ -2468,8 +3110,8 @@ pub async fn search_all(client: &reqwest::Client, q: &ScrapeQuery) -> ScrapeOutc
             )
             .await
             {
-                Ok(raws) => (name, raws, String::new()),
-                Err(_) => (name, Vec::new(), TIMEOUT_ERROR.to_string()),
+                Ok(run) => (name, run, String::new()),
+                Err(_) => (name, SourceRun::default(), TIMEOUT_ERROR.to_string()),
             }
         });
     }
@@ -2477,13 +3119,19 @@ pub async fn search_all(client: &reqwest::Client, q: &ScrapeQuery) -> ScrapeOutc
 
     let mut source_status: Vec<SourceStatus> = Vec::with_capacity(results.len());
     let mut pairs: Vec<(Raw, Candidate)> = Vec::new();
-    for (name, raws, error) in results {
+    for (name, run, timeout_error) in results {
         let mut count = 0usize;
-        for raw in raws {
+        for raw in run.raws {
             let cand = from_core(&raw, &name);
             pairs.push((raw, cand));
             count += 1;
         }
+        // 超时优先；否则用源自己给出的结构性失败原因（lastfm 的 Key 被拒、qq 的 500 …）。
+        let error = if timeout_error.is_empty() {
+            run.error
+        } else {
+            timeout_error
+        };
         source_status.push(SourceStatus {
             source: name,
             count,
@@ -3660,71 +4308,163 @@ mod tests {
         assert_eq!(qq_score("晴天", "稻香"), 0);
     }
 
+    /// 真实报文（截小）：**2026-10-08** 抓自
+    /// `https://c.y.qq.com/soso/fcgi-bin/search_for_qq_cp?w=稻香&n=10&p=1&format=json&cr=1&t=0`
+    /// （HTTP 200，9428 字节）。
+    ///
+    /// 这里只留了第 1 条 `data.song.list[0]` 里与本实现相关的字段：新接口把发布时间从
+    /// `time_public`（字符串）换成了 `pubtime`（unix 秒），所以 `parse_qq` 必须能吃掉它。
     #[test]
-    fn kuwo_parse_matches_python_quirks() {
-        // Python 的正则是非贪婪的 `jsondata\s*=\s*(\{.*?\})`：只要 abslist 里是对象，
-        // 捕获就在第一个 `}` 处截断 → json 解析失败 → 整个源返回 None（Python 侧实测同样如此）。
-        let nested = "var jsondata = {'abslist': [{'ARTIST': '周杰伦', 'SONGNAME': '稻香', \
-                      'ALBUM': '魔杰座', 'ALBUMID': '123456', 'MUSICRID': 'MUSIC_999', \
-                      'DURATION': '223', 'RELEASE_DATE': '2008-10-14'}]};";
-        assert!(
-            parse_kuwo(nested, "周杰伦").is_none(),
-            "与 Python 一致：嵌套对象会被非贪婪正则截断"
+    fn parse_qq_real_search_for_qq_cp_response() {
+        let data: Value = serde_json::from_str(
+            r#"{"code":0,"data":{"keyword":"稻香","song":{"curnum":10,"curpage":1,"list":[
+                {"albumid":36062,"albummid":"002Neh8l0uciQZ","albumname":"魔杰座",
+                 "interval":223,"pubtime":1224000000,"pure":0,
+                 "singer":[{"id":4558,"mid":"0025NhlN2yWrP4","name":"周杰伦"}],
+                 "songid":449205,"songmid":"003aAYrm3GE0Ac","songname":"稻香","type":0}
+            ]}}}"#,
+        )
+        .unwrap();
+        let raw = parse_qq(&data, "稻香", "周杰伦").expect("真实报文应能出候选");
+        assert_eq!(raw.source, "QQMusic");
+        assert_eq!(raw.title, "稻香");
+        assert_eq!(raw.artist, "周杰伦");
+        assert_eq!(raw.album, "魔杰座");
+        assert_eq!(raw.album_type, "专辑"); // 歌名 != 专辑名
+        assert_eq!(raw.song_id, "003aAYrm3GE0Ac");
+        assert_eq!(raw.duration, 223.0);
+        assert_eq!(
+            raw.cover_url,
+            "https://y.gtimg.cn/music/photo_new/T002R1000x1000M000002Neh8l0uciQZ.jpg?max_age=2592000"
+        );
+        // 1224000000 → 本地时区 2008-10-14（与老接口的 time_public 一致）
+        assert_eq!(raw.date, "2008-10-14");
+        assert_eq!(raw.year, "2008");
+    }
+
+    /// 真实报文（截小）：**2026-10-08** 抓自
+    /// `https://search.kuwo.cn/r.s?all=稻香&ft=music&itemset=web_2013&client=kt&rformat=json&encoding=utf8&rn=30&pn=0`
+    /// （HTTP 200，68780 字节）。
+    ///
+    /// 真实响应**没有** `jsondata = ` 前缀，而且 `'ARTIST':'TFBOYS\\\\u0026TF家族'` 这种「反斜杠被
+    /// 多层 repr 加倍」的 `\\u0026` 必须解成 `&`；`abslist` 里是嵌套对象，所以旧的
+    /// `jsondata\s*=\s*(\{.*?\})` 非贪婪正则在真实报文上必然截断（Python 与本实现都是 0 条）。
+    #[test]
+    fn kuwo_parse_real_response_json() {
+        let real = r#"{'ARTISTPIC':'','HIT':'1317','HITMODE':'song','HIT_BUT_OFFLINE':'0','MSHOW':'0','NEW':'0','PN':'0','RN':'10','SHOW':'10','TOTAL':'1317','UK':'b4994e51-a2c0-4c2e-aaac-dc5b997ef96f','abslist':[{'AARTIST':'','ALBUM':'','ALBUMID':'0','ARTIST':'TFBOYS\\\\u0026TF家族','ARTISTID':'128294','DURATION':'209','MKVRID':'MV_0','MUSICRID':'MUSIC_91637031','PICPATH':'','SONGNAME':'稻香&nbsp;(TF少年GO！第二十期LiveShow现场)','SUBLIST':[]}]}"#;
+        assert_eq!(i_of(parse_repr_dict(real).unwrap().get("HIT")), Some(1317));
+
+        // 命中歌手 + `ALBUMID='0'`（拼不出封面）→ 退化为「封面留空」的候选，而不是整条丢弃
+        let raw = parse_kuwo(real, "TFBOYS").expect("真实报文应能出候选");
+        assert_eq!(raw.source, "Kuwo");
+        assert_eq!(raw.artist, "TFBOYS&TF家族"); // `\\u0026` 解成 `&`
+        assert_eq!(raw.title, "稻香 (TF少年GO！第二十期LiveShow现场)"); // `&nbsp;` 解成空格
+        assert_eq!(raw.cover_url, ""); // ALBUMID=0 → 无封面
+        assert_eq!(raw.song_id, "91637031");
+        assert_eq!(raw.duration, 209.0);
+
+        // `ALBUMID` 能拼出封面 URL 时照样填（best effort：这个 URL 模式 2026-10-08 实测 404，
+        // 所以调用方不再拿封面当筛条，见 `kuwo_cover_url` 的说明）
+        let with_album_id = real.replace("'ALBUMID':'0'", "'ALBUMID':'88781504'");
+        assert_eq!(
+            parse_kuwo(&with_album_id, "TFBOYS").unwrap().cover_url,
+            "https://img4.kuwo.cn/star/albumcover/1080/4/15/88781504.jpg"
         );
 
-        // 线上真实形态（本机实测）：响应体没有 `jsondata = ` 前缀，直接是一个对象 → 不匹配
-        let bare = "{'PN':'0','RN':'0','HIT':'0','ABS':'0','abslist':[]}";
-        assert!(parse_kuwo(bare, "周杰伦").is_none());
+        // `ALBUM` 字段（真实报文里是 `''`，这里换成真专辑名看归一）
+        let with_album = real
+            .replace("'ALBUM':''", "'ALBUM':'魔杰座'")
+            .replace("'ALBUMID':'0'", "'ALBUMID':'88781504'");
+        assert_eq!(parse_kuwo(&with_album, "TFBOYS").unwrap().album, "魔杰座");
 
-        // 能完整匹配的最小形态：abslist 为空 / 缺 abslist / 完全不是 JSON
-        assert!(parse_kuwo("var jsondata = {'PN':'0','abslist':[]};", "周杰伦").is_none());
-        assert!(parse_kuwo("var jsondata = {'PN':'0'};", "周杰伦").is_none());
+        let nores = "{'PN':'0','RN':'0','HIT':'0','TOTAL':'0','SHOW':'0','MSHOW':'0','HITMODE':'nores','ARTISTPIC':'','abslist':[]}";
+        assert!(parse_kuwo(nores, "周杰伦").is_none());
         assert!(parse_kuwo("<html>抓取失败</html>", "周杰伦").is_none());
 
-        // 封面 URL 拼接：`{{ALBUMID[-2:]}}/{{ALBUMID[-4:-2]}}`（int() 失败即整条丢弃）
+        // 封面 URL 拼接：`{{ALBUMID[-2:]}}/{{ALBUMID[-4:-2]}}`（int() 失败即拼不出）
         assert_eq!(
             kuwo_cover_url("123456"),
             "https://img4.kuwo.cn/star/albumcover/1080/56/34/123456.jpg"
         );
         assert_eq!(kuwo_cover_url("12ab"), "");
         assert_eq!(kuwo_cover_url("7"), ""); // ALBUMID[-4:-2] 为空 → int('') 失败
+        assert_eq!(kuwo_cover_url("0"), "");
         assert_eq!(kuwo_cover_url(""), "");
     }
 
     #[test]
-    fn kugou_detail_parses_publish_info_fallback() {
-        let body = json!({"data": {
+    fn kugou_detail_parses_mobile_songinfo() {
+        // 真实报文（截小）：**2026-10-08** 抓自
+        // `https://m.kugou.com/app/i/getSongInfo.php?cmd=playInfo&hash=8909e1809908cd8e3bf6cf85d98b93f0`
+        // （HTTP 200，2648 字节，周杰伦《稻香》）。手机版详情是**扁平**的、没有 `data` 包一层，
+        // 字段名也不同（`songName` / `author_name` / `album_img` / `timeLength`），而且这条
+        // `timeLength=0`（付费/受限条目），时长要从 `extra.320timelength` 兜底。
+        let body: Value = serde_json::from_str(
+            r#"{"authors":[{"author_name":"周杰伦","author_id":3520}],"hash":"8909E1809908CD8E3BF6CF85D98B93F0",
+                "author_name":"周杰伦","imgUrl":"http://singerimg.kugou.com/uploadpic/softhead/{size}/20260324203006202058.jpg",
+                "errcode":0,"req_albumid":"960399","fail_process":12,"timeLength":0,"bitRate":0,
+                "singerName":"周杰伦","fileName":"周杰伦 - 稻香",
+                "extra":{"320hash":"21AC928E1D68EC3632EF2CAE68718201","320timelength":223503,"128filesize":3576668},
+                "album_img":"http://imge.kugou.com/stdmusic/{size}/20241118/20241118160622508429.jpg",
+                "albumid":960399,"songName":"稻香",
+                "trans_param":{"language":"国语","union_cover":"http://imge.kugou.com/stdmusic/{size}/20241118/20241118160622508429.jpg"}}"#,
+        )
+        .unwrap();
+        // 第 1 跳搜索命中（截自 `songsearch.kugou.com/song_search_v2?...keyword=稻香&pagesize=20`）
+        let hit: Value = serde_json::from_str(
+            r#"{"SongName":"稻香","OriSongName":"稻香","FileHash":"8909e1809908cd8e3bf6cf85d98b93f0",
+                "SingerName":"周杰伦","AlbumName":"魔杰座","AlbumID":"960399","Duration":223,
+                "PublishDate":"2008-10-14","Scid":1}"#,
+        )
+        .unwrap();
+
+        let raw = parse_kugou_detail(&body, Some(&hit)).unwrap();
+        assert_eq!(raw.source, "Kugou");
+        assert_eq!(
+            raw.cover_url, // album_img 优先，`{size}` → 480
+            "http://imge.kugou.com/stdmusic/480/20241118/20241118160622508429.jpg"
+        );
+        assert_eq!(raw.title, "稻香");
+        assert_eq!(raw.album, "魔杰座"); // 专辑名只能来自第 1 跳命中
+        assert_eq!(raw.artist, "周杰伦");
+        assert_eq!(raw.album_type, "单曲");
+        assert_eq!(raw.date, "2008-10-14"); // 第 1 跳命中的 PublishDate
+        assert_eq!(raw.year, "2008");
+        assert_eq!(raw.duration, 223.0); // timeLength=0 → extra.320timelength
+
+        // 旧形态（`{"data": {...}}` + `song_name`/`album_name`/`timelength`）仍然兼容
+        let legacy = json!({"data": {
             "img": "http://imge.kugou.com/soft/collection/{size}/x.jpg",
             "song_name": "稻香", "album_name": "魔杰座", "author_name": "周杰伦",
             "timelength": 223453, "publish_info": "2008-10-14", "trans_param": {}
         }});
-        let raw = parse_kugou_detail(&body).unwrap();
-        assert_eq!(raw.source, "Kugou");
+        let raw_legacy = parse_kugou_detail(&legacy, None).unwrap();
         assert_eq!(
-            raw.cover_url,
+            raw_legacy.cover_url,
             "http://imge.kugou.com/soft/collection/480/x.jpg"
         );
-        assert_eq!(raw.title, "稻香");
-        assert_eq!(raw.album, "魔杰座");
-        assert_eq!(raw.artist, "周杰伦");
-        assert_eq!(raw.album_type, "单曲");
-        assert_eq!(raw.year, "2008");
-        assert_eq!(raw.date, "2008-10-14");
-        assert_eq!(raw.duration, 223.0);
+        assert_eq!(raw_legacy.album, "魔杰座");
+        assert_eq!(raw_legacy.duration, 223.0);
 
-        // album_name 为空 → 用标题
-        let body2 = json!({"data": {"img": "http://x/{size}.jpg", "song_name": "稻香",
-                                    "author_name": "周杰伦"}});
-        assert_eq!(parse_kugou_detail(&body2).unwrap().album, "稻香");
-        // 毫秒时间戳（> 1e12）走 /1000 分支
-        let body3 = json!({"data": {"img": "http://x/{size}.jpg", "song_name": "稻香",
-                                    "author_name": "周杰伦",
-                                    "trans_param": {"publish_time": 1223904000000i64}}});
-        let raw3 = parse_kugou_detail(&body3).unwrap();
+        // 没有专辑名 → 用标题；毫秒时间戳（> 1e12）走 /1000 分支
+        let no_album = json!({"img": "http://x/{size}.jpg", "songName": "稻香",
+                              "author_name": "周杰伦"});
+        assert_eq!(parse_kugou_detail(&no_album, None).unwrap().album, "稻香");
+        let ms_ts = json!({"img": "http://x/{size}.jpg", "songName": "稻香",
+                           "author_name": "周杰伦",
+                           "trans_param": {"publish_time": 1223904000000i64}});
+        let raw3 = parse_kugou_detail(&ms_ts, None).unwrap();
         assert_eq!(raw3.year.len(), 4, "年份应是 4 位：{}", raw3.year);
         assert_eq!(raw3.date.len(), 10, "日期应是 YYYY-MM-DD：{}", raw3.date);
+        // 时长只能来自第 1 跳命中的秒数
+        let hit_only = json!({"songName": "稻香", "author_name": "周杰伦",
+                              "album_img": "http://x/{size}.jpg"});
+        assert_eq!(
+            parse_kugou_detail(&hit_only, Some(&hit)).unwrap().duration,
+            223.0
+        );
         // 无封面 → drop
-        assert!(parse_kugou_detail(&json!({"data": {"song_name": "稻香"}})).is_none());
+        assert!(parse_kugou_detail(&json!({"songName": "稻香"}), None).is_none());
     }
 
     #[test]
@@ -3753,6 +4493,33 @@ mod tests {
         // 没有封面 → 丢弃
         let no_cover = json!({"name": "稻香", "album": {"title": "魔杰座"}});
         assert!(parse_lastfm_info(Some(&no_cover), &track, "周杰伦").is_none());
+    }
+
+    /// 真实报文（截小）：**2026-10-08** 抓自
+    /// `https://ws.audioscrobbler.com/2.0/?method=track.search&track=稻香&api_key=<内置 Key>&format=json&limit=5`
+    /// —— HTTP 403 + 这 85 字节的响应体。
+    ///
+    /// 这就是 lastfm 现在恒为 0 条的原因：内置 Key 被上游吊销，只有 `LASTFM_API_KEY`
+    /// 提供有效 Key 时这个源才可能出候选。所以这里断言的是**可读错误**而不是「假装没命中」。
+    #[test]
+    fn lastfm_invalid_key_is_reported() {
+        let body: Value = serde_json::from_str(
+            r#"{"message":"Invalid API key - You must be granted a valid key by last.fm","error":10}"#,
+        )
+        .unwrap();
+        let reason = lastfm_error_reason(403, &body);
+        assert!(reason.contains("403"), "{reason}");
+        assert!(reason.contains("error 10"), "{reason}");
+        assert!(reason.contains("Invalid API key"), "{reason}");
+        assert!(reason.contains("LASTFM_API_KEY"), "{reason}");
+
+        // 其它错误码（例如 artist/track 缺失时的 error 6）也要能读出来
+        let other = json!({"message": "Track not found", "error": 6});
+        let reason2 = lastfm_error_reason(404, &other);
+        assert!(reason2.contains("404") && reason2.contains("error 6"), "{reason2}");
+        // 没有 message → 也不能 panic
+        let bare = json!({"error": 29});
+        assert!(lastfm_error_reason(429, &bare).contains("429"));
     }
 
     #[test]
@@ -3785,6 +4552,49 @@ mod tests {
         );
         // 全空 → 丢弃
         assert!(parse_theaudiodb(&track, Some(&json!({"strAlbum": "魔杰座"}))).is_none());
+    }
+
+    /// 真实报文（截小）：**2026-10-08** 抓自
+    /// `https://www.theaudiodb.com/api/v1/json/123/searchtrack.php?s=coldplay&t=yellow`（HTTP 200）
+    /// 与 `https://www.theaudiodb.com/api/v1/json/123/album.php?m=2109615`（HTTP 200）。
+    ///
+    /// 两处要点：`searchtrack.php` **必须同时给 `s` 和 `t`**（只给 `s` 时上游回 200 + 0 字节），
+    /// 真实专辑响应里 `strAlbumThumbHD` / `strAlbumThumbHQ` 是 `null`，只能落到 `strAlbumThumb`。
+    #[test]
+    fn parse_theaudiodb_real_response() {
+        let track: Value = serde_json::from_str(
+            r#"{"idTrack":"32724184","idAlbum":"2109615","idArtist":"111239","idLyric":"102256",
+                "strTrack":"Yellow","strAlbum":"Parachutes","strArtist":"Coldplay",
+                "strArtistAlternate":null,"intCD":"1","intDuration":"269240","strGenre":"Pop-Rock",
+                "strMood":"Relaxed","strStyle":"Rock/Pop","intTempo":"86","strTheme":"In Love"}"#,
+        )
+        .unwrap();
+        let album: Value = serde_json::from_str(
+            r#"{"idAlbum":"2109615","idArtist":"111239","strAlbum":"Parachutes","strArtist":"Coldplay",
+                "intYearReleased":"2000","strStyle":"Rock/Pop","strGenre":"Pop-Rock",
+                "strLabel":"Parlophone UK","strReleaseFormat":"Album","intSales":"8500000",
+                "strAlbumThumb":"https://r2.theaudiodb.com/images/media/album/thumb/swxywp1367234202.jpg",
+                "strAlbumThumbHQ":null,
+                "strAlbumCDart":"https://r2.theaudiodb.com/images/media/album/cdart/vtuxpp1429197083.png"}"#,
+        )
+        .unwrap();
+        let raw = parse_theaudiodb(&track, Some(&album)).unwrap();
+        assert_eq!(raw.source, "TheAudioDB");
+        assert_eq!(raw.title, "Yellow");
+        assert_eq!(raw.artist, "Coldplay");
+        assert_eq!(raw.album, "Parachutes");
+        assert_eq!(raw.album_type, "专辑");
+        assert_eq!(raw.genre.as_deref(), Some("Pop-Rock"));
+        assert_eq!(raw.year, "2000");
+        assert_eq!(
+            raw.cover_url,
+            "https://r2.theaudiodb.com/images/media/album/thumb/swxywp1367234202.jpg"
+        );
+        assert_eq!(raw.duration, 0.0); // 该源解析里不取 intDuration
+        assert_eq!(raw.date, "");
+
+        // 没有专辑详情（`album.php` 拿不到）→ 无封面，整条丢弃（与 Python 一致）
+        assert!(parse_theaudiodb(&track, None).is_none());
     }
 
     #[test]
@@ -4041,5 +4851,77 @@ mod tests {
         assert_eq!(b64_decode("bWV0YXRpZHk=").unwrap(), b"metatidy");
         assert_eq!(b64_decode("bWV0\nYXRpZHk=").unwrap(), b"metatidy"); // 忽略空白
         assert!(b64_decode("!!!!").is_none());
+    }
+
+    /// 取证测试（**真实联网**，默认被 `#[ignore]` 跳过，所以 CI 的离线测试不受影响）。
+    ///
+    /// 依次查 qq / kugou / kuwo / lastfm / theaudiodb，打印每源的 HTTP 情况（`run.note`）、
+    /// 候选数、首条标题/歌手；**五个源全都 0 条就 panic**——这是一颗有牙齿的自检：
+    /// 上游再改版（接口下线、参数必需、Key 被拒）时它会红，而不是静默变成「永远空」。
+    ///
+    /// 跑法：`cargo test --release live_verify_extra_sources -- --ignored --nocapture`
+    ///
+    /// 关键词固定「周杰伦 / 稻香」（2026-10-08 实测 QQ / 酷狗 / 酷我都能出候选）；
+    /// 末尾额外用 Coldplay / Yellow 给 TheAudioDB 做一次英文旁证——该库以欧美曲目为主，
+    /// 对中文歌它上游自己就没有数据（`search.php?s=周杰伦` → `{"artists":null}`）。
+    #[test]
+    #[ignore]
+    fn live_verify_extra_sources() {
+        let client = reqwest::Client::builder()
+            .user_agent(APP_USER_AGENT)
+            .build()
+            .expect("构建 reqwest client 失败");
+        let runtime = tokio::runtime::Runtime::new().expect("构建 tokio runtime 失败");
+        runtime.block_on(async {
+            let mut non_empty = 0usize;
+            for name in ["qq", "kugou", "kuwo", "lastfm", "theaudiodb"] {
+                let run = run_source(&client, name, "稻香", "周杰伦", 5).await;
+                let count = run.raws.len();
+                if count > 0 {
+                    non_empty += 1;
+                }
+                let first = run
+                    .raws
+                    .first()
+                    .map(|raw| {
+                        format!(
+                            "{} / {}（专辑 {} {}，时长 {}s，封面 {}）",
+                            raw.title,
+                            raw.artist,
+                            if raw.album.is_empty() { "-" } else { &raw.album },
+                            if raw.year.is_empty() { "-" } else { &raw.year },
+                            raw.duration,
+                            if raw.cover_url.is_empty() { "-" } else { "有" }
+                        )
+                    })
+                    .unwrap_or_else(|| "<无候选>".to_string());
+                println!(
+                    "[live] {:<11} count={count} 上游={} 首条={first}",
+                    name, run.note
+                );
+                if !run.error.is_empty() {
+                    println!("[live] {:<11} SourceStatus.error={}", name, run.error);
+                }
+            }
+
+            // 英文旁证：TheAudioDB 确实可用（中文歌是上游没数据，不是本实现坏）
+            let en = run_source(&client, "theaudiodb", "Yellow", "Coldplay", 5).await;
+            println!(
+                "[live] {:<11} count={} 上游={} 首条={}",
+                "theaudiodb*",
+                en.raws.len(),
+                en.note,
+                en.raws
+                    .first()
+                    .map(|r| format!("{} / {}（封面 {}）", r.title, r.artist, r.cover_url))
+                    .unwrap_or_else(|| "<无候选>".to_string())
+            );
+
+            println!("[live] 五个源里有候选的：{non_empty}/5");
+            assert!(
+                non_empty > 0,
+                "qq/kugou/kuwo/lastfm/theaudiodb 在这次真实联网探针里全部 0 条候选（见上面的 [live] 行）"
+            );
+        });
     }
 }

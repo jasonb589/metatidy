@@ -283,11 +283,19 @@ pub fn target_path(
     let values = build_values(track, unknown_artist, unknown_album, unknown_other);
     let rel_dir = render_relative_dir(dir_template, &values);
     let filename = render_filename(filename_template, &values, Some(track.ext.as_str()));
-    if rel_dir.is_empty() {
-        library_root.join(filename)
-    } else {
-        library_root.join(rel_dir).join(filename)
+    // 逐段 push，而不是 `library_root.join(rel_dir)`：
+    // rel_dir 是「中文/周杰伦/魔杰座」这种带 `/` 的整串，Windows 上 join 会保留内层 `/`，
+    // 得到 `root\中文/周杰伦/魔杰座` 这种**混用分隔符**的路径——它在文件系统上没问题，
+    // 但和索引里存的（原生分隔符）按字符串比就不相等，端到端验收第 30 项因此挂过。
+    let mut target = library_root.to_path_buf();
+    for segment in rel_dir.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            continue; // 段已由 render_relative_dir/sanitize_filename 过滤，这里再兜一层
+        }
+        target.push(segment);
     }
+    target.push(filename);
+    target
 }
 
 /// 检查模板里的未知占位符，返回警告（不抛异常）。

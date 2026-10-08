@@ -9,9 +9,11 @@
 //!   metatidy-server --selftest      跑依赖自检（需要 DATABASE_URL / REDIS_URL）
 //!   metatidy-server --probe-tags <文件>   用 lofty 读一个真实音频文件的标签
 
+mod api;
 mod config;
 mod db;
 mod error;
+mod jobs;
 
 use std::sync::Arc;
 mod fixtures;
@@ -25,17 +27,14 @@ mod scanner;
 mod scrapers;
 mod tagio;
 
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::error::AppError;
+
 
 /// 全进程共享状态。
 #[derive(Clone)]
@@ -48,9 +47,19 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 日志级别：`RUST_LOG` 优先，其次 `METATIDY_LOG_LEVEL`（与 Python 版同名），默认 info
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("METATIDY_LOG_LEVEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "info".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
+            tracing_subscriber::EnvFilter::try_new(&filter)
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
@@ -103,16 +112,33 @@ async fn main() -> anyhow::Result<()> {
         redis,
     };
 
-    let app = Router::new()
-        .route("/api/status", get(api_status))
-        .route("/api/health", get(|| async { "ok" }))
-        .with_state(state);
+
+
+
+    let app = build_router(state, &config);
 
     let addr = format!("{}:{}", config.host, config.port);
     info!("metatidy (rust) 监听 http://{}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// 组装路由：全部 API 路由 + 静态前端兜底（找不到前端目录时退回 JSON 提示）。
+fn build_router(state: AppState, config: &Config) -> Router {
+    let router = api::router(state);
+    match config.resolve_static_dir() {
+        Some(dir) => {
+            info!("静态前端目录：{}", dir.display());
+            router.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true))
+        }
+        None => {
+            warn!("没找到静态前端目录（可用 METATIDY_STATIC_DIR 指定），/ 将只回 JSON 提示");
+            router.fallback(get(|| async {
+                Json(json!({ "detail": "静态界面缺失", "api": "/docs" }))
+            }))
+        }
+    }
 }
 
 /// 连接 Redis；失败只警告，不让整个服务起不来。
@@ -136,31 +162,6 @@ async fn connect_redis(config: &Config) -> Option<redis::aio::ConnectionManager>
     }
 }
 
-/// 状态接口：把三个外部依赖都真实探一遍，方便 CI 直接断言。
-async fn api_status(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
-        .fetch_one(&state.db)
-        .await?;
-
-    let redis_ok = match state.redis.clone() {
-        Some(mut conn) => {
-            let pong: Result<String, _> = redis::cmd("PING").query_async(&mut conn).await;
-            pong.map(|v| v == "PONG").unwrap_or(false)
-        }
-        None => false,
-    };
-
-    Ok(Json(json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "engine": "rust",
-        "music_dir": state.config.music_dir,
-        "library_root": state.config.library_root,
-        "tracks": tracks,
-        "postgres": true,
-        "redis": redis_ok,
-        "supported_formats": [".mp3", ".flac", ".m4a", ".ogg", ".oga", ".opus"],
-    })))
-}
 
 /// 用 lofty 读一个文件的标签（阶段 1 证明 lofty 可用）。
 fn tag_probe(path: &str) -> anyhow::Result<Value> {
