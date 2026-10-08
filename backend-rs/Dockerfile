@@ -9,13 +9,17 @@ FROM rust:1-slim AS builder
 
 WORKDIR /build
 
-# 先只拷清单，让依赖层能被 docker 缓存复用
-COPY Cargo.toml ./
+# 先只拷清单，让依赖层能被 docker 缓存复用。
+# 构建上下文是**仓库根**（CI 里 `context: .` + `file: backend-rs/Dockerfile`），
+# 因为镜像还要带上无构建前端 app/static（见下面运行阶段）。
+# Cargo.lock 必须拷进来：没有它 cargo 会各自解析一遍依赖，镜像不可复现。
+COPY backend-rs/Cargo.toml backend-rs/Cargo.lock ./
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
 
-COPY src ./src
-COPY migrations ./migrations
-# 触碰一下保证重新编译业务代码
+COPY backend-rs/src ./src
+COPY backend-rs/migrations ./migrations
+
+# 触碰一下保证重新编译业务代码（依赖层已在上一步缓存好）
 RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim
@@ -26,12 +30,17 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin metatidy \
 
 COPY --from=builder /build/target/release/metatidy-server /usr/local/bin/metatidy-server
 
+# 无构建前端：与 Python 版同一套 app/static，内容一个字节都不改
+COPY app/static /app/static
+
 USER metatidy
 
 ENV METATIDY_HOST=0.0.0.0 \
     METATIDY_PORT=8080 \
     METATIDY_MUSIC_DIR=/music \
     METATIDY_LIBRARY_ROOT=/music \
+    METATIDY_STATIC_DIR=/app/static \
+    METATIDY_DATA_DIR=/data \
     RUST_LOG=info
 
 VOLUME ["/music"]
