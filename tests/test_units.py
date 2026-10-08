@@ -159,3 +159,23 @@ def test_validate_template_reports_unknown_placeholder():
 def test_sanitize_protects_path_traversal():
     target = target_path(_track(artist="../../etc"), "/lib", "{artist}", "{title}")
     assert ".." not in Path(target).parts
+
+
+def test_empty_track_number_does_not_leave_dangling_dash():
+    """回归：音轨号为空时，文件名不能变成 `- 稻香.flac`。"""
+    values = _values(_track(track=""))
+    assert render_filename("{track:02} - {title}", values, ".flac") == "稻香.flac"
+    assert render_filename("{track:02}. {title}", values, ".flac") == "稻香.flac"
+
+
+def test_tidy_separators():
+    from app.templates import tidy_separators
+
+    assert tidy_separators("- 稻香") == "稻香"
+    assert tidy_separators("A - - B") == "A - B"
+    assert tidy_separators("KGB - ADÉLA") == "KGB - ADÉLA"  # 正常分隔符不动
+    assert tidy_separators("   ") == ""
+    assert tidy_separators("") == ""
+    # 非空占位符不受影响
+    values = _values(_track(track="3"))
+    assert render_filename("{track:02} - {title}", values, ".flac") == "03 - 稻香.flac"

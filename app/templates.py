@@ -104,20 +104,25 @@ def build_values(track: dict, *, unknown_artist: str, unknown_album: str, unknow
 def render_segment(template: str, values: dict[str, str]) -> tuple[str, bool]:
     """渲染单个路径段。返回 (文本, 是否应丢弃该段)。
 
-    丢弃条件：模板里出现过的可选占位符 `{x?}` 全部为空，且去除它们之后段内没有其它实义字符。
+    - 占位符为空时顺手收掉残留的分隔符：`{track:02} - {title}` 在无音轨号时得到 `稻香`，
+      而不是难看的 `- 稻香`。
+    - 丢弃条件：模板里出现过的可选占位符 `{x?}` 全部为空，且去掉它们之后段内没有其它实义字符。
     """
     optional_seen = False
     optional_nonempty = False
+    empty_seen = False
     literal_rest = template
 
     def _sub(m: re.Match) -> str:
-        nonlocal optional_seen, optional_nonempty, literal_rest
+        nonlocal optional_seen, optional_nonempty, empty_seen, literal_rest
         name, width, optional = m.group(1), m.group(2), m.group(3)
         raw = values.get(name, "")
         text = raw
         if width and text:
             width_i = int(width)
             text = text.zfill(width_i) if text.isdigit() else text[:width_i]
+        if not text:
+            empty_seen = True
         if optional:
             optional_seen = True
             if text:
@@ -126,6 +131,8 @@ def render_segment(template: str, values: dict[str, str]) -> tuple[str, bool]:
         return text
 
     rendered = TOKEN_RE.sub(_sub, template)
+    if empty_seen:
+        rendered = tidy_separators(rendered)
     if optional_seen and not optional_nonempty:
         leftover = TOKEN_RE.sub("", literal_rest)
         leftover = re.sub(r"[\s\-_.]+", "", leftover)
@@ -204,3 +211,15 @@ def path_length_warning(path: Path) -> str | None:
     if len(str(path)) > 255:
         return "路径过长（>255 字符），Windows 下可能失败"
     return None
+
+
+def tidy_separators(text: str) -> str:
+    """占位符为空时，收掉残留的悬空分隔符（`- 稻香` -> `稻香`）。
+
+    只在有占位符渲染为空时调用，避免影响用户故意写的分隔符。
+    """
+    out = text or ""
+    out = re.sub(r"^[\s\-_.]+", "", out)              # 开头的悬空分隔符
+    out = re.sub(r"[\s\-_.]+$", "", out)              # 结尾的悬空分隔符
+    out = re.sub(r"\s*[-_.]\s*[-_.]\s*", " - ", out)  # 连续分隔符合并
+    return out.strip()
