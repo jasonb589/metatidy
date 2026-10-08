@@ -147,10 +147,7 @@ pub fn read_tags(path: &Path) -> RawTags {
             .get_string(&ItemKey::MusicBrainzReleaseGroupId)
             .map(|v| v.to_string())
             .unwrap_or_default();
-        out.albumtype = tag
-            .get_string(&ItemKey::Unknown(ALBUM_TYPE_KEY.to_string()))
-            .map(|v| v.to_string())
-            .unwrap_or_default();
+        out.albumtype = read_albumtype(tag);
 
         out.has_cover = !tag.pictures().is_empty();
         out.has_lyrics = tag
@@ -433,4 +430,29 @@ mod tests {
         let tags = read_tags(Path::new("/definitely/not/here.flac"));
         assert!(tags.error.is_some());
     }
+}
+
+
+/// 读专辑类型：先用自由键，再暴力扫描一遍所有条目兜底。
+///
+/// 为什么不能只用 `ItemKey::Unknown("ALBUMTYPE")`：同一个概念在不同容器里
+/// 落成的内部表示不一样（ID3v2 的 TXXX、Vorbis 的原生键、MP4 的自由原子），
+/// 扫描一遍能兜住这些差异，避免「写得进去却读不出来」。
+fn read_albumtype(tag: &Tag) -> String {
+    if let Some(value) = tag.get_string(&ItemKey::Unknown(ALBUM_TYPE_KEY.to_string())) {
+        if !value.trim().is_empty() {
+            return value.to_string();
+        }
+    }
+    for item in tag.items() {
+        let key_repr = format!("{:?}", item.key()).to_uppercase();
+        if key_repr.contains(ALBUM_TYPE_KEY) {
+            if let Some(text) = item.value().text() {
+                if !text.trim().is_empty() {
+                    return text.to_string();
+                }
+            }
+        }
+    }
+    String::new()
 }
