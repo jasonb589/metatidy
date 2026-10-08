@@ -7,7 +7,7 @@
 //! 帧内容：单声道 / 44100Hz / 16bit / 4096 个采样 / CONSTANT 子帧（全 0，即静音）。
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// FLAC 帧头 CRC-8：多项式 0x07，初值 0。
 fn crc8(data: &[u8]) -> u8 {
