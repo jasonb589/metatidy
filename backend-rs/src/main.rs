@@ -240,14 +240,14 @@ async fn run_selftest(
     }
 
     // 4) lofty
-    println!("  [ok] lofty     {} （全格式标签读写）", lofty::VERSION);
+    println!("  [ok] lofty     全格式标签读写就绪（mp3/flac/m4a/ogg/opus/aiff/wav）");
 
     // 清理
     sqlx::query("DELETE FROM tracks WHERE path = $1").bind(test_path).execute(db).await?;
 
     println!("=== selftest 通过 ===");
-    println!("音乐目录 = {}", config.music_dir);
-    println!("库根目录 = {}", config.library_root);
+    println!("音乐目录 = {}", config.music_dir.display());
+    println!("库根目录 = {}", config.library_root.display());
     Ok(())
 }
 
