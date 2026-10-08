@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>metatidy · 音乐元数据工作台</title>
+<!-- 图标内联为 data URI：离线镜像不会有任何外部请求，也不产生 favicon 404 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234b8dff'/%3E%3Cpath d='M9 22V10l7 6 7-6v12' fill='none' stroke='%2306101f' stroke-width='2.6' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主内容</a>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">mt</span>
+    <div>
+      <h1>metatidy</h1>
+      <p class="brand-sub">音乐元数据工作台</p>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="功能页签">
+    <button class="tab" role="tab" id="tab-tracks" aria-controls="panel-tracks" aria-selected="true" data-tab="tracks">曲库</button>
+    <button class="tab" role="tab" id="tab-scrape" aria-controls="panel-scrape" aria-selected="false" tabindex="-1" data-tab="scrape">搜索刮削</button>
+    <button class="tab" role="tab" id="tab-move" aria-controls="panel-move" aria-selected="false" tabindex="-1" data-tab="move">整理移动</button>
+    <button class="tab" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-tab="settings">设置</button>
+  </nav>
+
+  <div class="header-right">
+    <span class="chip" id="header-version" title="后端版本与数据源状态">v—</span>
+    <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-expanded="false" aria-controls="jobs-pop">
+      任务 <span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
+    </button>
+  </div>
+</header>
+
+<div class="jobs-pop" id="jobs-pop" data-open="false" role="region" aria-label="最近任务">
+  <div class="card-head">
+    <h2>最近任务</h2>
+    <div class="grow">
+      <button class="btn btn-sm btn-ghost" id="jobs-refresh">刷新</button>
+      <button class="btn btn-sm btn-ghost" id="jobs-close" aria-label="关闭任务面板">关闭</button>
+    </div>
+  </div>
+  <div class="card-body" id="jobs-list"></div>
+</div>
+
+<main id="main">
+
+<!-- ==================================================== 页签 1：曲库 -->
+<section class="panel" id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" data-panel="tracks" data-active="true">
+  <div class="wrap">
+    <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
+
+    <div class="card">
+      <div class="card-body tight">
+        <div class="row">
+          <button class="btn btn-primary" id="btn-scan">扫描曲库</button>
+          <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫（忽略缓存，慢）</span></label>
+          <label class="check"><input type="checkbox" id="scan-prune" checked><span>清理已删除的文件记录</span></label>
+          <span class="hint">扫描只更新索引，不改动音频标签。</span>
+          <div class="spacer"></div>
+          <span class="hint" id="tracks-updated"></span>
+        </div>
+        <div id="scan-progress" hidden></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>曲目</h2>
+        <span class="badge count-chip" id="tracks-total">—</span>
+        <div class="grow">
+          <button class="btn btn-sm" id="btn-tracks-reload">刷新列表</button>
+          <button class="btn btn-sm" id="btn-filters-reset">清空筛选</button>
+          <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
+        </div>
+      </div>
+
+      <div class="card-body tight">
+        <div class="row">
+          <label class="row-inline flex-1">
+            <span class="lbl">搜索</span>
+            <input type="search" id="tracks-q" placeholder="标题 / 歌手 / 专辑 / 文件名 / 路径 / 流派 / 年份" autocomplete="off">
+          </label>
+          <label class="row-inline">
+            <span class="lbl">排序</span>
+            <select id="tracks-sort">
+              <option value="artist">歌手</option>
+              <option value="album">专辑</option>
+              <option value="title">标题</option>
+              <option value="year">年份</option>
+              <option value="track">轨号</option>
+              <option value="path">路径</option>
+              <option value="indexed">入索引时间</option>
+              <option value="edited">最后编辑时间</option>
+            </select>
+          </label>
+          <label class="row-inline">
+            <span class="lbl">方向</span>
+            <select id="tracks-order">
+              <option value="asc">升序</option>
+              <option value="desc">降序</option>
+            </select>
+          </label>
+          <label class="row-inline">
+            <span class="lbl">每页</span>
+            <select id="tracks-pagesize">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label class="row-inline"><span class="lbl">语言</span><select id="filter-language"><option value="">全部</option></select></label>
+          <label class="row-inline"><span class="lbl">专辑类型</span><select id="filter-albumtype"><option value="">全部</option></select></label>
+          <label class="row-inline"><span class="lbl">流派</span><input type="text" id="filter-genre" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
+          <label class="row-inline"><span class="lbl">年份</span><input type="text" id="filter-year" class="w-90" placeholder="精确匹配" autocomplete="off"></label>
+          <label class="check"><input type="checkbox" id="filter-missing-cover"><span>缺封面</span></label>
+          <label class="check"><input type="checkbox" id="filter-missing-lyrics"><span>缺歌词</span></label>
+          <label class="check"><input type="checkbox" id="filter-no-artist"><span>无歌手</span></label>
+          <label class="check"><input type="checkbox" id="filter-no-album"><span>无专辑</span></label>
+        </div>
+      </div>
+
+      <div class="row" id="selection-bar" hidden></div>
+      <div id="tracks-table-status" class="card-body tight"></div>
+
+      <div class="table-wrap scroll" id="tracks-table-wrap">
+        <table class="data" id="tracks-table">
+          <caption class="sr-only">曲目列表，可用表头按钮排序，勾选框用于批量编辑</caption>
+          <colgroup>
+            <col style="width:30px"><col style="width:34px"><col style="width:22%"><col style="width:13%">
+            <col style="width:16%"><col style="width:56px"><col style="width:48px"><col style="width:62px">
+            <col style="width:70px"><col style="width:18%"><col style="width:62px">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col" class="col-check"><input type="checkbox" id="check-page" aria-label="选择本页全部曲目"></th>
+              <th scope="col"><span class="sr-only">封面</span></th>
+              <th scope="col" data-sort-col="title"><button type="button" class="th-sort" data-sort="title">标题</button></th>
+              <th scope="col" data-sort-col="artist"><button type="button" class="th-sort" data-sort="artist">歌手</button></th>
+              <th scope="col" data-sort-col="album"><button type="button" class="th-sort" data-sort="album">专辑</button></th>
+              <th scope="col" data-sort-col="year"><button type="button" class="th-sort" data-sort="year">年份</button></th>
+              <th scope="col" data-sort-col="track"><button type="button" class="th-sort" data-sort="track">轨号</button></th>
+              <th scope="col">语言</th>
+              <th scope="col">类型</th>
+              <th scope="col">文件名</th>
+              <th scope="col"><span class="sr-only">操作</span></th>
+            </tr>
+          </thead>
+          <tbody id="tracks-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pager" id="tracks-pager"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================ 页签 2：搜索刮削 -->
+<section class="panel" id="panel-scrape" role="tabpanel" aria-labelledby="tab-scrape" data-panel="scrape" data-active="false">
+  <div class="wrap">
+    <div class="card">
+      <div class="card-head">
+        <h2>数据源</h2>
+        <span class="badge count-chip" id="src-count">—</span>
+        <div class="grow">
+          <button class="btn btn-sm" id="src-all">全选</button>
+          <button class="btn btn-sm" id="src-none">清空</button>
+          <button class="btn btn-sm" id="src-default">恢复默认</button>
+        </div>
+      </div>
+      <div class="card-body tight">
+        <div class="row" id="src-chips"></div>
+        <p class="hint">每个数据源都会发起一次独立网络请求：只勾选 3–5 个会快很多，全选 13 个通常要几十秒。标为「不可用」的源在当前环境没有实现，勾了只会在结果里返回错误。</p>
+      </div>
+    </div>
+
+    <div class="workbench">
+      <div class="zone zone-pick">
+        <div class="card">
+          <div class="card-head">
+            <h3>选一首歌</h3>
+            <span class="badge count-chip" id="pick-total">—</span>
+          </div>
+          <div class="card-body tight">
+            <label class="row-inline">
+              <span class="lbl">搜索</span>
+              <input type="search" id="pick-q" placeholder="标题 / 歌手 / 专辑" autocomplete="off">
+            </label>
+            <p class="hint">点整行设为「当前曲目」；勾选框加入批量选择（与曲库页共享）。</p>
+          </div>
+          <div class="scroll-y pick-list" id="pick-list"></div>
+          <div class="pager" id="pick-pager"></div>
+        </div>
+      </div>
+
+      <div class="zone zone-cand">
+        <div class="card">
+          <div class="card-head">
+            <h3>搜索候选</h3>
+            <span class="badge count-chip" id="cand-count">0</span>
+            <div class="grow"><span class="hint" id="cand-hidden">按分数从高到低</span></div>
+          </div>
+          <div class="card-body tight">
+            <div class="row nowrap">
+              <label class="row-inline flex-1">
+                <span class="lbl">关键词</span>
+                <input type="text" id="search-keyword" placeholder="歌曲名，留空时用当前曲目标题" autocomplete="off">
+              </label>
+              <label class="row-inline flex-1">
+                <span class="lbl">歌手提示</span>
+                <input type="text" id="search-artist" placeholder="用于提高命中率" autocomplete="off">
+              </label>
+              <label class="row-inline">
+                <span class="lbl">每源条数</span>
+                <input type="number" id="search-limit" class="w-90" min="1" max="10" value="3">
+              </label>
+              <button class="btn btn-primary" id="btn-search">搜索候选</button>
+            </div>
+            <div id="search-state"></div>
+            <div class="row" id="source-status"></div>
+          </div>
+          <div class="card-body tight" id="cand-wrap">
+            <div class="cand-list" id="cand-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="zone zone-write">
+        <div class="card">
+          <div class="card-head">
+            <h3>写入面板</h3>
+            <span class="badge" id="write-target">未选候选</span>
+          </div>
+          <div class="card-body tight">
+            <div id="write-candidate" class="hint">在中间列表里点一个候选，再勾选要写入的字段。</div>
+            <div>
+              <span class="lbl">写入字段</span>
+              <div class="field-grid" id="write-fields"></div>
+            </div>
+            <div class="row">
+              <label class="check"><input type="checkbox" id="write-cover" checked><span>写封面</span></label>
+              <label class="check"><input type="checkbox" id="write-lyrics" checked><span>写歌词</span></label>
+              <label class="check"><input type="checkbox" id="write-normalize" checked><span>多歌手归一为 &amp;</span></label>
+              <label class="check"><input type="checkbox" id="write-overwrite" checked><span>覆盖已有值</span></label>
+            </div>
+            <div class="row">
+              <button class="btn btn-primary" id="btn-scrape-apply" disabled>预览差异并写入</button>
+              <button class="btn btn-sm" id="btn-write-all">全选字段</button>
+              <button class="btn btn-sm" id="btn-write-none">清空字段</button>
+            </div>
+            <div id="scrape-result"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>批量刮削</h2>
+        <span class="badge count-chip" id="batch-count">未选择</span>
+        <div class="grow">
+          <button class="btn btn-sm" id="batch-use-current">把当前曲目加入</button>
+          <button class="btn btn-sm" id="batch-clear">清空选择</button>
+        </div>
+      </div>
+      <div class="card-body tight">
+        <div class="row" role="radiogroup" aria-label="批量模式">
+          <span class="lbl">模式</span>
+          <label class="check"><input type="radio" name="batch-mode" value="search" checked><span>仅搜索（不写文件）</span></label>
+          <label class="check"><input type="radio" name="batch-mode" value="apply"><span>按最低分自动写入</span></label>
+        </div>
+        <div class="row">
+          <label class="row-inline">
+            <span class="lbl">每源条数</span>
+            <input type="number" id="batch-limit" class="w-90" min="1" max="10" value="3">
+          </label>
+          <label class="row-inline">
+            <span class="lbl">自动写入最低分</span>
+            <input type="number" id="batch-threshold" class="w-90" min="0" max="100" step="1" value="70" disabled>
+          </label>
+          <span class="hint" id="batch-threshold-hint">当前模式不写文件，最低分只在「自动写入」下生效。</span>
+        </div>
+        <div>
+          <span class="lbl">批量写入字段</span>
+          <div class="field-grid" id="batch-fields"></div>
+        </div>
+        <div class="row">
+          <label class="check"><input type="checkbox" id="batch-cover"><span>写封面</span></label>
+          <label class="check"><input type="checkbox" id="batch-lyrics"><span>写歌词</span></label>
+          <button class="btn btn-primary" id="btn-batch-run">开始批量刮削</button>
+          <span class="hint">「自动写入」无法逐首预览差异，建议先用「仅搜索」看分数分布。</span>
+        </div>
+        <div id="batch-progress" hidden></div>
+        <div id="batch-result"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================ 页签 3：整理移动 -->
+<section class="panel" id="panel-move" role="tabpanel" aria-labelledby="tab-move" data-panel="move" data-active="false">
+  <div class="wrap">
+    <div class="card">
+      <div class="card-head">
+        <h2>目录层级模板</h2>
+        <div class="grow"><span class="hint">空值字段整段丢弃；带 ? 的占位符没有值时连它所在的整段一起丢弃</span></div>
+      </div>
+      <div class="card-body tight">
+        <div class="grid-2">
+          <label class="field">
+            <span class="lbl">目录层级模板（用 / 分隔层级）</span>
+            <input type="text" id="move-dir" class="mono" placeholder="{language}/{artist}/{album}" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="lbl">文件名模板（不含扩展名）</span>
+            <input type="text" id="move-filename" class="mono" placeholder="{track:02} - {title}" autocomplete="off">
+          </label>
+        </div>
+        <div>
+          <span class="lbl">可用占位符（点击插入到光标处）</span>
+          <div class="token-row" id="move-tokens"></div>
+        </div>
+        <div class="row">
+          <button class="btn btn-sm" id="btn-tpl-test">实时试渲染</button>
+          <span class="hint" id="tpl-sample">样本曲目：—</span>
+        </div>
+        <div id="tpl-result"></div>
+        <div class="notice notice-warn">
+          <div class="body">
+            目标路径必须落在库根目录 <span class="mono" id="move-root">—</span> 内，越界项会标记为 <span class="mono">invalid</span> 且在演练与执行时都被跳过。
+            执行走的是「预览计划 → 拿到 token → 确认执行」，同一份计划只能执行一次。
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>范围与策略</h2>
+        <div class="grow"><span class="hint" id="move-scope-hint">—</span></div>
+      </div>
+      <div class="card-body tight">
+        <div class="row" role="radiogroup" aria-label="整理范围">
+          <span class="lbl">范围</span>
+          <label class="check"><input type="radio" name="move-scope" value="all" checked><span>全部曲目</span></label>
+          <label class="check"><input type="radio" name="move-scope" value="selected"><span id="move-scope-selected-label">曲库已勾选（0 首）</span></label>
+        </div>
+        <div class="row">
+          <label class="row-inline">
+            <span class="lbl">冲突策略</span>
+            <select id="move-conflict">
+              <option value="rename">rename · 目标存在时自动改名</option>
+              <option value="skip">skip · 目标存在时跳过</option>
+              <option value="overwrite">overwrite · 目标存在时覆盖</option>
+            </select>
+          </label>
+          <label class="row-inline">
+            <span class="lbl">条数上限</span>
+            <input type="number" id="move-limit" class="w-90" min="0" value="0">
+            <span class="hint">0 = 不限</span>
+          </label>
+          <button class="btn btn-primary" id="btn-move-preview">预览计划</button>
+          <button class="btn" id="btn-move-dry" disabled>仅演练</button>
+          <button class="btn btn-danger" id="btn-move-exec" disabled>确认执行</button>
+        </div>
+        <p class="hint">「仅演练」只走执行流程、绝不移动文件；「确认执行」会弹二次确认，写明将移动多少文件、且无法自动撤销。</p>
+        <div id="move-progress" hidden></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>移动计划</h2>
+        <span class="badge count-chip" id="move-planned">—</span>
+        <div class="grow" id="move-counts"></div>
+      </div>
+      <div class="card-body tight">
+        <div class="row" id="move-filters" role="group" aria-label="按动作筛选计划"></div>
+        <div id="move-plan-state"></div>
+      </div>
+      <div class="table-wrap scroll" id="move-table-wrap" hidden>
+        <table class="data" id="move-table">
+          <caption class="sr-only">移动计划明细</caption>
+          <colgroup>
+            <col style="width:64px"><col style="width:36%"><col style="width:36%"><col style="width:96px"><col style="width:22%">
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col" class="num">#ID</th>
+              <th scope="col">源路径</th>
+              <th scope="col">目标路径</th>
+              <th scope="col">动作</th>
+              <th scope="col">说明 / 警告</th>
+            </tr>
+          </thead>
+          <tbody id="move-tbody"></tbody>
+        </table>
+      </div>
+      <div class="card-body tight" id="move-summary"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================== 页签 4：设置 -->
+<section class="panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-panel="settings" data-active="false">
+  <div class="wrap">
+    <div class="card">
+      <div class="card-head">
+        <h2>后端状态</h2>
+        <div class="grow"><button class="btn btn-sm" id="btn-status-reload">刷新状态</button></div>
+      </div>
+      <div class="card-body tight">
+        <dl class="kv" id="status-kv"></dl>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>整理与写入设置</h2>
+        <div class="grow"><span class="hint">保存到后端 settings 表，立即对扫描以外的功能生效</span></div>
+      </div>
+      <div class="card-body">
+        <div class="grid-2">
+          <label class="field">
+            <span class="lbl">目录层级模板</span>
+            <input type="text" id="set-dir-template" class="mono" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="lbl">文件名模板</span>
+            <input type="text" id="set-filename-template" class="mono" autocomplete="off">
+          </label>
+        </div>
+        <div class="grid-4">
+          <label class="field">
+            <span class="lbl">冲突策略</span>
+            <select id="set-conflict"></select>
+          </label>
+          <label class="field">
+            <span class="lbl">未知歌手文案</span>
+            <input type="text" id="set-unknown-artist" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="lbl">未知专辑文案</span>
+            <input type="text" id="set-unknown-album" autocomplete="off">
+          </label>
+          <label class="field">
+            <span class="lbl">其它未知文案</span>
+            <input type="text" id="set-unknown-other" autocomplete="off">
+          </label>
+        </div>
+        <div>
+          <span class="lbl">默认数据源（保存后作为刮削页的初始勾选）</span>
+          <div class="row" id="set-sources"></div>
+        </div>
+        <div class="row">
+          <span class="lbl">写入开关</span>
+          <label class="check"><input type="checkbox" id="set-write-cover"><span>默认写封面</span></label>
+          <label class="check"><input type="checkbox" id="set-write-lyrics"><span>默认写歌词</span></label>
+          <label class="check"><input type="checkbox" id="set-overwrite"><span>覆盖已有值</span></label>
+          <label class="check"><input type="checkbox" id="set-normalize"><span>多歌手归一为 &amp;</span></label>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" id="btn-settings-save">保存设置</button>
+          <button class="btn" id="btn-settings-reload">放弃修改</button>
+          <span class="hint" id="settings-dirty"></span>
+        </div>
+        <div id="settings-result"></div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-head">
+          <h2>歌手别名库</h2>
+          <div class="grow">
+            <button class="btn btn-sm" id="alias-artist-add">增行</button>
+            <button class="btn btn-sm btn-primary" id="alias-artist-save">保存</button>
+          </div>
+        </div>
+        <div class="card-body tight">
+          <p class="hint">写入标签前套用：左侧命中时替换为右侧（只替换主艺人与专辑艺术家）。</p>
+          <table class="alias-table">
+            <thead><tr><th scope="col">原名</th><th scope="col">替换为</th><th scope="col"><span class="sr-only">删除</span></th></tr></thead>
+            <tbody id="alias-artist-body"></tbody>
+          </table>
+          <div id="alias-artist-result"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>专辑别名库</h2>
+          <div class="grow">
+            <button class="btn btn-sm" id="alias-album-add">增行</button>
+            <button class="btn btn-sm btn-primary" id="alias-album-save">保存</button>
+          </div>
+        </div>
+        <div class="card-body tight">
+          <p class="hint">写入标签前套用：专辑名整体匹配，命中即替换。</p>
+          <table class="alias-table">
+            <thead><tr><th scope="col">原名</th><th scope="col">替换为</th><th scope="col"><span class="sr-only">删除</span></th></tr></thead>
+            <tbody id="alias-album-body"></tbody>
+          </table>
+          <div id="alias-album-result"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<datalist id="dl-languages"></datalist>
+<datalist id="dl-albumtypes"></datalist>
+
+<aside class="drawer" id="edit-drawer" data-open="false" aria-labelledby="edit-drawer-title" aria-hidden="true">
+  <div class="drawer-head">
+    <h3 id="edit-drawer-title">编辑元数据</h3>
+    <span class="badge" id="edit-scope">未选择</span>
+    <div class="spacer"></div>
+    <button class="btn btn-sm btn-ghost" id="edit-close" aria-label="关闭编辑面板">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <p class="hint">只填想改的字段，留空表示保持原值不变。所有修改都会先出差异预览，确认后才写入标签。</p>
+    <div class="grid-2">
+      <label class="field"><span class="lbl">标题</span><input type="text" id="edit-title" autocomplete="off"></label>
+      <label class="field"><span class="lbl">歌手（多歌手用 &amp; 分隔）</span><input type="text" id="edit-artist" autocomplete="off"></label>
+      <label class="field"><span class="lbl">专辑</span><input type="text" id="edit-album" autocomplete="off"></label>
+      <label class="field"><span class="lbl">专辑艺术家</span><input type="text" id="edit-albumartist" autocomplete="off"></label>
+      <label class="field"><span class="lbl">流派</span><input type="text" id="edit-genre" autocomplete="off"></label>
+      <label class="field"><span class="lbl">年份</span><input type="text" id="edit-year" autocomplete="off"></label>
+      <label class="field"><span class="lbl">音轨号</span><input type="text" id="edit-track" autocomplete="off"></label>
+      <label class="field"><span class="lbl">碟号</span><input type="text" id="edit-disc" autocomplete="off"></label>
+      <label class="field"><span class="lbl">语言</span><input type="text" id="edit-language" list="dl-languages" autocomplete="off"></label>
+      <label class="field"><span class="lbl">专辑类型</span><input type="text" id="edit-albumtype" list="dl-albumtypes" autocomplete="off"></label>
+    </div>
+    <details>
+      <summary class="lbl" style="cursor:pointer">更多字段（作曲 / 作词 / 版权 / 注释 / MusicBrainz ID）</summary>
+      <div class="grid-2" style="margin-top:8px">
+        <label class="field"><span class="lbl">作曲</span><input type="text" id="edit-composer" autocomplete="off"></label>
+        <label class="field"><span class="lbl">作词</span><input type="text" id="edit-lyricist" autocomplete="off"></label>
+        <label class="field"><span class="lbl">版权</span><input type="text" id="edit-copyright" autocomplete="off"></label>
+        <label class="field"><span class="lbl">注释</span><input type="text" id="edit-comment" autocomplete="off"></label>
+        <label class="field"><span class="lbl">MusicBrainz 歌手 ID</span><input type="text" id="edit-mb_artist_id" autocomplete="off"></label>
+        <label class="field"><span class="lbl">MusicBrainz 发行组 ID</span><input type="text" id="edit-release_group_id" autocomplete="off"></label>
+      </div>
+    </details>
+  </div>
+  <div class="drawer-foot">
+    <div class="row">
+      <label class="check"><input type="checkbox" id="edit-normalize" checked><span>多歌手归一为 &amp;</span></label>
+      <label class="check"><input type="checkbox" id="edit-overwrite" checked><span>覆盖已有值</span></label>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary flex-1" id="btn-edit-preview">预览变更</button>
+      <button class="btn" id="btn-edit-clear">清空输入</button>
+    </div>
+    <div id="edit-result"></div>
+  </div>
+</aside>
+
+<div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>
