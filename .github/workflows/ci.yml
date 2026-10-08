@@ -40,9 +40,91 @@ jobs:
         continue-on-error: true
         run: python -m pytest -q
 
+  rust:
+    name: Rust 后端
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: metatidy
+          POSTGRES_PASSWORD: metatidy
+          POSTGRES_DB: metatidy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U metatidy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend-rs
+    env:
+      DATABASE_URL: postgres://metatidy:metatidy@localhost:5432/metatidy
+      REDIS_URL: redis://localhost:6379
+      METATIDY_MUSIC_DIR: /tmp/metatidy-music
+      METATIDY_LIBRARY_ROOT: /tmp/metatidy-music
+      RUST_LOG: info
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend-rs
+
+      - name: 准备音乐目录
+        run: mkdir -p /tmp/metatidy-music
+
+      - name: 编译
+        run: cargo build --release
+
+      - name: 单元测试
+        run: cargo test --release
+
+      - name: 依赖自检（真 Postgres + 真 Redis + 真实 HTTP + lofty）
+        run: cargo run --release -- --selftest
+
+      - name: 冒烟：起服务并断言状态接口
+        run: |
+          ./target/release/metatidy-server &
+          SERVER_PID=$!
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/status -o /tmp/status.json; then break; fi
+            sleep 1
+          done
+          echo "--- /api/status ---"
+          cat /tmp/status.json; echo
+          grep -q '"postgres":true' /tmp/status.json
+          grep -q '"redis":true' /tmp/status.json
+          grep -q '"engine":"rust"' /tmp/status.json
+          kill $SERVER_PID
+          echo "冒烟通过"
+
+      - name: Clippy（暂不阻断，先让骨架过）
+        continue-on-error: true
+        run: cargo clippy --all-targets
+
+      - name: 格式检查（暂不阻断）
+        continue-on-error: true
+        run: cargo fmt --check
+
   build:
     name: 构建并推送镜像
-    needs: test
+    needs: [test, rust]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

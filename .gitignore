@@ -28,3 +28,8 @@ data/
 .idea/
 Thumbs.db
 desktop.ini
+
+
+# Rust 后端
+backend-rs/target/
+backend-rs/Cargo.lock.bak
