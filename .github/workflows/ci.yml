@@ -195,6 +195,31 @@ jobs:
     permissions:
       contents: read
       packages: write
+
+    # 冒烟要用真 Postgres + 真 Redis（与上面 rust job 同一套配置）
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: metatidy
+          POSTGRES_PASSWORD: metatidy
+          POSTGRES_DB: metatidy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U metatidy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -233,3 +258,36 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # 最后一环：把**刚推上去的镜像**拉回来真跑一遍。
+      # 前面的 31 项验收打的是宿主机上的二进制；这一步验证的是交付物本身：
+      # 镜像能拉、容器能起、接口与首屏都正常（--network host 让容器直连 runner 的
+      # service 容器——Linux runner 上没有 host.docker.internal）。
+      - name: 冒烟：拉回镜像并真启动（接口 + 静态前端 + 数据库连通）
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA:0:7}"
+          echo "使用镜像：$IMG"
+          docker pull --platform linux/amd64 "$IMG"
+          docker run -d --name metatidy-smoke --network host \
+            -e DATABASE_URL="postgres://metatidy:metatidy@127.0.0.1:5432/metatidy" \
+            -e REDIS_URL="redis://127.0.0.1:6379" \
+            -e METATIDY_MUSIC_DIR=/tmp/libraries \
+            -e METATIDY_LIBRARY_ROOT=/tmp/libraries \
+            "$IMG"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/status -o /tmp/status.json; then break; fi
+            sleep 1
+          done
+          echo "--- /api/status ---"
+          cat /tmp/status.json; echo
+          grep -q '"engine":"rust"' /tmp/status.json
+          grep -q '"postgres":true' /tmp/status.json
+          grep -q '"redis":true' /tmp/status.json
+          echo "--- 首屏 ---"
+          curl -fsS http://127.0.0.1:8080/ -o /tmp/index.html
+          grep -qi '<html' /tmp/index.html
+          head -c 160 /tmp/index.html; echo
+          echo "--- 容器日志尾部 ---"
+          docker logs --tail 15 metatidy-smoke || true
+          docker rm -f metatidy-smoke
+          echo "镜像冒烟通过：能拉、能起、接口与前端都对"
