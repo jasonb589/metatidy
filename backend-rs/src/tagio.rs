@@ -12,14 +12,37 @@ use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
+use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem, TagType};
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::models::{FieldChange, EDITABLE_FIELDS};
 
-/// 专辑类型没有标准的 ItemKey，用自由键（与 Python 版写入的 TXXX/Vorbis 键一致）。
+/// 专辑类型没有标准的 `ItemKey`，只能按自由键写。
+///
+/// 坑：lofty 的 `Tag::insert_text` / `Tag::insert` 会对 `ItemKey::Unknown` 做映射校验，
+/// 校验不过就**静默丢弃**（不报错、文件里也没有）。写自由键必须走 `insert_unchecked`。
 const ALBUM_TYPE_KEY: &str = "ALBUMTYPE";
+
+/// 每个容器要写的全部自由键拼写（与 Python 版一致，见 docs/PORT_NOTES.md §3）。
+///
+/// 为什么写多个：同一个概念各家软件各写各的拼写，只写一个键的话，
+/// foobar2000 / MusicBrainz Picard / Navidrome 这类工具读不到。
+fn album_type_keys(tag_type: TagType) -> &'static [&'static str] {
+    match tag_type {
+        // ID3v2：写成 4 个 TXXX，描述分别是下面 4 个
+        TagType::Id3v2 => &[
+            "ALBUMTYPE",
+            "Album Type",
+            "RELEASETYPE",
+            "MusicBrainz Album Type",
+        ],
+        // MP4：自由原子 ----:com.apple.iTunes:<key>
+        TagType::Mp4Ilst => &["ALBUMTYPE", "RELEASETYPE", "MUSICBRAINZ_ALBUMTYPE"],
+        // Vorbis（flac / ogg / opus）：键名按惯例全大写
+        _ => &["ALBUMTYPE", "RELEASETYPE", "MUSICBRAINZ_ALBUMTYPE"],
+    }
+}
 
 /// 从文件读回来的原始标签。
 #[derive(Debug, Clone, Default)]
@@ -253,7 +276,13 @@ fn set_one(tag: &mut Tag, key: &str, value: &str) {
             tag.insert_text(ItemKey::MusicBrainzReleaseGroupId, value.to_string());
         }
         "albumtype" => {
-            tag.insert_text(ItemKey::Unknown(ALBUM_TYPE_KEY.to_string()), value.to_string());
+            // 必须用 insert_unchecked：insert / insert_text 碰到自由键会静默丢弃。
+            for key in album_type_keys(tag.tag_type()) {
+                tag.insert_unchecked(TagItem::new(
+                    ItemKey::Unknown((*key).to_string()),
+                    ItemValue::Text(value.to_string()),
+                ));
+            }
         }
         _ => {}
     }
@@ -336,7 +365,6 @@ mod tests {
         }
         got
     }
-
     /// CI 里必须提供真实样本，否则下面的写入测试会静默跳过、丢掉覆盖率。
     #[test]
     fn real_fixtures_present_in_ci() {
@@ -467,6 +495,7 @@ mod tests {
         desired.insert("artist".to_string(), "周杰伦".to_string());
         desired.insert("album".to_string(), "七里香".to_string());
         desired.insert("track".to_string(), "1".to_string());
+        desired.insert("albumtype".to_string(), "专辑".to_string());
         apply_update(&path, &desired, true, None, None).unwrap();
 
         let back = read_tags(&path);
@@ -475,8 +504,9 @@ mod tests {
         assert_eq!(back.artist, "周杰伦");
         assert_eq!(back.album, "七里香");
         assert_eq!(back.track, "1");
-        // 已知限制：ID3v2 的自由键（如 ALBUMTYPE）经 lofty 写入后读不回来，
-        // 见 docs/PORT_NOTES.md。FLAC 的 Vorbis 注释没有这个问题（上面已验证）。
+        // 自由键（ALBUMTYPE 的 TXXX）现在能写也能读了：写入走 insert_unchecked，
+        // 读取按已知拼写兜底（见 read_albumtype 与 docs/PORT_NOTES.md §10）。
+        assert_eq!(back.albumtype, "专辑");
         std::fs::remove_file(&path).ok();
     }
 
@@ -488,20 +518,35 @@ mod tests {
 }
 
 
-/// 读专辑类型：先用自由键，再暴力扫描一遍所有条目兜底。
-///
-/// 为什么不能只用 `ItemKey::Unknown("ALBUMTYPE")`：同一个概念在不同容器里
-/// 落成的内部表示不一样（ID3v2 的 TXXX、Vorbis 的原生键、MP4 的自由原子），
-/// 扫描一遍能兜住这些差异，避免「写得进去却读不出来」。
-fn read_albumtype(tag: &Tag) -> String {
-    if let Some(value) = tag.get_string(&ItemKey::Unknown(ALBUM_TYPE_KEY.to_string())) {
-        if !value.trim().is_empty() {
-            return value.to_string();
-        }
+/// 从 `ItemKey::Unknown("X")` 里取出原始键名（其它变体返回 None）。
+fn unknown_key_name(key: &ItemKey) -> Option<&str> {
+    match key {
+        ItemKey::Unknown(name) => Some(name.as_str()),
+        _ => None,
     }
-    for item in tag.items() {
-        let key_repr = format!("{:?}", item.key()).to_uppercase();
-        if key_repr.contains(ALBUM_TYPE_KEY) {
+}
+
+/// 读专辑类型。
+///
+/// 为什么不能只按一个键取：同一个概念在不同容器、不同软件里落成的键名不一样
+/// （ID3v2 的 TXXX 描述、Vorbis 的原生键、MP4 的自由原子），
+/// 所以先按已知拼写（大小写不敏感）逐个精确匹配，再扫一遍带 `ALBUMTYPE` 的自由键兜底。
+fn read_albumtype(tag: &Tag) -> String {
+    const WANTED: [&str; 4] = [
+        "ALBUMTYPE",
+        "MUSICBRAINZ_ALBUMTYPE",
+        "RELEASETYPE",
+        "Album Type",
+    ];
+
+    for want in WANTED {
+        for item in tag.items() {
+            let Some(name) = unknown_key_name(item.key()) else {
+                continue;
+            };
+            if !name.eq_ignore_ascii_case(want) {
+                continue;
+            }
             if let Some(text) = item.value().text() {
                 if !text.trim().is_empty() {
                     return text.to_string();
@@ -509,5 +554,20 @@ fn read_albumtype(tag: &Tag) -> String {
             }
         }
     }
+
+    for item in tag.items() {
+        let Some(name) = unknown_key_name(item.key()) else {
+            continue;
+        };
+        if !name.to_uppercase().contains(ALBUM_TYPE_KEY) {
+            continue;
+        }
+        if let Some(text) = item.value().text() {
+            if !text.trim().is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+
     String::new()
 }

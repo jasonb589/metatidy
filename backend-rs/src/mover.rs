@@ -117,7 +117,14 @@ fn is_inside(root: &Path, path: &Path) -> bool {
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    // 逐段比较，而不是比字符串：Windows 上 '/' 与 '\' 可以混用，
+    // 「D:\库\中文/周杰伦\x.flac」与「D:\库\中文\周杰伦\x.flac」是同一个文件。
+    let segments = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    segments(a) == segments(b)
 }
 
 /// 目标被占用时追加 " (2)"、" (3)"…
@@ -422,7 +429,11 @@ mod tests {
 
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].action, "move");
-        assert!(plan.items[0].target.ends_with("中文/周杰伦/魔杰座/03 - 稻香.flac"));
+        let target_slash = plan.items[0].target.replace('\\', "/");
+        assert!(
+            target_slash.ends_with("中文/周杰伦/魔杰座/03 - 稻香.flac"),
+            "实际目标：{target_slash}"
+        );
         assert!(source.exists(), "预览阶段不能移动文件");
 
         let summary = execute_plan(&plan, false, |_, _, _| {});
@@ -452,7 +463,7 @@ mod tests {
     #[test]
     fn in_place_detected() {
         let root = temp_root("inplace");
-        let target = root.join("中文/周杰伦/魔杰座/01 - 稻香.flac");
+        let target = root.join("中文").join("周杰伦").join("魔杰座").join("01 - 稻香.flac");
         fixtures::make_flac(&target).unwrap();
         let track = track_with(1, &target, "稻香", "1");
         let plan = plan_moves(&[track], &opts(&root));
