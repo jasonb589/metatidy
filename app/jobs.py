@@ -75,10 +75,14 @@ def start(kind: str, fn: Callable[..., Any], **kwargs: Any) -> str:
             db.job_update(job_id, state="running", message="开始")
             progress = Progress(job_id)
             result = fn(progress, **kwargs)
+            # 任务结束时补齐 done/total，避免百分比停在节流后的旧值上
+            final_total = progress.total or progress.done
             db.job_update(
                 job_id,
                 state="done",
                 message="完成",
+                done=final_total,
+                total=final_total,
                 result=json.dumps(result, ensure_ascii=False) if result is not None else "",
             )
         except Exception as exc:  # noqa: BLE001 —— 任务线程必须吞掉异常并记录

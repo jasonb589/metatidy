@@ -241,3 +241,80 @@ def test_sources_endpoint(client):
     names = {s["name"] for s in data["sources"]}
     assert {"musicbrainz", "itunes", "deezer", "netease", "qq"} <= names
     assert {"kuwo", "kugou", "lastfm", "theaudiodb", "spotify", "genius", "ytmusic"} <= names
+
+
+# --------------------------------------------------------------------------- 批量刮削语义
+
+
+def _fake_search(monkeypatch, candidate: dict):
+    from app import scrapebridge
+
+    payload = {"candidates": [candidate], "source_status": [{"source": "fake", "count": 1}]}
+    monkeypatch.setattr(scrapebridge, "search", lambda *a, **k: payload)
+
+
+def test_batch_scrape_zero_threshold_only_searches(client, scanned, monkeypatch):
+    """auto_apply_min_score = 0 必须真的「只搜索不写入」（曾经会直接写最佳候选）。"""
+    import json as _json
+
+    from app import tagio
+
+    _fake_search(monkeypatch, {"source": "fake", "title": "稻香", "artist": "周杰伦", "genre": "流行", "score": 150, "confidence": "高"})
+    job = client.post("/api/scrape/batch", json={"ids": scanned, "fields": ["genre"], "auto_apply_min_score": 0}).json()
+    result = _json.loads(_wait_job(client, job["job_id"])["result"])
+    assert result["search_only"] is True
+    assert result["applied"] == 0
+    assert {d["status"] for d in result["details"]} == {"仅搜索"}
+    for track_id in scanned:
+        path = client.get(f"/api/tracks/{track_id}").json()["path"]
+        assert tagio.read_tags(path)["genre"] == "", "只搜索模式不能改文件"
+
+
+def test_batch_scrape_applies_alias_and_threshold(client, scanned, monkeypatch):
+    """批量写入要和单首写入等价：套用别名库、支持阈值。"""
+    import json as _json
+
+    from app import tagio
+
+    client.put("/api/aliases/artist", json={"items": [{"from": "周杰伦", "to": "Jay Chou"}]})
+    _fake_search(monkeypatch, {"source": "fake", "title": "稻香", "artist": "周杰伦", "genre": "流行", "score": 150, "confidence": "高"})
+    job = client.post(
+        "/api/scrape/batch",
+        json={"ids": [scanned[0]], "fields": ["artist", "genre"], "auto_apply_min_score": 100},
+    ).json()
+    result = _json.loads(_wait_job(client, job["job_id"])["result"])
+    assert result["applied"] == 1, result
+    path = client.get(f"/api/tracks/{scanned[0]}").json()["path"]
+    tags = tagio.read_tags(path)
+    assert tags["artist"] == "Jay Chou", "别名库必须生效"
+    assert tags["genre"] == "流行"
+
+
+def test_batch_scrape_skips_below_threshold(client, scanned, monkeypatch):
+    import json as _json
+
+    from app import tagio
+
+    _fake_search(monkeypatch, {"source": "fake", "title": "稻香", "genre": "流行", "score": 50, "confidence": "待确认"})
+    job = client.post("/api/scrape/batch", json={"ids": [scanned[0]], "fields": ["genre"], "auto_apply_min_score": 100}).json()
+    result = _json.loads(_wait_job(client, job["job_id"])["result"])
+    assert result["applied"] == 0
+    assert result["details"][0]["status"] == "低于阈值"
+    path = client.get(f"/api/tracks/{scanned[0]}").json()["path"]
+    assert tagio.read_tags(path)["genre"] == ""
+
+
+def test_job_reports_full_progress_when_done(client, scanned):
+    """任务完成后百分比必须是 100，不能停在节流后的旧值。"""
+    job = client.post("/api/scan", json={"full": False}).json()
+    result = _wait_job(client, job["job_id"])
+    assert result["state"] == "done"
+    assert result["percent"] == 100.0
+    assert result["done"] == result["total"]
+
+
+def test_settings_warns_on_bad_filename_template(client, clean_db):
+    resp = client.put("/api/settings", json={"values": {"filename_template": "{nope} - {title}"}})
+    assert resp.status_code == 200
+    warnings = resp.json()["warnings"]
+    assert any("文件名模板" in w and "nope" in w for w in warnings), warnings

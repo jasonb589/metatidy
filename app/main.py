@@ -190,8 +190,10 @@ def api_settings_update(payload: SettingsUpdate) -> dict:
         db.set_setting(key, value)
         saved[key] = value
     warnings: list[str] = []
-    if "dir_template" in saved:
-        warnings += validate_template(str(saved["dir_template"]), {p["key"] for p in TEMPLATE_PLACEHOLDERS})
+    keys = {p["key"] for p in TEMPLATE_PLACEHOLDERS}
+    for field, label in (("dir_template", "目录模板"), ("filename_template", "文件名模板")):
+        if field in saved:
+            warnings += [f"{label}：{w}" for w in validate_template(str(saved[field]), keys)]
     return {"saved": saved, "warnings": warnings}
 
 
@@ -453,9 +455,19 @@ def api_scrape_batch(payload: BatchScrapeRequest) -> dict:
 
 
 def _run_batch_scrape(progress, *, ids, fields, sources, limit, write_cover, write_lyrics, threshold, normalize_artist):
+    """批量刮削。
+
+    `auto_apply_min_score <= 0` 表示**只搜索不写入**（人工复核模式），与界面提示一致；
+    填正数则只有分数达到阈值的候选会被写入。
+    写入路径与单首 `/api/scrape/apply` 完全一致：同样套用别名库、同样支持写封面与歌词。
+    """
     progress.set_total(len(ids))
     applied = skipped = failed = 0
     details: list[dict] = []
+    artist_alias = db.aliases("alias_artist")
+    album_alias = db.aliases("alias_album")
+    search_only = float(threshold or 0) <= 0
+
     for track_id in ids:
         track = db.get_track(track_id)
         if not track:
@@ -474,7 +486,15 @@ def _run_batch_scrape(progress, *, ids, fields, sources, limit, write_cover, wri
             if not best:
                 skipped += 1
                 details.append({"track_id": track_id, "status": "无候选"})
-            elif threshold and best.get("score", 0) < threshold:
+            elif search_only:
+                skipped += 1
+                details.append({
+                    "track_id": track_id,
+                    "status": "仅搜索",
+                    "score": best.get("score"),
+                    "candidate": {k: best.get(k) for k in ("source", "title", "artist", "album", "year", "confidence")},
+                })
+            elif best.get("score", 0) < float(threshold):
                 skipped += 1
                 details.append({"track_id": track_id, "status": "低于阈值", "score": best.get("score")})
             else:
@@ -482,15 +502,62 @@ def _run_batch_scrape(progress, *, ids, fields, sources, limit, write_cover, wri
                 if "albumtype" in fields and best.get("album_type"):
                     values["albumtype"] = best["album_type"]
                 values = _prepare_fields(values, normalize_artist)
-                tagio.apply_update(track["path"], values, overwrite=True)
-                db.update_track_fields(track_id, {**values, "scraped_at": time.time()})
+                values = _apply_aliases(values, artist_alias, album_alias)
+
+                cover = None
+                cover_mime = "image/jpeg"
+                if write_cover and best.get("cover"):
+                    got = scrapebridge.fetch_cover(best["cover"])
+                    if got:
+                        cover, cover_mime = got
+                lyrics = ""
+                if write_lyrics:
+                    lyrics = best.get("lyrics") or scrapebridge.fetch_lyrics(
+                        values.get("title") or track.get("title") or "",
+                        values.get("artist") or track.get("artist") or "",
+                        values.get("album") or track.get("album") or "",
+                        float(best.get("duration") or track.get("duration") or 0),
+                    )
+
+                tagio.apply_update(
+                    track["path"],
+                    values,
+                    cover=cover,
+                    cover_mime=cover_mime,
+                    lyrics=lyrics or None,
+                    overwrite=True,
+                )
+                index_update = {
+                    **values,
+                    "scraped_at": time.time(),
+                    "mtime": _safe_mtime(track["path"]),
+                    "size": _safe_size(track["path"]),
+                }
+                if cover:
+                    index_update["has_cover"] = 1
+                if lyrics:
+                    index_update["has_lyrics"] = 1
+                db.update_track_fields(track_id, index_update)
                 applied += 1
-                details.append({"track_id": track_id, "status": "已写入", "score": best.get("score"), "fields": sorted(values)})
+                details.append({
+                    "track_id": track_id,
+                    "status": "已写入",
+                    "score": best.get("score"),
+                    "fields": sorted(values),
+                    "cover": bool(cover),
+                    "lyrics": bool(lyrics),
+                })
         except Exception as exc:  # noqa: BLE001
             failed += 1
             details.append({"track_id": track_id, "status": "失败", "error": f"{type(exc).__name__}: {exc}"})
         progress.step(1, message=track.get("filename") or str(track_id))
-    return {"applied": applied, "skipped": skipped, "failed": failed, "details": details[:PREVIEW_DISPLAY_LIMIT]}
+    return {
+        "applied": applied,
+        "skipped": skipped,
+        "failed": failed,
+        "search_only": search_only,
+        "details": details[:PREVIEW_DISPLAY_LIMIT],
+    }
 
 
 # --------------------------------------------------------------------------- 功能 3：整理移动
