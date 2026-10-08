@@ -1,8 +1,9 @@
 # 用途：把「同一套请求」分别打 Python 版与 Rust 版服务端，逐字段比较 JSON 键路径。
-# 31 项端到端验收只覆盖了前端必需接口的一部分；这个脚本补上「字段有没有缺」这一层。
-# 用法（需先起好 Postgres 与 Redis，Rust 版需要 DATABASE_URL / REDIS_URL）：
+# 为什么需要它：31 项端到端验收只覆盖了「前端必需」接口的一部分，这个脚本补上
+# 「字段有没有缺」这一层——rust 缺的键会让前端读不到数据，rust 多的键一般无害。
+# 用法（需先起好 Postgres 与 Redis；Rust 版需要 DATABASE_URL / REDIS_URL）：
 #     python tests/compare_api.py
-# 结论按差异列出：rust 缺 = 前端可能读不到；rust 多 = 一般是无害的增量字段。"""同一套请求分别打 Python 版与 Rust 版服务端，逐字段比较 JSON 键集合。
+"""同一套请求分别打 Python 版与 Rust 版服务端，逐字段比较 JSON 键集合。
 
 为什么需要它：31 项端到端验收只覆盖了「前端必需」里的一部分接口。
 前端要真能用，`/api/sources`、`/api/settings`、`/api/jobs`、曲目项的字段名等
