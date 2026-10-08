@@ -14,6 +14,11 @@ mod db;
 mod error;
 
 use std::sync::Arc;
+mod fixtures;
+mod language;
+mod models;
+mod normalize;
+mod templates;
 
 use axum::{
     extract::State,
