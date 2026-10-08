@@ -283,7 +283,7 @@ async fn count_trgm(db: &PgPool, needle: &str) -> anyhow::Result<i64> {
 /// 全部在临时目录里做，不碰任何真实音乐；数据库里只清理本自检自己写入的行。
 async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use crate::mover::{self, PlanOptions};
     use crate::repo::{self, TrackQuery};
@@ -496,7 +496,7 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
 
 
 /// 列出目录下所有文件路径（排序后），用于断言「演练没动文件」。
-fn list_files_sorted(root: &Path) -> Vec<String> {
+fn list_files_sorted(root: &std::path::Path) -> Vec<String> {
     let mut out: Vec<String> = walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())

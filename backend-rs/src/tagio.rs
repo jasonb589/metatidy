@@ -312,7 +312,7 @@ pub fn apply_update(
             } else {
                 MimeType::Jpeg
             };
-            let picture = Picture::new_unchecked(mime_type, PictureType::CoverFront, None, data);
+            let picture = Picture::new_unchecked(PictureType::CoverFront, Some(mime_type), None, data);
             tag.push_picture(picture);
             written += 1;
         }
