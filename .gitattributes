@@ -1,0 +1,21 @@
+# 统一换行，避免 Windows 上开发、Linux 上构建出现 CRLF 问题
+# （Dockerfile 的续行符对 CRLF 很敏感，必须强制 LF）
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.flac binary
+*.mp3 binary
+*.m4a binary
+*.ogg binary
+*.opus binary
+*.db binary
+
+Dockerfile text eol=lf
+*.sh text eol=lf

@@ -1,0 +1,38 @@
+# metatidy 一键部署
+#
+# 用法：
+#   1) 改下面的 volumes 路径，把左侧换成你自己的音乐目录
+#   2) 如果是私有镜像（默认就是），先登录一次：
+#        echo <你的PAT> | docker login ghcr.io -u jasonb589 --password-stdin
+#   3) docker compose up -d
+#   4) 打开 http://<主机IP>:8080/
+
+services:
+  metatidy:
+    image: ghcr.io/jasonb589/metatidy:latest
+    # 想本地构建就把下面这行打开（并把 image 保留为最终产物名）
+    # build: .
+    container_name: metatidy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      METATIDY_MUSIC_DIR: /music     # 要扫描/整理的库
+      METATIDY_DATA_DIR: /data       # 索引库、封面缓存、任务记录
+      METATIDY_SCAN_WORKERS: "4"     # 机械硬盘建议 2，SSD/NVMe 可 8
+      METATIDY_LOG_LEVEL: info
+      TZ: Asia/Shanghai
+      # ── 可选密钥：不配也不影响主要功能，只影响对应数据源 ──
+      # SPOTIFY_CLIENT_ID: ""
+      # SPOTIFY_CLIENT_SECRET: ""
+      # GENIUS_TOKEN: ""
+      # DISCOGS_TOKEN: ""
+      # LASTFM_API_KEY: ""
+      # ACOUSTID_KEY: ""
+      # SILICONFLOW_KEY: ""          # 配了才启用 AI 语言判定等增强
+    volumes:
+      # 需要读写权限：写标签 + 按模板移动文件
+      - ./music:/music
+      - ./data:/data
+    # 如果宿主目录属于某个普通用户，容器内以同一 UID 运行可避免权限问题（Linux 下用）
+    # user: "1000:1000"

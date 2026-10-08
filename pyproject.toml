@@ -1,0 +1,25 @@
+[project]
+name = "metatidy"
+version = "0.1.0"
+description = "轻量音乐元数据工作台：刮削搜索 / 标签编辑 / 按目录层级整理移动"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "requests>=2.31",
+    "mutagen>=1.47",
+    "pillow>=10.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "zhconv>=1.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+metatidy = "app.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
