@@ -773,10 +773,13 @@ pub fn bad_kind() -> ApiError {
 
 // --------------------------------------------------------------------------- 路由
 
-/// 21 条 API 路由 + 健康检查（`/api/health` 是 Rust 新增，给容器探针用）。
+/// 21 条需要登录的 API 路由 + 4 条公开路由（探针、会话、登录、登出）。
+///
+/// 认证中间件只挂在「需要登录」的那一组上：`/api/health` 必须匿名可用（否则容器探针和
+/// `--healthcheck` 会一直失败），而 `/api/session` 正是前端启动时用来判断「要不要弹登录框」
+/// 的接口，它自己不可能要求已登录。
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/health", get(|| async { "ok" }))
+    let protected = Router::new()
         .route("/api/status", get(status::api_status))
         .route(
             "/api/settings",
@@ -802,6 +805,17 @@ pub fn router(state: AppState) -> Router {
             get(tracks::get_aliases).put(tracks::put_aliases),
         )
         .route("/api/template/test", get(moves::template_test))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_auth,
+        ));
+
+    Router::new()
+        .route("/api/health", get(|| async { "ok" }))
+        .route("/api/session", get(crate::auth::session_info))
+        .route("/api/login", post(crate::auth::login))
+        .route("/api/logout", post(crate::auth::logout))
+        .merge(protected)
         .with_state(state)
 }
 #[cfg(test)]

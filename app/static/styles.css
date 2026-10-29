@@ -227,7 +227,7 @@ a { color: var(--accent-2); }
 .btn-sm { height: 24px; padding: 0 var(--s2); font-size: 11.5px; }
 .btn-icon { padding: 0 var(--s2); }
 
-input[type="text"], input[type="number"], input[type="search"], select, textarea {
+input[type="text"], input[type="number"], input[type="search"], input[type="password"], select, textarea {
   height: var(--h-ctl);
   width: 100%;
   min-width: 0;
@@ -967,3 +967,30 @@ img.brand-mark {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 登录遮罩：全屏挡住界面 —— 未通过之前连空表格都不给看（省得被当成「软件坏了」） */
+.auth-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s4);
+  background: rgba(11, 13, 16, 0.88);
+  background: color-mix(in srgb, var(--bg-0) 88%, transparent);
+}
+.auth-card {
+  width: min(360px, 100%);
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s5);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r3);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.auth-card h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.auth-field { display: grid; gap: var(--s1); }
+.auth-actions { display: flex; justify-content: flex-end; }
+.auth-actions .btn { min-width: 96px; justify-content: center; }

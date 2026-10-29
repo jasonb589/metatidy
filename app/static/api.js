@@ -74,6 +74,10 @@ export async function request(path, { method = "GET", body, timeout = 30000, sig
   }
   if (!res.ok) {
     const detail = explainDetail(data && data.detail) || `${res.status} ${res.statusText || "请求失败"}`;
+    // 401 = 没登录 / 会话过期：广播出去让外壳弹回登录框（api.js 是叶子模块，用事件解耦）
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent("metatidy:unauthorized", { detail }));
+    }
     throw new ApiError(detail, res.status, detail);
   }
   return data === null ? {} : data;
@@ -96,6 +100,11 @@ export const api = {
   settings: () => request(`${API}/settings`),
   saveSettings: (values) => request(`${API}/settings`, { method: "PUT", body: { values } }),
   sources: () => request(`${API}/sources`),
+
+  // 登录（后端没设 METATIDY_PASSWORD 时 session 直接回 required:false，前端就不弹框）
+  session: () => request(`${API}/session`),
+  login: (password) => request(`${API}/login`, { method: "POST", body: { password } }),
+  logout: () => request(`${API}/logout`, { method: "POST", body: {} }),
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
   track: (id) => request(`${API}/tracks/${id}`),

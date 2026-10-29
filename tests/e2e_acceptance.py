@@ -15,10 +15,19 @@ from pathlib import Path
 
 import requests
 
+# Windows 控制台默认 GBK：详情里出现 É（ADÉLA）这类字符会把脚本直接崩掉（Linux CI 不会）。
+# 显式把 stdout/stderr 切成 UTF-8，让这套验收在任何平台都能本地跑。
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(sys.argv[1] if len(sys.argv) > 1 else r"D:\codex\音乐刮削")
 WORK = Path(sys.argv[2] if len(sys.argv) > 2 else Path(os.environ["PI_SCRATCH_DIR"]) / "e2e")
 PORT = 8097
 BASE = f"http://127.0.0.1:{PORT}"
+
+# 8.2 节里给第二个实例用的口令（只在这个脚本里用，不是任何真实部署的口令）
+AUTH_PASSWORD = "e2e-secret-8f3a"
 
 sys.path.insert(0, str(REPO))
 from tests.audiofix import make_flac  # noqa: E402
@@ -246,6 +255,90 @@ def main() -> int:
         check("图标可访问（同一份也给 Arcane 当容器图标）",
               icon.status_code == 200 and "<svg" in icon.text,
               f"HTTP {icon.status_code} {icon.headers.get('content-type', '')}")
+
+        print("\n=== 8. 密码登录 ===")
+        # 8.1 主实例没设 METATIDY_PASSWORD：必须完全不需要登录（旧调用方与本地开发都不受影响）
+        sess = requests.get(f"{BASE}/api/session", timeout=20).json()
+        check("未设密码时报告不需要登录", sess["required"] is False and sess["authenticated"] is True,
+              json.dumps(sess, ensure_ascii=False))
+        check("未设密码时给出显式警告", bool(sess.get("warning")), str(sess.get("warning")))
+        check("未设密码时接口直接可用",
+              requests.get(f"{BASE}/api/tracks", params={"page_size": 1}, timeout=20).status_code == 200)
+
+        # 8.2 另起一个设了口令的实例（端口 +1；argv 里的端口也一起换，兼容默认的 Python 启动命令）
+        auth_port = PORT + 1
+        auth_base = f"http://127.0.0.1:{auth_port}"
+        auth_argv = [token.replace(str(PORT), str(auth_port)) for token in argv]
+        auth_env = {**env, "METATIDY_PASSWORD": AUTH_PASSWORD, "METATIDY_PORT": str(auth_port)}
+        auth_proc = subprocess.Popen(auth_argv, cwd=str(REPO), env=auth_env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            ready = False
+            for _ in range(40):
+                try:
+                    # 探针接口必须匿名可用，否则容器编排会把一个健康实例判死
+                    if requests.get(f"{auth_base}/api/health", timeout=5).status_code == 200:
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            check("设了口令的第二个实例能起来", ready, "" if ready else "健康检查超时")
+            if not ready:
+                raise RuntimeError(auth_proc.stderr.read().decode("utf-8", "ignore")[-1500:])
+
+            sess = requests.get(f"{auth_base}/api/session", timeout=20).json()
+            check("会话接口报告需要登录", sess["required"] is True and sess["authenticated"] is False,
+                  json.dumps(sess, ensure_ascii=False))
+            check("探针接口仍然匿名可用",
+                  requests.get(f"{auth_base}/api/health", timeout=20).status_code == 200)
+
+            anon = requests.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20)
+            check("未登录读曲库被拒（401）", anon.status_code == 401,
+                  f"HTTP {anon.status_code} {anon.text[:120]}")
+            anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
+            check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
+                  f"HTTP {anon_write.status_code}")
+            fake = requests.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20,
+                                cookies={"metatidy_session": "0" * 64})
+            check("伪造会话 Cookie 被拒（401）", fake.status_code == 401, f"HTTP {fake.status_code}")
+
+            jar = requests.Session()
+            bad = jar.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD + "-wrong"}, timeout=20)
+            check("密码错误被拒（401）", bad.status_code == 401, f"HTTP {bad.status_code} {bad.text[:120]}")
+            check("密码错误不下发会话 Cookie", "metatidy_session" not in jar.cookies, str(dict(jar.cookies)))
+
+            ok = jar.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
+            cookie = ok.headers.get("set-cookie", "")
+            check("密码正确可登录", ok.status_code == 200, f"HTTP {ok.status_code} {ok.text[:120]}")
+            check("下发 HttpOnly 会话 Cookie",
+                  "metatidy_session=" in cookie and "httponly" in cookie.lower(), cookie[:160])
+            check("登录后能读曲库",
+                  jar.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20).status_code == 200)
+            check("登录后能读状态",
+                  jar.get(f"{auth_base}/api/status", timeout=20).json().get("version", "").count(".") == 2)
+
+            # 限速：上面成功登录已经把失败计数清零；连错到阈值后必须开始 429
+            codes = [requests.post(f"{auth_base}/api/login", json={"password": "nope"}, timeout=20).status_code
+                     for _ in range(6)]
+            check("连续输错后开始限速（429）", 429 in codes, f"状态码序列 {codes}")
+            locked = requests.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
+            check("限速期间连正确口令也被挡（429）", locked.status_code == 429, f"HTTP {locked.status_code}")
+
+            out = jar.post(f"{auth_base}/api/logout", timeout=20)
+            check("退出登录成功且清 Cookie",
+                  out.status_code == 200 and "Max-Age=0" in out.headers.get("set-cookie", ""),
+                  f"HTTP {out.status_code} {out.headers.get('set-cookie', '')[:120]}")
+            after = jar.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20)
+            check("退出后旧会话立即失效（401）", after.status_code == 401, f"HTTP {after.status_code}")
+            still = requests.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
+            check("退出登录不会解除限速（仍是 429）", still.status_code == 429, f"HTTP {still.status_code}")
+        finally:
+            auth_proc.terminate()
+            try:
+                auth_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                auth_proc.kill()
     finally:
         proc.terminate()
         try:

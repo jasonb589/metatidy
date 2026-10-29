@@ -23,6 +23,16 @@ pub struct Config {
     pub scan_workers: usize,
     /// 单文件标签读取超时（秒），防止卡在慢存储上
     pub read_timeout_secs: u64,
+
+    // ── 登录保护（`METATIDY_PASSWORD` 为空 = 完全不启用认证）──
+    /// 访问口令；不设就谁都能进（只适合本机/完全可信的内网）
+    pub auth_password: Option<String>,
+    /// 会话有效期（天，默认 30）
+    pub auth_session_days: i64,
+    /// 给会话 Cookie 加 `Secure`（走 HTTPS/反代时才开）
+    pub auth_cookie_secure: bool,
+    /// 信任 `X-Forwarded-For`：反代后面限速才按真实客户端 IP 算
+    pub auth_trust_proxy: bool,
     // ── 可选密钥：不配也不影响主要功能 ──
     pub spotify_client_id: String,
     pub spotify_client_secret: String,
@@ -59,6 +69,17 @@ fn env_opt(key: &str) -> Option<String> {
     }
 }
 
+/// 布尔环境变量：`1/true/yes/on` 都算开（不区分大小写），其它/未设置算关。
+fn env_flag(key: &str) -> bool {
+    match env::var(key) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let music_dir = PathBuf::from(env_or("METATIDY_MUSIC_DIR", "/music"));
@@ -82,6 +103,13 @@ impl Config {
             .parse()
             .unwrap_or(60);
 
+        // 口令：两套名字都认（`METATIDY_PASSWORD` 是文档里给用户的那个）
+        let auth_password = match env_first(&["METATIDY_PASSWORD", "METATIDY_AUTH_PASSWORD"]) {
+            value if value.is_empty() => None,
+            value => Some(value),
+        };
+        let auth_session_days: i64 = env_or("METATIDY_SESSION_DAYS", "30").parse().unwrap_or(30);
+
         Ok(Self {
             database_url,
             redis_url: env_opt("REDIS_URL").or_else(|| env_opt("METATIDY_REDIS_URL")),
@@ -93,6 +121,10 @@ impl Config {
             port,
             scan_workers: scan_workers.max(1),
             read_timeout_secs,
+            auth_password,
+            auth_session_days: auth_session_days.max(1),
+            auth_cookie_secure: env_flag("METATIDY_COOKIE_SECURE"),
+            auth_trust_proxy: env_flag("METATIDY_TRUST_PROXY"),
             spotify_client_id: env_or("SPOTIFY_CLIENT_ID", ""),
             spotify_client_secret: env_or("SPOTIFY_CLIENT_SECRET", ""),
             // 密钥名在 Python 侧有两套（API 层 vs 迁移层），这里两套都认（契约 I.4 第 8 条）

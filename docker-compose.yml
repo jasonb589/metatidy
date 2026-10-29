@@ -66,6 +66,9 @@ services:
       METATIDY_DATA_DIR: /data          # 封面/缩略图磁盘缓存
       METATIDY_SCAN_WORKERS: "4"        # 机械硬盘建议 2，SSD/NVMe 可 8
       RUST_LOG: info
+      # ── 登录保护：**务必改掉**这个占位口令，否则等于把口令写进配置文件 ──
+      # 不设这一项 = 界面完全开放（同网段谁都能改你的标签、按模板移动你的文件）
+      METATIDY_PASSWORD: "change-me-请改成你自己的口令"
       TZ: Asia/Shanghai
       # ── 可选密钥：不配也不影响主要功能，只影响对应数据源 ──
       # SPOTIFY_CLIENT_ID: ""

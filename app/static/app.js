@@ -11,12 +11,14 @@ import * as scrape from "./scrape.js";
 import * as move from "./move.js";
 import * as settings from "./settings.js";
 import * as theme from "./theme.js";
+import * as auth from "./auth.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
 const loadedTabs = new Set();
 
 let jobsTimer = 0;
 let booted = false;
+let started = false;
 
 function boot() {
   if (booted) return;
@@ -26,6 +28,7 @@ function boot() {
   move.init();
   settings.init();
   theme.init();
+  auth.init();
 
   wireTabs();
   wireJobs();
@@ -53,12 +56,32 @@ function boot() {
     ui.toast("err", "请求未处理", message);
   });
 
-  start().catch((err) => {
+  startGuarded().catch((err) => {
     ui.toast("err", "初始化失败", err && err.message ? err.message : String(err));
   });
 }
 
+/**
+ * 先确认登录状态，再决定要不要初始化界面。
+ *
+ * 关键点：需要登录且没有会话时**一个数据请求都不发**（否则一屏 401 会把 toast 刷满）；
+ * 首次登录成功后接着走正常启动，如果是「用着用着会话过期了」则整页重载最干净。
+ */
+async function startGuarded() {
+  auth.onAuthenticated(async () => {
+    if (started) location.reload();
+    else await start();
+  });
+  const session = await auth.loadSession();
+  if (session.required && !session.authenticated) {
+    auth.showLoginOverlay("请输入访问密码。");
+    return;
+  }
+  await start();
+}
+
 async function start() {
+  started = true;
   const hash = (location.hash || "").replace("#", "");
   const initial = TABS.includes(hash) ? hash : "tracks";
   await Promise.all([loadStatus(), loadSettings(), loadSources()]);

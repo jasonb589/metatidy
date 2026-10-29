@@ -24,6 +24,14 @@ pub enum AppError {
 
     #[error("{0}")]
     NotFound(String),
+
+    /// 未登录 / 口令不对（401）
+    #[error("{0}")]
+    Unauthorized(String),
+
+    /// 登录失败次数过多（429）
+    #[error("{0}")]
+    TooManyRequests(String),
 }
 
 impl AppError {
@@ -34,6 +42,14 @@ impl AppError {
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
     }
+
+    pub fn unauthorized(msg: impl Into<String>) -> Self {
+        Self::Unauthorized(msg.into())
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self::TooManyRequests(msg.into())
+    }
 }
 
 impl IntoResponse for AppError {
@@ -41,7 +57,9 @@ impl IntoResponse for AppError {
         // 先按引用取状态码，再取消息（self 会被消费）
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let detail = self.to_string();

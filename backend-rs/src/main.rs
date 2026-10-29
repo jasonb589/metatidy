@@ -10,6 +10,7 @@
 //!   metatidy-server --probe-tags <文件>   用 lofty 读一个真实音频文件的标签
 
 mod api;
+mod auth;
 mod config;
 mod db;
 mod error;
@@ -112,6 +113,17 @@ async fn main() -> anyhow::Result<()> {
         redis,
     };
 
+    match &config.auth_password {
+        Some(_) => info!(
+            "已启用密码登录（METATIDY_PASSWORD）：会话有效期 {} 天",
+            config.auth_session_days
+        ),
+        None => warn!(
+            "未设置 METATIDY_PASSWORD：同网段任何人都能打开界面并修改你的音乐库；\
+             设置该环境变量即可启用登录"
+        ),
+    }
+
 
 
 
@@ -120,7 +132,11 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("{}:{}", config.host, config.port);
     info!("metatidy (rust) 监听 http://{}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
