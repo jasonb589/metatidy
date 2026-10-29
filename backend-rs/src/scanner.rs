@@ -229,6 +229,9 @@ pub async fn scan(
         repo::existing_state(pool).await?
     };
 
+    // 这份只读快照给下面的阻塞任务用：`known` 之后还要用（判断是新行还是更新行），
+    // 所以这里克隆一份，而不是把它 move 进闭包。
+    let known_for_check = known.clone();
     // 增量判断：mtime 与 size 都没变就不碰这个文件。
     //
     // **必须放在 spawn_blocking 里**：`std::fs::metadata` 是同步调用，云盘/慢盘上
@@ -250,7 +253,7 @@ pub async fn scan(
                     .unwrap_or(0.0);
                 let size = meta.len() as i64;
                 let key = crate::models::path_key(path);
-                let unchanged = known
+                let unchanged = known_for_check
                     .get(&key)
                     .map(|(prev_mtime, prev_size)| {
                         (prev_mtime - mtime).abs() < 1e-6 && *prev_size == size
