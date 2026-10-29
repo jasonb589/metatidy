@@ -69,6 +69,12 @@ services:
       # ── 登录保护：**务必改掉**这个占位口令，否则等于把口令写进配置文件 ──
       # 不设这一项 = 界面完全开放（同网段谁都能改你的标签、按模板移动你的文件）
       METATIDY_PASSWORD: "change-me-请改成你自己的口令"
+      # 挂了反代（Nginx Proxy Manager / Traefik 等，默认会带 X-Forwarded-For）时打开：
+      # 登录失败限速按**真实客户端 IP** 算，而不是所有请求都算在反代那一个 IP 上
+      # （不开的话，有人在公网猛试密码会把你自己也锁 5 分钟）。
+      # 验证：登录一次，容器日志里的「登录成功：来源 …」应该显示你的真实 IP。
+      # **直接把端口暴露出去时不要开** —— 那样谁都能伪造 X-Forwarded-For 绕过限速。
+      # METATIDY_TRUST_PROXY: "1"
       TZ: Asia/Shanghai
       # ── 可选密钥：不配也不影响主要功能，只影响对应数据源 ──
       # SPOTIFY_CLIENT_ID: ""
