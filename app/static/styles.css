@@ -940,3 +940,12 @@ img.brand-mark {
   height: 22px;
   border-radius: 6px;
 }
+
+/* 顶栏状态胶囊：存储没连上时变红（浅色主题下 --err 会自动换成深红） */
+.chip.is-bad {
+  color: var(--err);
+  border-color: rgba(248, 81, 73, 0.45);
+}
+[data-theme="light"] .chip.is-bad {
+  border-color: rgba(207, 34, 46, 0.35);
+}

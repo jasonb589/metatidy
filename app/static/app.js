@@ -134,9 +134,21 @@ async function loadStatus() {
   const chip = ui.byId("header-version");
   if (chip) {
     const scraper = status.scraper || {};
-    chip.textContent = `v${status.version} · ${scraper.available ? `迁移层 ${scraper.count} 源` : "迁移层不可用"}`;
-    chip.title = `版本 ${status.version}\n音乐目录 ${status.music_dir}（${status.music_dir_exists ? "存在" : "不存在！"}）\n库根目录 ${status.library_root}\n数据目录 ${status.data_dir}`;
-    chip.className = `chip ${scraper.available ? "" : "hint-warn"}`.trim();
+    const pg = status.postgres === true;
+    const redis = status.redis === true;
+    // 这个胶囊的价值是「一眼看出后端健不健康」：版本 + 两个存储的连通状态。
+    // 数据源数量只在 tooltip 里给（数字基本恒定，摆在正面没有信息量）。
+    chip.textContent = `v${status.version} · PG ${pg ? "✓" : "✗"} Redis ${redis ? "✓" : "✗"}`;
+    chip.title = [
+      `后端版本 ${status.version}`,
+      `Postgres ${pg ? "已连接" : "未连接！"}`,
+      `Redis ${redis ? "已连接" : "未连接（任务进度只落数据库）"}`,
+      `数据源 ${scraper.available ? `${scraper.count} 个可用` : "不可用"}`,
+      `音乐目录 ${status.music_dir}（${status.music_dir_exists ? "存在" : "不存在！"}）`,
+      `库根目录 ${status.library_root}`,
+      `缓存目录 ${status.data_dir}`,
+    ].join("\n");
+    chip.className = `chip ${pg && redis && status.music_dir_exists ? "" : "is-bad"}`.trim();
   }
   if (!status.music_dir_exists) {
     ui.toast("err", "音乐目录不存在", `${status.music_dir} —— 扫描会失败，请检查挂载或环境变量。`, { timeout: 12000 });
