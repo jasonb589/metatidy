@@ -333,14 +333,24 @@ pub fn apply_update(
 
     if let Some((data, mime)) = cover {
         if !data.is_empty() {
-            let mime_type = if mime.to_lowercase().contains("png") {
-                MimeType::Png
-            } else {
-                MimeType::Jpeg
-            };
-            let picture = Picture::new_unchecked(PictureType::CoverFront, Some(mime_type), None, data);
-            tag.push_picture(picture);
-            written += 1;
+            // 封面是「替换」而不是「追加」：lofty 的 push_picture 只会再塞一张，文件里攒两张
+            // 之后 read_cover 仍取 pictures()[0]（旧的那张），看起来就像「写了封面没生效」。
+            // Python 参考实现对 mp3/flac/ogg/m4a 都是覆盖写，这里对齐；并遵守「覆盖已有值」开关
+            // （不勾且已有封面时不动它）。
+            if overwrite || tag.pictures().is_empty() {
+                let mime_type = if mime.to_lowercase().contains("png") {
+                    MimeType::Png
+                } else {
+                    MimeType::Jpeg
+                };
+                while !tag.pictures().is_empty() {
+                    let _ = tag.remove_picture(0);
+                }
+                let picture =
+                    Picture::new_unchecked(PictureType::CoverFront, Some(mime_type), None, data);
+                tag.push_picture(picture);
+                written += 1;
+            }
         }
     }
 
@@ -484,6 +494,68 @@ mod tests {
         let got = read_cover(&path).expect("应能读回封面");
         assert_eq!(got.0, png);
         assert!(read_tags(&path).has_cover);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 写封面必须是「替换」而不是「追加」。
+    ///
+    /// lofty 的 `push_picture` 只会再塞一张：文件里攒两张之后 `read_cover` 仍取
+    /// `pictures()[0]`（旧的那张），界面上看起来就像「写了封面没生效」。Python 参考实现
+    /// 对 mp3/flac/ogg/m4a 都是覆盖写，这里必须对齐；同时遵守「覆盖已有值」开关。
+    #[test]
+    fn cover_write_replaces_instead_of_appending() {
+        let Some(path) = require("flac") else { return };
+        let first = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01];
+        let second = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x02];
+        let desired = HashMap::new();
+
+        // 1) 文件里本来没有封面 → 写上
+        apply_update(
+            &path,
+            &desired,
+            true,
+            Some((first.clone(), "image/png".to_string())),
+            None,
+        )
+        .unwrap();
+        assert_eq!(read_cover(&path).map(|c| c.0), Some(first.clone()));
+
+        // 2) 再写一张（覆盖开关打开）→ 必须换掉，而不是攒成两张
+        apply_update(
+            &path,
+            &desired,
+            true,
+            Some((second.clone(), "image/png".to_string())),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_cover(&path).map(|c| c.0),
+            Some(second.clone()),
+            "封面应被替换成新的那张"
+        );
+        let tagged = Probe::open(&path).unwrap().read().unwrap();
+        let count = tagged
+            .primary_tag()
+            .or_else(|| tagged.first_tag())
+            .map(|tag| tag.pictures().len())
+            .unwrap_or(0);
+        assert_eq!(count, 1, "文件里只应有一张封面，实际 {count} 张");
+
+        // 3) 覆盖开关关闭 + 已有封面 → 原样不动
+        apply_update(
+            &path,
+            &desired,
+            false,
+            Some((first.clone(), "image/png".to_string())),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_cover(&path).map(|c| c.0),
+            Some(second.clone()),
+            "不勾「覆盖已有值」时不该动已有封面"
+        );
         std::fs::remove_file(&path).ok();
     }
 
