@@ -155,13 +155,23 @@ jobs:
       # E2E_SERVER_CMD 用「相对仓库根」的路径（脚本以仓库根为 cwd 启动服务端），
       # 端口由 METATIDY_PORT 传给服务端（脚本自身固定轮询 8097）。
       # 先清库：验收里断言「索引 5 首」，前面的自检留下的行会让它假红。
-      - name: 端到端验收（31 项：真实服务 + Postgres + Redis + 真实数据源）
+      - name: 端到端验收（真实服务 + Postgres + Redis + 真实数据源）
         env:
           METATIDY_PORT: "8097"
           E2E_SERVER_CMD: ./backend-rs/target/release/metatidy-server
         run: |
           psql "$DATABASE_URL" -c 'TRUNCATE tracks, jobs, move_plans, alias_artist, alias_album RESTART IDENTITY;' || true
           python "$GITHUB_WORKSPACE/tests/e2e_acceptance.py" "$GITHUB_WORKSPACE" /tmp/metatidy-e2e
+
+      # 零构建前端没有编译器，语法错误只能等浏览器报错；这里用 runner 自带的 node 兜住。
+      # （模块语法按 ESM 检查，所以复制成 .mjs 再 --check）
+      - name: 前端语法检查（node --check，零构建前端）
+        run: |
+          for f in "$GITHUB_WORKSPACE"/app/static/*.js; do
+            cp "$f" "/tmp/$(basename "$f" .js).mjs"
+            node --check "/tmp/$(basename "$f" .js).mjs"
+          done
+          echo "前端 JS 全部通过语法检查"
 
       - name: 冒烟：起服务并断言状态接口
         run: |

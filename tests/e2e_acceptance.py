@@ -215,6 +215,26 @@ def main() -> int:
         check("设置可保存", saved["saved"].get("conflict_policy") == "skip", str(saved))
         tpl = requests.get(f"{BASE}/api/template/test", params={"dir_template": "{language?}/{artist}/{album}", "filename_template": "{title}"}, timeout=20).json()
         check("模板试渲染", tpl["target"].endswith(".flac"), f"{Path(tpl['source']).name} -> {tpl['target']}")
+
+        print("\n=== 6. 快速扫描（只建索引、不读文件；云盘必用） ===")
+        job_fast = requests.post(f"{BASE}/api/scan", json={"fast": True, "prune": True}, timeout=30).json()
+        res_fast = wait_job(job_fast["job_id"])
+        fast_result = json.loads(res_fast["result"]) if res_fast.get("result") else {}
+        check("快速扫描完成", res_fast["state"] == "done", json.dumps(fast_result, ensure_ascii=False)[:160])
+        fast_items = requests.get(f"{BASE}/api/tracks", params={"page_size": 50}, timeout=20).json()["items"]
+        check("快速扫描后条目仍齐全", len(fast_items) == 5, f"{len(fast_items)} 条")
+        check("全部标记为路径推断", all(i.get("path_derived") for i in fast_items),
+              str([(i["title"], i["path_derived"], i["tags_loaded"]) for i in fast_items]))
+        check("未读取音频标签", all(not i.get("tags_loaded") for i in fast_items))
+        by_title = {i["title"]: i for i in fast_items}
+        check("歌手由目录结构推断", by_title.get("稻香", {}).get("artist") == "周杰伦",
+              repr(by_title.get("稻香", {}).get("artist")))
+        check("专辑由目录结构推断", by_title.get("稻香", {}).get("album") == "魔杰座",
+              repr(by_title.get("稻香", {}).get("album")))
+        # 收尾：恢复成「读过标签」的状态，顺便验证快速扫描之后再做全量扫描不会把索引搞坏
+        job_restore = requests.post(f"{BASE}/api/scan", json={"full": True, "prune": True}, timeout=30).json()
+        res_restore = wait_job(job_restore["job_id"])
+        check("随后全量扫描正常", res_restore["state"] == "done", str(res_restore.get("message")))
     finally:
         proc.terminate()
         try:

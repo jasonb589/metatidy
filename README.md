@@ -18,6 +18,8 @@ Web 界面，单容器部署，适合放在 NAS / 小主机上长期跑。
 - 浏览、搜索、过滤、排序**全部只查 PostgreSQL**（`pg_trgm` 索引），音频文件一个都不碰。
 - 有个**快速扫描**模式：只从目录结构建索引、完全不打开文件。云盘上「首次读标签约 10 秒/文件」，
   一万首要 20 多小时；快速扫描下先出列表，等你真要编辑某几首时只读那几首。
+  界面上就是「扫描曲库」旁边那个 **快速扫描** 勾选框（勾上后「全量重扫」自动失效）；
+  也可以直接打接口：`curl -X POST http://<主机>:8080/api/scan -H 'Content-Type: application/json' -d '{"fast":true,"prune":true}'`。
 - 列表接口不返回封面二进制；封面走独立接口并在磁盘缓存缩略图。
 - 扫描 / 批量刮削 / 整理移动都是后台任务：任务行落 PostgreSQL，实时进度写 Redis，
   前端轮询，HTTP 请求永不阻塞。
@@ -210,7 +212,7 @@ cargo run --release -- --selftest-index    # 扫描/增量/语言推断/标签�
 cargo run --release -- --selftest-scrape   # 真实联网：4 个源 + 歌词 + 封面
 ```
 
-端到端验收（31 项，与 Python 版用的是**同一套检查**；脚本会自己起服务）：
+端到端验收（与 Python 版用的是**同一套检查**；脚本会自己起服务）：
 
 ```bash
 # 验收 Rust 二进制
@@ -243,7 +245,7 @@ backend-rs/           Rust 后端（现役，镜像就是它编译出来的）
 app/                  Python 版本：**参考实现**，接口契约以它为准（镜像已不再用它）
   static/             无构建前端（原生 HTML/CSS/JS，完全离线可用；两个版本共用）
 metatidy_core/        Python 版的数据源实现（从既有产线项目迁移，已剥离 GUI 依赖）
-tests/                Python 单元测试 + e2e_acceptance.py（31 项端到端验收）
+tests/                Python 单元测试 + e2e_acceptance.py（端到端验收脚本）
 ```
 
 前端是**零构建**的原生实现：没有 npm、没有 CDN、没有打包步骤，镜像断网也能正常用。
@@ -252,7 +254,7 @@ tests/                Python 单元测试 + e2e_acceptance.py（31 项端到端�
 
 ## 构建与发布
 
-推到 `main` 或打 `v*` 标签，GitHub Actions 会依次：单元测试 + 三个自检 + **31 项端到端验收**
+推到 `main` 或打 `v*` 标签，GitHub Actions 会依次：单元测试 + 三个自检 + **端到端验收**
 （打真实二进制，带真 Postgres / Redis / 真实数据源）→ 构建 `linux/amd64` + `linux/arm64`
 双架构镜像 → 推送到 `ghcr.io/jasonb589/metatidy`。
 

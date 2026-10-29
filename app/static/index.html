@@ -57,6 +57,7 @@
       <div class="card-body tight">
         <div class="row">
           <button class="btn btn-primary" id="btn-scan">扫描曲库</button>
+          <label class="check"><input type="checkbox" id="scan-fast"><span>快速扫描（只建索引、不读文件，云盘必用）</span></label>
           <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫（忽略缓存，慢）</span></label>
           <label class="check"><input type="checkbox" id="scan-prune" checked><span>清理已删除的文件记录</span></label>
           <span class="hint">扫描只更新索引，不改动音频标签。</span>

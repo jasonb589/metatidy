@@ -50,6 +50,7 @@ export function init() {
     strip: ui.byId("stats-strip"),
     scanBtn: ui.byId("btn-scan"),
     scanFull: ui.byId("scan-full"),
+    scanFast: ui.byId("scan-fast"),
     scanPrune: ui.byId("scan-prune"),
     scanProgress: ui.byId("scan-progress"),
     updated: ui.byId("tracks-updated"),
@@ -134,6 +135,11 @@ export function init() {
   });
   nodes.reload.addEventListener("click", () => refresh());
   nodes.scanBtn.addEventListener("click", startScan);
+
+  // 快速扫描与「全量重扫」是互斥语义：勾了快速，全量那个就没意义了
+  nodes.scanFast.addEventListener("change", () => {
+    nodes.scanFull.disabled = nodes.scanFast.checked;
+  });
   nodes.editSelected.addEventListener("click", () => openEdit(selectionRows()));
 
   nodes.checkPage.addEventListener("change", () => {
@@ -541,13 +547,16 @@ function renderPager() {
 /* --------------------------------------------------------------- 扫描 */
 
 async function startScan() {
+  const fast = nodes.scanFast.checked;
   const full = nodes.scanFull.checked;
   const prune = nodes.scanPrune.checked;
   nodes.scanBtn.disabled = true;
   nodes.scanBtn.textContent = "扫描中…";
-  const progress = ui.createProgress(nodes.scanProgress, { label: full ? "全量扫描" : "扫描" });
+  const progress = ui.createProgress(nodes.scanProgress, {
+    label: fast ? "快速扫描（只建索引）" : full ? "全量扫描" : "扫描",
+  });
   try {
-    const { job_id: jobId } = await api.scan({ full, prune });
+    const { job_id: jobId } = await api.scan({ full, prune, fast });
     const job = await pollJob(jobId, { onTick: (tick) => progress.update(tick) });
     progress.finish(job);
     if (job.state === "error") {
@@ -560,7 +569,11 @@ async function startScan() {
       } catch {
         summary = "扫描完成";
       }
-      ui.toast("ok", "扫描完成", summary);
+      ui.toast(
+        "ok",
+        fast ? "快速扫描完成" : "扫描完成",
+        fast ? `${summary}；字段来自目录结构，没有读取音频标签` : summary
+      );
     }
   } catch (err) {
     progress.finish({ state: "error", message: err.message });
