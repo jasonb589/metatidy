@@ -179,6 +179,21 @@ def main() -> int:
             if top.get("genre"):
                 check("刮削结果落盘", reread.get("genre", [""])[0] == top["genre"], f"genre={reread.get('genre')}")
 
+
+        # 试抓歌词：不写文件，只让后端按标题/歌手走一遍歌词链（界面上的「试抓歌词」按钮）
+        lyr = requests.post(f"{BASE}/api/lyrics/preview", json={
+            "track_id": song["id"], "title": "稻香", "artist": "周杰伦",
+            "album": "魔杰座", "duration": 223.5,
+        }, timeout=180)
+        check("试抓歌词接口可用（200）", lyr.status_code == 200, f"HTTP {lyr.status_code} {lyr.text[:120]}")
+        lyr_data = lyr.json() if lyr.status_code == 200 else {}
+        check("试抓歌词返回形状正确",
+              isinstance(lyr_data.get("lyrics"), str) and isinstance(lyr_data.get("source"), str)
+              and isinstance(lyr_data.get("lines"), int),
+              f"source={lyr_data.get('source')!r} lines={lyr_data.get('lines')} chars={lyr_data.get('chars')}")
+        check("试抓歌词不写文件（索引仍标记为无歌词）",
+              not requests.get(f"{BASE}/api/tracks/{song['id']}", timeout=20).json().get("has_lyrics"),
+              "has_lyrics 仍为假")
         print("\n=== 4. 功能三：按目录层级整理移动 ===")
         plan = requests.post(f"{BASE}/api/move/preview", json={
             "ids": [i["id"] for i in requests.get(f"{BASE}/api/tracks", params={"page_size": 50}, timeout=20).json()["items"]],

@@ -76,6 +76,7 @@ export function init() {
     lyricsBox: ui.byId("write-lyrics-box"),
     lyricsMeta: ui.byId("write-lyrics-meta"),
     lyricsText: ui.byId("write-lyrics-text"),
+    lyricsTry: ui.byId("btn-lyrics-try"),
     writeNormalize: ui.byId("write-normalize"),
     writeOverwrite: ui.byId("write-overwrite"),
     applyBtn: ui.byId("btn-scrape-apply"),
@@ -141,6 +142,7 @@ export function init() {
   nodes.applyBtn.addEventListener("click", previewAndWrite);
   // 勾选框一改，预览里的说明也跟着变（否则「勾了写歌词」看不到任何反馈）
   nodes.writeLyrics.addEventListener("change", renderWritePanel);
+  nodes.lyricsTry.addEventListener("click", tryFetchLyrics);
 
   nodes.batchUseCurrent.addEventListener("click", () => {
     const row = currentTrackRow();
@@ -487,30 +489,79 @@ function chooseCandidate(index) {
   renderWritePanel();
 }
 
-/** 歌词预览。
+/** 歌词预览面板（常显：标题 + 说明/统计 + 「试抓歌词」按钮；有歌词时摊开全文）。
  *
- * 为什么要它：原来只能勾「写歌词」却看不到会写进去什么，等于盲勾。
- * - 候选自带歌词 → 直接摊开展示（行数 / 字数 + 全文）；
- * - 候选不带歌词 → 说明写入时后端会按标题/歌手再查一次（不假装有）；
+ * 为什么要它：原来只能勾「写歌词」却看不到会写进去什么，等于盲勾；候选本身不带歌词时，
+ * 还能用「试抓歌词」先让后端按标题/歌手查一次看看能不能抓到。
+ *
+ *
+ * - 候选自带歌词 → 直接展示（行数 / 字数 + 全文）；
+ * - 候选不带歌词 → 说明可以点「试抓歌词」让后端按标题/歌手去查（不假装有）；
  * - 写入完成后 → 用后端返回的**真实写入内容**刷新（`written: true`）。 */
-function renderLyricsPreview(cand, { written = false } = {}) {
+function renderLyricsPreview(cand, { written = false, source = "" } = {}) {
   const box = nodes.lyricsBox;
   if (!box) return;
-  const text = String((cand && cand.lyrics) || "").trim();
   box.hidden = false;
+  box.style.display = "";
+  const text = String((cand && cand.lyrics) || "").trim();
   if (!text) {
-    box.open = false;
-    nodes.lyricsText.textContent = "";
-    nodes.lyricsMeta.textContent =
+    setLyricsBody(
+      "",
       nodes.writeLyrics && nodes.writeLyrics.checked
-        ? "候选不带歌词；写入时后端会按标题/歌手再查一次（网易云 → QQ → LRCLIB → 酷狗）"
-        : "候选不带歌词；勾选「写歌词」后，写入时后端会再查一次";
+        ? "候选不带歌词；点「试抓歌词」让后端按标题/歌手去查（网易云 → QQ → LRCLIB → 酷狗）"
+        : "候选不带歌词；勾选「写歌词」后写入时后端会再查一次，或直接点「试抓歌词」",
+    );
     return;
   }
   const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "").length;
-  nodes.lyricsMeta.textContent = `${written ? "已写入 " : ""}${lines} 行 · ${text.length} 字`;
+  const label = `${written ? "已写入 " : ""}${source ? `来自 ${source} · ` : ""}${lines} 行 · ${text.length} 字`;
+  setLyricsBody(text, label);
+}
+
+/** 面板正文与说明。正文为空就把 <pre> 收起来（显隐同时走内联样式，防反代缓存旧 CSS）。 */
+function setLyricsBody(text, meta) {
+  nodes.lyricsMeta.textContent = meta;
   nodes.lyricsText.textContent = text;
-  box.open = true;
+  nodes.lyricsText.hidden = !text;
+  nodes.lyricsText.style.display = text ? "" : "none";
+}
+
+/** 「试抓歌词」：不写文件，只按当前候选的标题/歌手去链路上查一次。 */
+async function tryFetchLyrics() {
+  const row = currentTrackRow();
+  const cand = state.scrape.candidates[state.scrape.chosenIndex];
+  if (!row || !cand) {
+    ui.toast("warn", "先选一个候选", "试抓用的是当前候选的标题/歌手（和写入时同一组关键词）。");
+    return;
+  }
+  const btn = nodes.lyricsTry;
+  btn.disabled = true;
+  btn.textContent = "试抓中…";
+  nodes.lyricsBox.hidden = false;
+  nodes.lyricsBox.style.display = "";
+  setLyricsBody("", "正在试抓…（网易云 → QQ → LRCLIB → 酷狗）");
+  try {
+    const res = await api.lyricsPreview({
+      track_id: Number(row.id),
+      title: cand.title || "",
+      artist: cand.artist || "",
+      album: cand.album || "",
+      duration: Number(cand.duration) || 0,
+    });
+    if (res.lyrics) {
+      renderLyricsPreview({ lyrics: res.lyrics }, { source: res.source || "" });
+      ui.toast("ok", "抓到歌词（还没写入）", `${res.source || "未知来源"} · ${res.lines} 行 ${res.chars} 字`);
+    } else {
+      renderLyricsPreview({ lyrics: "" });
+      ui.toast("warn", "没抓到歌词", res.detail || "四个源都没有结果");
+    }
+  } catch (err) {
+    setLyricsBody("", (err && err.message) || "试抓失败");
+    ui.toast("err", "试抓歌词失败", (err && err.message) || "");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "试抓歌词";
+  }
 }
 
 function renderWritePanel() {

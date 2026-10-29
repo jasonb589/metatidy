@@ -528,6 +528,68 @@ pub struct CandidateWrite {
     pub lyrics: bool,
 }
 
+/// `POST /api/lyrics/preview`：**只抓歌词、不写文件**（界面上那个「试抓歌词」按钮）。
+///
+/// 请求体：`{"track_id": 1, "title": "…", "artist": "…", "album": "…", "duration": 223.5}`
+/// —— 后四项可省略，省略时用索引里的曲目信息。候选里的值优先：这样「试抓」和真正写入用的是
+/// 同一组关键词（否则试抓到的和写进去的可能不是同一个版本，反而误导）。
+///
+/// 走的是写入时同一条歌词链：网易云 → QQ → LRCLIB → 酷狗。
+pub async fn lyrics_preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
+    let payload = parse_body(&body)?;
+    let track_id = super::body_i64(&payload, "track_id", 0)?;
+    let Some(track) = repo::get_track(&state.db, track_id).await? else {
+        return Err(ApiError::not_found("没有这条曲目"));
+    };
+
+    let pick = |key: &str, fallback: &str| -> String {
+        payload
+            .get(key)
+            .map(super::v_text)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let title = pick("title", &track.title);
+    let artist = pick("artist", &track.artist);
+    let album = pick("album", &track.album);
+    let duration = payload
+        .get("duration")
+        .and_then(|v| v.as_f64())
+        .filter(|secs| *secs > 0.0)
+        .or_else(|| (track.duration > 0.0).then_some(track.duration));
+
+    let found = scrapers::fetch_lyrics(
+        &HTTP,
+        title.trim(),
+        artist.trim(),
+        Some(album.as_str()).map(str::trim).filter(|s| !s.is_empty()),
+        duration,
+    )
+    .await;
+
+    Ok(Json(match found {
+        Some((text, source)) => json!({
+            "lyrics": text,
+            "source": source,
+            "lines": text.lines().filter(|line| !line.trim().is_empty()).count(),
+            "chars": text.chars().count(),
+            "title": title,
+            "artist": artist,
+            "album": album,
+        }),
+        None => json!({
+            "lyrics": "",
+            "source": "",
+            "lines": 0,
+            "chars": 0,
+            "detail": "四个源都没取到歌词（网易云 → QQ → LRCLIB → 酷狗）",
+            "title": title.clone(),
+            "artist": artist.clone(),
+            "album": album.clone(),
+        }),
+    }))
+}
+
 /// `null` / 空串 / 空数组都算「没给」（Python 是 `v not in (None, "")`）。
 fn is_blank(value: &Value) -> bool {
     match value {

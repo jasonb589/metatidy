@@ -120,6 +120,10 @@ export const api = {
   scrapeApply: (payload) => request(`${API}/scrape/apply`, { method: "POST", body: payload, timeout: 180000 }),
   scrapeBatch: (payload) => request(`${API}/scrape/batch`, { method: "POST", body: payload }),
 
+  // 试抓歌词：不写文件，只让后端按标题/歌手去链路上查一次（面板上的「试抓歌词」）
+  lyricsPreview: (payload) =>
+    request(`${API}/lyrics/preview`, { method: "POST", body: payload, timeout: 90000 }),
+
   movePreview: (payload) => request(`${API}/move/preview`, { method: "POST", body: payload, timeout: 120000 }),
   movePlan: (token) => request(`${API}/move/plan/${token}`),
   moveExecute: (payload) => request(`${API}/move/execute`, { method: "POST", body: payload, timeout: 120000 }),

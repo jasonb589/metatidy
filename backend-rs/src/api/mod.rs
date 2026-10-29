@@ -773,7 +773,7 @@ pub fn bad_kind() -> ApiError {
 
 // --------------------------------------------------------------------------- 路由
 
-/// 21 条需要登录的 API 路由 + 4 条公开路由（探针、会话、登录、登出）。
+/// 22 条需要登录的 API 路由 + 4 条公开路由（探针、会话、登录、登出）。
 ///
 /// 认证中间件只挂在「需要登录」的那一组上：`/api/health` 必须匿名可用（否则容器探针和
 /// `--healthcheck` 会一直失败），而 `/api/session` 正是前端启动时用来判断「要不要弹登录框」
@@ -794,6 +794,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/search", post(scrape::search))
         .route("/api/scrape/apply", post(scrape::apply))
         .route("/api/scrape/batch", post(scrape::batch))
+        // 试抓歌词：不写文件，只按标题/歌手去链路上查一次（界面上的「试抓歌词」）
+        .route("/api/lyrics/preview", post(scrape::lyrics_preview))
         .route("/api/move/preview", post(moves::move_preview))
         .route("/api/move/plan/:token", get(moves::move_plan))
         .route("/api/move/execute", post(moves::move_execute))

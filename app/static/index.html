@@ -258,10 +258,16 @@
             <div>
               <span class="lbl">写入字段</span>
               <div class="field-grid" id="write-fields"></div>
-      <details class="lyrics-box" id="write-lyrics-box" hidden>
-        <summary class="lbl">歌词预览 <span class="hint" id="write-lyrics-meta"></span></summary>
-        <pre id="write-lyrics-text"></pre>
-      </details>
+              <div class="lyrics-box" id="write-lyrics-box" hidden>
+                <div class="row">
+                  <span class="lbl">歌词预览</span>
+                  <span class="hint" id="write-lyrics-meta"></span>
+                  <div class="spacer"></div>
+                  <button class="btn btn-sm" id="btn-lyrics-try"
+                    title="不写入文件：按当前候选的标题/歌手去四个源试抓一次（网易云 → QQ → LRCLIB → 酷狗）">试抓歌词</button>
+                </div>
+                <pre id="write-lyrics-text" hidden></pre>
+              </div>
             </div>
             <div class="row">
               <label class="check"><input type="checkbox" id="write-cover" checked><span>写封面</span></label>
