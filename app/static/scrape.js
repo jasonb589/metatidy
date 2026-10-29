@@ -617,6 +617,16 @@ async function previewAndWrite() {
     const withCoverLyrics = [];
     if (writeCover) withCoverLyrics.push("封面");
     if (writeLyrics) withCoverLyrics.push("歌词");
+    // 说明文字必须与实际勾选一致：没勾封面就不能出现「封面」，否则会被读成封面也会写。
+    const noDiffWhy = [];
+    if (writeCover) noDiffWhy.push("封面从数据源下载");
+    if (writeLyrics) noDiffWhy.push("歌词取候选内容，候选没带就由后端再查一次");
+    const coverHints = [];
+    if (nodes.writeCover.checked && !cand.cover) {
+      coverHints.push("勾了「写封面」，但这个候选没有封面地址，本次写不上封面。");
+    } else if (!nodes.writeCover.checked && cand.cover) {
+      coverHints.push("这个候选有封面地址，但没勾「写封面」，本次不会写封面。");
+    }
 
     let body = [];
     let answer = "apply";
@@ -628,8 +638,11 @@ async function previewAndWrite() {
       nodes.result.append(ui.notice("info", `差异预览完成，共 ${changed} 处变更；尚未写入文件。`));
       body.unshift(ui.notice("info", `来源：${cand.source || "未知"} · ${cand.title || ""} — ${cand.artist || ""}`));
       if (withCoverLyrics.length) {
-        body.push(ui.notice("warn", `除字段外还会写入：${withCoverLyrics.join(" + ")}（这部分没有差异预览，封面从数据源下载、歌词取候选内容或后端再查）。`));
+        body.push(
+          ui.notice("warn", `除字段外还会写入：${withCoverLyrics.join(" + ")}（没有差异预览：${noDiffWhy.join("；")}）。`),
+        );
       }
+      coverHints.forEach((text) => body.push(ui.notice("info", text)));
       body.push(
         ui.el("div", { class: "hint", text: overwrite ? "覆盖已有值：开" : "覆盖已有值：关（已有非空字段会被跳过）" }),
       );
@@ -651,7 +664,7 @@ async function previewAndWrite() {
           { label: "来源", value: cand.source || "未知" },
         ],
         confirmLabel: "确认写入",
-        note: "封面/歌词会直接合并进现有标签，不会删除其它字段。",
+        note: `${withCoverLyrics.join(" + ")}会直接合并进现有标签，不会删除其它字段。`,
       }))
         ? "apply"
         : "";
