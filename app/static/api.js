@@ -109,6 +109,7 @@ export const api = {
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
   track: (id) => request(`${API}/tracks/${id}`),
+  trackLyrics: (id) => request(`${API}/tracks/${id}/lyrics`),
   previewTracks: (payload) => request(`${API}/tracks/preview`, { method: "POST", body: payload, timeout: 90000 }),
   applyTracks: (payload) => request(`${API}/tracks/apply`, { method: "POST", body: payload, timeout: 300000 }),
 

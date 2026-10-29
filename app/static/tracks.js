@@ -40,6 +40,9 @@ const EDIT_FIELDS = [
   "release_group_id",
 ];
 
+/** 打开面板时从文件里读回来的歌词基线：只有改动过才带进预览 / 写入。 */
+let lyricsBase = "";
+
 const FILTER_KEYS = ["language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album"];
 
 let nodes = null;
@@ -84,6 +87,8 @@ export function init() {
     drawerResult: ui.byId("edit-result"),
     editNormalize: ui.byId("edit-normalize"),
     editOverwrite: ui.byId("edit-overwrite"),
+    editLyrics: ui.byId("edit-lyrics"),
+    editLyricsHint: ui.byId("edit-lyrics-hint"),
     dlLanguages: ui.byId("dl-languages"),
     dlAlbumtypes: ui.byId("dl-albumtypes"),
   };
@@ -176,6 +181,8 @@ export function init() {
       const input = ui.byId(`edit-${key}`);
       if (input) input.value = "";
     });
+    if (nodes.editLyrics) nodes.editLyrics.value = "";
+    lyricsBase = "";
   });
   nodes.drawerPreview.addEventListener("click", runPreview);
   document.addEventListener("keydown", (event) => {
@@ -587,6 +594,30 @@ async function startScan() {
 
 /* ------------------------------------------------------- 编辑 + 预览确认 */
 
+/** 载入文件里现有的歌词（只读；失败也不影响编辑其它字段）。 */
+async function loadLyrics(trackId) {
+  const rowId = Number(trackId);
+  if (!rowId || !nodes.editLyrics) return;
+  if (nodes.editLyricsHint) nodes.editLyricsHint.textContent = "正在读取文件里的歌词…";
+  try {
+    const data = await api.trackLyrics(rowId);
+    // 期间可能已经关了面板或换了曲目：只认当前这一首
+    const current = state.edit.rows[0];
+    if (!state.edit.open || !current || Number(current.id) !== rowId) return;
+    lyricsBase = data.lyrics || "";
+    nodes.editLyrics.value = lyricsBase;
+    if (nodes.editLyricsHint) {
+      nodes.editLyricsHint.textContent = data.has_lyrics
+        ? `文件里现有 ${data.lines} 行 · ${data.chars} 字（改了才会写入；清空 = 不改动）`
+        : "这个文件当前没有歌词：写进去后点「预览变更」，确认才会落盘。";
+    }
+  } catch (err) {
+    if (nodes.editLyricsHint) {
+      nodes.editLyricsHint.textContent = `读取现有歌词失败：${err.message}（留空表示不改动歌词）`;
+    }
+  }
+}
+
 function openEdit(rows) {
   if (!rows || !rows.length) return;
   state.edit.rows = rows.map((row) => ({ ...row }));
@@ -597,6 +628,14 @@ function openEdit(rows) {
     const input = ui.byId(`edit-${key}`);
     if (input) input.value = "";
   });
+  // 歌词：先清空，再载入文件里现有的（多选时留空 = 不改动歌词）
+  lyricsBase = "";
+  if (nodes.editLyrics) nodes.editLyrics.value = "";
+  if (nodes.editLyricsHint) {
+    nodes.editLyricsHint.textContent =
+      "打开面板时会自动载入文件里现有的歌词；改了才会写入，清空 = 不改动（歌词不受「覆盖已有值」影响）。";
+  }
+  if (state.edit.rows.length === 1) loadLyrics(state.edit.rows[0].id);
   const first = state.edit.rows[0];
   ui.setText(nodes.drawerScope, rows.length === 1 ? `1 首：${first.title || first.filename}` : `${rows.length} 首`);
   nodes.drawerScope.title = rows.length === 1 ? first.path || "" : rows.map((row) => row.title || row.filename).join("\n");
@@ -625,6 +664,9 @@ function collectFields() {
     const value = input.value.trim();
     if (value !== "") fields[key] = value;
   });
+  // 歌词：只有改动过才带上（基线是打开面板时从文件里读回来的那份）
+  const lyrics = nodes.editLyrics ? nodes.editLyrics.value : "";
+  if (lyrics.trim() !== "" && lyrics !== lyricsBase) fields.lyrics = lyrics;
   return fields;
 }
 

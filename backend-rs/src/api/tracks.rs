@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::models::Track;
+use crate::models::{FieldChange, Track};
 use crate::repo::{self, TrackQuery};
 use crate::tagio;
 use crate::AppState;
@@ -169,7 +169,12 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let normalize_artist = super::body_bool(&payload, "normalize_artist", true)?;
     let raw_fields = body_field_map(&payload, "fields")?;
     let mut fields = prepare_fields(&raw_fields, normalize_artist);
-    if fields.is_empty() {
+    // 歌词走独立通道：它不是普通文本字段（不在 EDITABLE_FIELDS 里），填了才写、留空 = 不动
+    let lyrics = raw_fields
+        .get("lyrics")
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    if fields.is_empty() && lyrics.is_none() {
         return Err(ApiError::bad_request("没有可编辑的字段"));
     }
     let artist_alias = repo::aliases(&state.db, "artist").await?;
@@ -187,7 +192,20 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
             continue; // 索引里查不到的 id 静默跳过
         };
         let path = std::path::Path::new(&track.path);
-        let changes = tagio::preview_update(path, &fields);
+        let mut changes = tagio::preview_update(path, &fields);
+        // 歌词的差异只报「行数 + 首行」：整篇塞进差异表没法看
+        if let Some(new_lyrics) = &lyrics {
+            let old_lyrics = tagio::read_lyrics(path);
+            if old_lyrics.trim() != new_lyrics.trim() {
+                changes.insert(
+                    "lyrics".to_string(),
+                    FieldChange {
+                        old: lyrics_summary(&old_lyrics),
+                        new: lyrics_summary(new_lyrics),
+                    },
+                );
+            }
+        }
         let current = raw_tags_json(&tagio::read_tags(path));
         changed_total += changes.len();
         items.push(json!({
@@ -201,8 +219,15 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
         }));
     }
 
+    // 回显里也带上歌词：否则界面上那句「将写入字段：」在只改歌词时是空的
+    let mut echoed = fields_json(&fields);
+    if let Some(text) = &lyrics {
+        if let Some(obj) = echoed.as_object_mut() {
+            obj.insert("lyrics".to_string(), Value::String(lyrics_summary(text)));
+        }
+    }
     Ok(Json(json!({
-        "fields": fields_json(&fields),
+        "fields": echoed,
         "items": items,
         "changed_fields": changed_total,
         "truncated": truncated,
@@ -220,7 +245,12 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let overwrite = super::body_bool(&payload, "overwrite", true)?;
     let raw_fields = body_field_map(&payload, "fields")?;
     let mut fields = prepare_fields(&raw_fields, normalize_artist);
-    if fields.is_empty() {
+    // 歌词走独立通道：它不是普通文本字段（不在 EDITABLE_FIELDS 里），填了才写、留空 = 不动
+    let lyrics = raw_fields
+        .get("lyrics")
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+    if fields.is_empty() && lyrics.is_none() {
         return Err(ApiError::bad_request("没有可编辑的字段"));
     }
     let artist_alias = repo::aliases(&state.db, "artist").await?;
@@ -235,7 +265,7 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
             continue;
         };
         let path = std::path::Path::new(&track.path);
-        match tagio::apply_update(path, &fields, overwrite, None, None) {
+        match tagio::apply_update(path, &fields, overwrite, None, lyrics.as_deref()) {
             Ok(_) => {
                 let (mtime, size) = file_meta(path);
                 repo::sync_after_write(
@@ -246,7 +276,7 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
                     Some(size),
                     false,
                     None,
-                    None,
+                    lyrics.as_ref().map(|_| true),
                     true,
                 )
                 .await?;
@@ -261,8 +291,47 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     }
 
     let mut sorted: Vec<String> = fields.keys().cloned().collect();
+    if lyrics.is_some() {
+        sorted.push("lyrics".to_string());
+    }
     sorted.sort();
     Ok(Json(json!({ "written": written, "failed": failed, "fields": sorted })))
+}
+
+/// `GET /api/tracks/{track_id}/lyrics`：读文件里现有的歌词（编辑面板打开时载入用）。
+pub async fn lyrics(State(state): State<AppState>, Path(raw_id): Path<String>) -> ApiResult {
+    let track_id = path_i64(&raw_id, "track_id")?;
+    let Some(track) = repo::get_track(&state.db, track_id).await? else {
+        return Err(ApiError::not_found("没有这条曲目"));
+    };
+    let path = std::path::Path::new(&track.path);
+    let text = tagio::read_lyrics(path);
+    Ok(Json(json!({
+        "track_id": track.id,
+        "path": track.path,
+        "lyrics": text,
+        "lines": text.lines().filter(|line| !line.trim().is_empty()).count(),
+        "chars": text.chars().count(),
+        "has_lyrics": !text.trim().is_empty(),
+        "file_exists": path.exists(),
+    })))
+}
+
+/// 歌词差异的紧凑表示：整篇歌词塞进差异表没法看，只给「行数 + 首行」。
+fn lyrics_summary(text: &str) -> String {
+    if text.trim().is_empty() {
+        return "（无歌词）".to_string();
+    }
+    let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+    let head: String = text
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(32)
+        .collect();
+    format!("{lines} 行 · 首行 {head}")
 }
 
 /// `/api/aliases/{kind}`（读）。

@@ -155,6 +155,30 @@ def main() -> int:
         check("磁盘上的多歌手是 &", tags.get("artist", [""])[0] == "周杰伦 & 费玉清", f"artist={tags.get('artist')}")
         check("索引已同步", requests.get(f"{BASE}/api/tracks/{target['id']}", timeout=20).json()["album"] == "七里香")
 
+        # 歌词也能在「编辑元数据」面板里改：读现有歌词 → 预览出差异 → 写入 → 读回
+        lyrics_now = requests.get(f"{BASE}/api/tracks/{target['id']}/lyrics", timeout=20).json()
+        check("能读到曲目现有歌词（编辑面板载入用）",
+              isinstance(lyrics_now.get("lyrics"), str) and "has_lyrics" in lyrics_now,
+              f"has_lyrics={lyrics_now.get('has_lyrics')} lines={lyrics_now.get('lines')}")
+        new_lyrics = "[00:01.00] 测试歌词第一行\n[00:05.00] 第二行"
+        lp = requests.post(f"{BASE}/api/tracks/preview", json={
+            "ids": [target["id"]], "fields": {"lyrics": new_lyrics},
+        }, timeout=60).json()
+        check("编辑歌词：预览里出现歌词差异",
+              any("lyrics" in (item.get("changes") or {}) for item in lp.get("items", [])),
+              json.dumps(lp.get("items", [{}])[0].get("changes", {}), ensure_ascii=False)[:200])
+        la = requests.post(f"{BASE}/api/tracks/apply", json={
+            "ids": [target["id"]], "fields": {"lyrics": new_lyrics},
+        }, timeout=60).json()
+        check("编辑歌词：写入成功", la.get("written") == 1 and "lyrics" in (la.get("fields") or []),
+              json.dumps(la, ensure_ascii=False)[:160])
+        after = requests.get(f"{BASE}/api/tracks/{target['id']}/lyrics", timeout=20).json()
+        check("编辑歌词：读回来就是刚写的那一份",
+              after.get("lyrics", "").strip() == new_lyrics.strip(),
+              f"lines={after.get('lines')} chars={after.get('chars')}")
+        check("编辑歌词：索引标记为有歌词",
+              bool(requests.get(f"{BASE}/api/tracks/{target['id']}", timeout=20).json().get("has_lyrics")))
+
         print("\n=== 3. 功能二：搜索刮削 ===")
         song = next(i for i in listing["items"] if i["title"] == "稻香")
         sr = requests.post(f"{BASE}/api/search", json={
@@ -196,10 +220,11 @@ def main() -> int:
               "has_lyrics 仍为假")
 
         # 候选的关键词查不到时要能退回曲目标签再查一次（真实踩到：网易云候选的歌手是「Jay」，
-        # 拿它去查歌词源一个都匹配不上，用户就会觉得「试抓没用」）
+        # 拿它去查歌词源一个都匹配不上，用户就会觉得「试抓没用」）。
+        # 用一组绝对不存在的关键词，保证走的是回退分支（LRCLIB 模糊匹配有时连「稻香 / Jay」都认，
+        # 拿它当断言会时灵时不灵）。
         fallback = requests.post(f"{BASE}/api/lyrics/preview", json={
-            "track_id": song["id"], "title": "稻香", "artist": "Jay", "album": "稻香",
-            "duration": 198,
+            "track_id": song["id"], "title": "zzzz-不存在的歌", "artist": "zzzz",
         }, timeout=180).json()
         check("试抓歌词：候选查不到会退回曲目标签",
               fallback.get("used") == "曲目标签",

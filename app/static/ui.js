@@ -100,6 +100,7 @@ export function fmtTime(epochSeconds) {
 
 /** 字段名 → 中文标签（与 db.EDITABLE_FIELDS 对齐）。 */
 export const FIELD_LABELS = {
+  lyrics: "歌词",
   title: "标题",
   artist: "歌手",
   album: "专辑",
