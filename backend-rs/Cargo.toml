@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "metatidy-server"
 version = "0.2.2"
 edition = "2021"
