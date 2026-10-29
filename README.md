@@ -81,11 +81,11 @@ services:
   metatidy:
     labels:
       # 换成你的 NAS 局域网地址 + 你映射的端口（例如映射的是 8286:8080 就写 :8286）
-      com.getarcaneapp.arcane.icon: "http://192.168.1.10:8286/icon.svg"
+      com.getarcaneapp.arcane.icon: "http://<你的NAS地址>:8286/icon.svg"
 ```
 
 - Arcane 认的键是 `com.getarcaneapp.arcane.icon`（另有 `-light` / `-dark` 变体）；也可以在 compose 里用项目级块 `x-arcane: { icon: "…" }`。
-- 图标 URL 是**浏览器**去加载的，所以用局域网地址就行；只有想让公网也能看到时才需要图床或公开仓库（本仓库是私有的，raw 链接匿名取不到）。
+- 图标 URL 是**浏览器**去加载的，所以用局域网地址就行；仓库若是私有的，raw 链接匿名取不到，想让公网也能看到就用自己服务的地址或图床。
 
 - `/music`：要扫描和整理的库，**需要读写权限**（写标签、移动文件）。
 - `/data`：封面与缩略图缓存（索引在 Postgres 里，不在这）。
