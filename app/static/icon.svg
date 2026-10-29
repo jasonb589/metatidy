@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="metatidy">
+  <!-- metatidy 图标：一个「标签牌」形状 —— 点题「元数据/打标签」。
+       纯几何图形，128 到 16 像素都看得清；无外部依赖，可离线渲染。 -->
+  <defs>
+    <linearGradient id="bg" x1="16" y1="8" x2="112" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4b8dff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <mask id="tag">
+      <rect width="128" height="128" fill="#000"/>
+      <g transform="rotate(-45 64 64)">
+        <rect x="24" y="42" width="80" height="44" rx="13" fill="#fff"/>
+        <circle cx="43" cy="64" r="7.5" fill="#000"/>
+      </g>
+    </mask>
+  </defs>
+
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <rect width="128" height="128" rx="28" fill="#ffffff" mask="url(#tag)"/>
+
+  <!-- 标签牌上的两行「字段」，用蓝色半透明表示已写入的元数据 -->
+  <g transform="rotate(-45 64 64)" fill="#4b8dff" opacity="0.55">
+    <rect x="60" y="57" width="32" height="6" rx="3"/>
+    <rect x="60" y="69" width="21" height="6" rx="3"/>
+  </g>
+</svg>

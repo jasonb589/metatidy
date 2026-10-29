@@ -72,6 +72,20 @@ docker run -d --name metatidy \
 
 打开 `http://<主机IP>:8080/`。
 
+### 在 Arcane / Portainer 里显示图标
+
+仓库里带了图标 `app/static/icon.svg`（就是界面那个 favicon）。Arcane 认的是**服务级标签**，加一行即可：
+
+```yaml
+services:
+  metatidy:
+    labels:
+      com.getarcaneapp.arcane.icon: "https://raw.githubusercontent.com/jasonb589/metatidy/main/app/static/icon.svg"
+```
+
+- Arcane 的键是 `com.getarcaneapp.arcane.icon`（另有 `-light` / `-dark` 两个变体）；也可以在 compose 里用项目级块 `x-arcane: { icon: "…" }`。
+- 图标 URL 是浏览器去加载的，所以**仓库（或那个文件）得能公开访问**；不想公开就换成自己的图床地址。
+
 - `/music`：要扫描和整理的库，**需要读写权限**（写标签、移动文件）。
 - `/data`：封面与缩略图缓存（索引在 Postgres 里，不在这）。
 - 首次进界面点「扫描库」。云盘用户建议先用界面上的**快速扫描**：只从目录结构建索引，

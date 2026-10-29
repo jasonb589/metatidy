@@ -235,6 +235,15 @@ def main() -> int:
         job_restore = requests.post(f"{BASE}/api/scan", json={"full": True, "prune": True}, timeout=30).json()
         res_restore = wait_job(job_restore["job_id"])
         check("随后全量扫描正常", res_restore["state"] == "done", str(res_restore.get("message")))
+
+        print("\n=== 7. 静态前端与图标 ===")
+        root_page = requests.get(f"{BASE}/", timeout=20)
+        check("首屏可访问", root_page.status_code == 200 and "<html" in root_page.text.lower(),
+              f"HTTP {root_page.status_code}")
+        icon = requests.get(f"{BASE}/icon.svg", timeout=20)
+        check("图标可访问（同一份也给 Arcane 当容器图标）",
+              icon.status_code == 200 and "<svg" in icon.text,
+              f"HTTP {icon.status_code} {icon.headers.get('content-type', '')}")
     finally:
         proc.terminate()
         try:
