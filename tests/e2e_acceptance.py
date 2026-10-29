@@ -259,9 +259,13 @@ def main() -> int:
         # 静态 JS 可能被反代/CDN 缓存成旧版本（真踩过：openresty 把旧 app.js 缓存到第二天 00:30，
         # 浏览器拿到「新 HTML + 旧 JS」，旧 JS 不认识登录接口，界面只弹一句「请先登录」）。
         # 所以：登录框必须由不被缓存的 HTML 兜底，静态资源必须要求「用前回服务器校验」。
+        veil_line = next((ln for ln in root_page.text.splitlines() if 'id="auth-veil"' in ln), "")
         check("首屏自带登录兜底（静态 JS 是旧版本也能登录）",
-              'id="auth-veil"' in root_page.text and "__MT_AUTH" in root_page.text,
-              f"{len(root_page.text)} 字节")
+              bool(veil_line) and "__MT_AUTH" in root_page.text, f"{len(root_page.text)} 字节")
+        # 登录框的显隐必须走内联样式：反代可能缓存着没有 [hidden] 规则的旧 CSS，
+        # 那样「登录成功了但登录框永远不消失」（真实踩到过）
+        check("登录框显隐用内联样式（缓存旧 CSS 也不会卡住）",
+              'style="display: none"' in veil_line, veil_line.strip()[:90])
         app_js = requests.get(f"{BASE}/app.js", timeout=20)
         check("静态资源要求回服务器校验（no-cache）",
               "no-cache" in app_js.headers.get("cache-control", ""),
@@ -330,10 +334,14 @@ def main() -> int:
                   jar.get(f"{auth_base}/api/status", timeout=20).json().get("version", "").count(".") == 2)
 
             # 限速：上面成功登录已经把失败计数清零；连错到阈值后必须开始 429
-            codes = [requests.post(f"{auth_base}/api/login", json={"password": "nope"}, timeout=20).status_code
+            # 这一串共用一个 Session（复用同一条 keep-alive 连接）：每个请求都新建连接的话，
+            # Windows 上会因端口快速复用撞出 RST（本地约 1/3 概率 ConnectionResetError 10054，
+            # 而服务端日志完全正常、响应也对），浏览器本来就是复用连接的，这样也更贴近真实。
+            burst = requests.Session()
+            codes = [burst.post(f"{auth_base}/api/login", json={"password": "nope"}, timeout=20).status_code
                      for _ in range(6)]
             check("连续输错后开始限速（429）", 429 in codes, f"状态码序列 {codes}")
-            locked = requests.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
+            locked = burst.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
             check("限速期间连正确口令也被挡（429）", locked.status_code == 429, f"HTTP {locked.status_code}")
 
             out = jar.post(f"{auth_base}/api/logout", timeout=20)
@@ -342,7 +350,7 @@ def main() -> int:
                   f"HTTP {out.status_code} {out.headers.get('set-cookie', '')[:120]}")
             after = jar.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20)
             check("退出后旧会话立即失效（401）", after.status_code == 401, f"HTTP {after.status_code}")
-            still = requests.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
+            still = burst.post(f"{auth_base}/api/login", json={"password": AUTH_PASSWORD}, timeout=20)
             check("退出登录不会解除限速（仍是 429）", still.status_code == 429, f"HTTP {still.status_code}")
         finally:
             auth_proc.terminate()

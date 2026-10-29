@@ -591,7 +591,7 @@
      按扩展名缓存 js 到第二天 00:30，于是浏览器拿到「新 HTML + 旧 app.js」——旧 JS 根本不会去
      问 /api/session，界面只弹一句「请先登录」，登录框永远不出现）。HTML 不被缓存，所以这段
      兜底一定是最新的、登录框一定出得来。auth.js 只负责顶栏状态、退出按钮和 401 接管。 -->
-<div class="auth-veil" id="auth-veil" role="dialog" aria-modal="true" aria-label="登录" hidden>
+<div class="auth-veil" id="auth-veil" role="dialog" aria-modal="true" aria-label="登录" style="display: none">
   <form class="auth-card" id="auth-form" novalidate>
     <h2>需要登录</h2>
     <p class="hint">这个服务启用了密码保护（METATIDY_PASSWORD）。</p>
@@ -625,7 +625,10 @@
       }
       if (!open) input.value = "";
       open = true;
+      // 用内联样式，而不是只靠 [hidden]/class：反代可能缓存着旧 CSS（真踩过：新 HTML + 新 JS +
+      // 旧 CSS，于是「明明登录成功了，登录框永远不消失」）。内联样式优先级最高，不受缓存影响。
       veil.hidden = false;
+      veil.style.display = "flex";
       window.setTimeout(function () {
         try { input.focus(); } catch (e) { /* 忽略 */ }
       }, 0);
@@ -634,6 +637,7 @@
     function hide() {
       open = false;
       veil.hidden = true;
+      veil.style.display = "none";
     }
 
     function busy(on) {

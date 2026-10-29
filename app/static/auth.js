@@ -43,7 +43,11 @@ export async function loadSession() {
 export function applyChrome() {
   const chip = ui.byId("auth-chip");
   const out = ui.byId("btn-logout");
-  if (out) out.hidden = !session.required;
+  if (out) {
+    // 同时设内联样式：反代可能缓存着没有 [hidden] 规则的旧 CSS（真踩过：按钮空着露在外面）
+    out.hidden = !session.required;
+    out.style.display = session.required ? "" : "none";
+  }
   if (!chip) return;
   if (session.required) {
     chip.textContent = session.authenticated ? "已登录" : "未登录";

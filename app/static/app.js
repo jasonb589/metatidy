@@ -234,7 +234,9 @@ async function refreshJobs() {
   const list = data.jobs || [];
   const running = list.filter((job) => job.state === "running").length;
   const badge = ui.byId("jobs-running");
+  // 同时设内联样式：反代可能缓存着没有 [hidden] 规则的旧 CSS，否则「任务 0」会一直挂着
   badge.hidden = running === 0;
+  badge.style.display = running === 0 ? "none" : "";
   badge.textContent = String(running);
 
   const host = ui.byId("jobs-list");
