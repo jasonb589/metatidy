@@ -121,6 +121,7 @@ def test_lyrics_returns_string():
     assert isinstance(text, str)
 
 
+@pytest.mark.skipif(__import__("os").environ.get("METATIDY_OFFLINE") == "1", reason="离线跳过（未知源会回退到默认优先级，实际会联网）")
 def test_search_rejects_unknown_source_gracefully():
     result = scrapebridge.search("test", sources=["not_a_source"], limit=1, timeout=5)
     assert result["sources"] == scrapebridge.SEARCH_PRIORITY  # 回退到默认优先级

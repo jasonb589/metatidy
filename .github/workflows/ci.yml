@@ -199,7 +199,9 @@ jobs:
 
   build:
     name: 构建并推送镜像
-    needs: [test, rust]
+    # 只依赖 Rust 门禁：Python 版已退役为「契约参考实现」，
+    # 它那套会真联网的集成测试抖动时不该挡住镜像发布（那个 job 仍会自己报红）。
+    needs: [rust]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
