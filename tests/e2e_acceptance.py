@@ -194,9 +194,27 @@ def main() -> int:
         check("试抓歌词不写文件（索引仍标记为无歌词）",
               not requests.get(f"{BASE}/api/tracks/{song['id']}", timeout=20).json().get("has_lyrics"),
               "has_lyrics 仍为假")
+
+        # 真写一次歌词（用户的实际用法：勾「写歌词」+「覆盖已有值」）—— 之前这条路径完全没有覆盖
+        if lyr_data.get("lyrics"):
+            wrote = requests.post(f"{BASE}/api/scrape/apply", json={
+                "track_id": song["id"],
+                "candidate": {"title": "稻香", "artist": "周杰伦", "album": "魔杰座"},
+                "fields": [], "write_cover": False, "write_lyrics": True,
+            }, timeout=180).json()
+            check("写歌词：后端回报 lyrics=true", wrote.get("lyrics") is True,
+                  json.dumps(wrote, ensure_ascii=False)[:160])
+            back = FLAC(song["path"])
+            lyric_keys = [key for key in back.keys() if "lyric" in key.lower()]
+            check("写歌词：磁盘上真的有歌词", bool(lyric_keys) and bool(back.get(lyric_keys[0])),
+                  f"歌词标签键 {lyric_keys}，全部键 {list(back.keys())[:8]}")
+            lyric_detail = requests.get(f"{BASE}/api/tracks/{song['id']}", timeout=20).json()
+            # 注意：has_lyrics 是 0/1（与 Python 版契约一致），不能跟 True 做严格比较
+            check("写歌词：索引标记为有歌词", bool(lyric_detail.get("has_lyrics")),
+                  f"has_lyrics={lyric_detail.get('has_lyrics')!r}")
+
         print("\n=== 4. 功能三：按目录层级整理移动 ===")
         plan = requests.post(f"{BASE}/api/move/preview", json={
-            "ids": [i["id"] for i in requests.get(f"{BASE}/api/tracks", params={"page_size": 50}, timeout=20).json()["items"]],
             "dir_template": "{language?}/{artist}/{album}",
             "filename_template": "{track:02} - {title}",
         }, timeout=60).json()
