@@ -10,6 +10,7 @@ import * as tracks from "./tracks.js";
 import * as scrape from "./scrape.js";
 import * as move from "./move.js";
 import * as settings from "./settings.js";
+import * as theme from "./theme.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
 const loadedTabs = new Set();
@@ -24,6 +25,7 @@ function boot() {
   scrape.init();
   move.init();
   settings.init();
+  theme.init();
 
   wireTabs();
   wireJobs();

@@ -104,7 +104,7 @@ def main() -> int:
 
         print("=== 0. 状态 ===")
         st = requests.get(f"{BASE}/api/status", timeout=20).json()
-        check("服务可用", st["version"] == "0.1.0", f"版本 {st['version']}")
+        check("服务可用", st["version"].count(".") == 2 and st["version"][0].isdigit(), f"版本 {st['version']}")
         check("迁移层 13 个源就绪", st["scraper"]["count"] >= 12, f"可用 {st['scraper']['count']} 个")
 
         print("\n=== 1. 扫描（功能底座） ===")

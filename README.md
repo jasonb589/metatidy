@@ -70,7 +70,7 @@ docker run -d --name metatidy \
   ghcr.io/jasonb589/metatidy:latest
 ```
 
-打开 `http://<主机IP>:8080/`。
+打开 `http://<主机IP>:8080/`。界面右上角有**浅色 / 深色**切换，默认跟随系统，手动切过一次后会记住。
 
 ### 在 Arcane / Portainer 里显示图标
 

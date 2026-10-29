@@ -860,3 +860,73 @@ th[aria-sort] .th-sort { color: var(--fg); }
 details > summary.lbl { list-style: none; display: inline-flex; align-items: center; gap: var(--s1); }
 details > summary.lbl::before { content: "▸"; font-size: 9px; color: var(--fg-3); }
 details[open] > summary.lbl::before { content: "▾"; }
+
+/* ---------------------------------------------------------------------------
+   浅色主题（顶栏「浅色/深色」按钮切换）
+   ---------------------------------------------------------------------------
+   只做两件事，**不改动上面任何既有规则**，避免为了主题去重写整套样式：
+   1) 覆盖 :root 的配色变量；
+   2) 单独修掉几处「只在深色底上好看」的硬编码浅色调（它们写在具体规则里，
+      浅色底上对比度不够）。 */
+
+:root { color-scheme: dark; }
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg-0: #f5f6f8;
+  --bg-1: #ffffff;
+  --bg-2: #f0f2f6;
+  --bg-3: #e6e9ef;
+  --bg-4: #dbe0e8;
+  --line: #d7dce4;
+  --line-2: #bfc7d3;
+
+  --fg: #15181e;
+  --fg-2: #4b5361;
+  --fg-3: #7a8291;
+
+  --accent: #2f6fe4;
+  --accent-2: #1f5cc8;
+  --accent-soft: rgba(47, 111, 228, 0.12);
+  --accent-line: rgba(47, 111, 228, 0.45);
+
+  --ok: #1a7f37;
+  --ok-soft: rgba(26, 127, 55, 0.10);
+  --warn: #96690b;
+  --warn-soft: rgba(150, 105, 11, 0.12);
+  --err: #cf222e;
+  --err-soft: rgba(207, 34, 46, 0.09);
+  --info: #0969da;
+  --info-soft: rgba(9, 105, 218, 0.10);
+  --neutral: #6e7781;
+}
+
+/* 1) 深色底专用的浅色调 → 浅色主题下换成对应语义色 */
+[data-theme="light"] .hint-err,
+[data-theme="light"] .err-text,
+[data-theme="light"] .result-list .item .why,
+[data-theme="light"] dl.kv dd.bad,
+[data-theme="light"] .diff-old { color: var(--err); }
+[data-theme="light"] .hint-ok,
+[data-theme="light"] dl.kv dd.good { color: var(--ok); }
+[data-theme="light"] .stat .v.miss { color: var(--warn); }
+[data-theme="light"] .btn-danger { color: var(--err); border-color: rgba(207, 34, 46, 0.35); }
+[data-theme="light"] .btn-danger:hover:not(:disabled) { background: rgba(207, 34, 46, 0.12); }
+[data-theme="light"] .btn-ok { color: var(--ok); border-color: rgba(26, 127, 55, 0.35); }
+[data-theme="light"] .btn-ok:hover:not(:disabled) { background: rgba(26, 127, 55, 0.12); }
+[data-theme="light"] .badge-ok { color: var(--ok); }
+[data-theme="light"] .badge-warn { color: var(--warn); }
+[data-theme="light"] .badge-err { color: var(--err); }
+[data-theme="light"] .badge-info { color: var(--info); }
+
+/* 2) 主按钮上的文字：深色主题用近黑，浅色主题用白 */
+[data-theme="light"] .btn-primary { color: #ffffff; }
+[data-theme="light"] ::selection { color: #ffffff; }
+[data-theme="light"] .brand-mark { color: #ffffff; }
+
+/* 3) 滚动条 / 遮罩 / 高亮：深色下偏暗，浅色下要反过来 */
+[data-theme="light"] *::-webkit-scrollbar-thumb:hover { background: #a7b1c0; background-clip: content-box; }
+[data-theme="light"] dialog.modal::backdrop { background: rgba(18, 22, 28, 0.42); }
+[data-theme="light"] mark.hl { background: rgba(47, 111, 228, 0.16); }
+[data-theme="light"] .btn:hover:not(:disabled) { border-color: #b3bdcb; }

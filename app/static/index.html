@@ -7,6 +7,20 @@
     <!-- 图标是本地静态文件（镜像里离线可用）；同一份也拿去当 Arcane 的容器图标 -->
     <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="./styles.css">
+    <script>
+      // 首屏之前定好主题，避免先渲染深色再跳成浅色
+      (function () {
+        try {
+          var v = localStorage.getItem("metatidy-theme");
+          if (v !== "light" && v !== "dark") {
+            v = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          }
+          document.documentElement.dataset.theme = v;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主内容</a>
@@ -28,6 +42,7 @@
   </nav>
 
   <div class="header-right">
+    <button class="btn btn-ghost btn-sm" id="btn-theme" title="切换日夜主题">浅色</button>
     <span class="chip" id="header-version" title="后端版本与数据源状态">v—</span>
     <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-expanded="false" aria-controls="jobs-pop">
       任务 <span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
