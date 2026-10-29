@@ -930,3 +930,13 @@ details[open] > summary.lbl::before { content: "▾"; }
 [data-theme="light"] dialog.modal::backdrop { background: rgba(18, 22, 28, 0.42); }
 [data-theme="light"] mark.hl { background: rgba(47, 111, 228, 0.16); }
 [data-theme="light"] .btn:hover:not(:disabled) { border-color: #b3bdcb; }
+
+/* 顶栏品牌图标：直接用同一份 icon.svg，
+   这样「界面顶栏图标 = 浏览器标签图标 = Arcane 容器图标」三者一致。
+   （原来这里是写着 "mt" 的方块，和 favicon 不一致。） */
+img.brand-mark {
+  background: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
