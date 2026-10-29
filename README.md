@@ -74,17 +74,18 @@ docker run -d --name metatidy \
 
 ### 在 Arcane / Portainer 里显示图标
 
-仓库里带了图标 `app/static/icon.svg`（就是界面那个 favicon）。Arcane 认的是**服务级标签**，加一行即可：
+镜像里带了图标（就是界面那个 favicon，`app/static/icon.svg`）。**直接指向你自己的服务即可**，不依赖任何外部地址：
 
 ```yaml
 services:
   metatidy:
     labels:
-      com.getarcaneapp.arcane.icon: "https://raw.githubusercontent.com/jasonb589/metatidy/main/app/static/icon.svg"
+      # 换成你的 NAS 局域网地址 + 你映射的端口（例如映射的是 8286:8080 就写 :8286）
+      com.getarcaneapp.arcane.icon: "http://192.168.1.10:8286/icon.svg"
 ```
 
-- Arcane 的键是 `com.getarcaneapp.arcane.icon`（另有 `-light` / `-dark` 两个变体）；也可以在 compose 里用项目级块 `x-arcane: { icon: "…" }`。
-- 图标 URL 是浏览器去加载的，所以**仓库（或那个文件）得能公开访问**；不想公开就换成自己的图床地址。
+- Arcane 认的键是 `com.getarcaneapp.arcane.icon`（另有 `-light` / `-dark` 变体）；也可以在 compose 里用项目级块 `x-arcane: { icon: "…" }`。
+- 图标 URL 是**浏览器**去加载的，所以用局域网地址就行；只有想让公网也能看到时才需要图床或公开仓库（本仓库是私有的，raw 链接匿名取不到）。
 
 - `/music`：要扫描和整理的库，**需要读写权限**（写标签、移动文件）。
 - `/data`：封面与缩略图缓存（索引在 Postgres 里，不在这）。
