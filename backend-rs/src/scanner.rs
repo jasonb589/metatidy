@@ -75,16 +75,39 @@ pub fn is_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 枚举期间的实时计数，供调用方做「枚举中」进度上报。
+#[derive(Debug, Default)]
+pub struct WalkCounters {
+    /// 看过的目录项（目录 + 文件都算）
+    pub entries: std::sync::atomic::AtomicUsize,
+    /// 认出来的音频文件
+    pub audio: std::sync::atomic::AtomicUsize,
+}
+
 /// 枚举库里的音频文件。
-pub fn collect_audio_files(root: &Path) -> Vec<PathBuf> {
-    WalkDir::new(root)
+///
+/// `counters` 非空时会在遍历过程中持续累加，让调用方能在「还不知道总数」的阶段
+/// 也给用户可见的进度（云盘上遍历本身就可能好几分钟）。
+pub fn collect_audio_files(root: &Path, counters: Option<&WalkCounters>) -> Vec<PathBuf> {
+    use std::sync::atomic::Ordering;
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
         .filter_entry(keep_entry)
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && is_audio_file(e.path()))
-        .map(|e| e.path().to_path_buf())
-        .collect()
+    {
+        let Ok(entry) = entry else { continue };
+        if let Some(c) = counters {
+            c.entries.fetch_add(1, Ordering::Relaxed);
+        }
+        if entry.file_type().is_file() && is_audio_file(entry.path()) {
+            if let Some(c) = counters {
+                c.audio.fetch_add(1, Ordering::Relaxed);
+            }
+            out.push(entry.path().to_path_buf());
+        }
+    }
+    out
 }
 
 /// 从路径推断出来的字段（快速模式用）。
@@ -163,7 +186,30 @@ pub async fn scan(
     }
 
     let walk_root = root.clone();
-    let files = tokio::task::spawn_blocking(move || collect_audio_files(&walk_root)).await?;
+    // 枚举可能很久（云盘上光是遍历目录就要几分钟），所以边遍历边上报：
+    // `total` 要等遍历完才知道，这段时间进度一直是 0，界面看着就像卡死了。
+    let counters = std::sync::Arc::new(WalkCounters::default());
+    let walk_counters = counters.clone();
+    let mut walk = tokio::task::spawn_blocking(move || {
+        collect_audio_files(&walk_root, Some(walk_counters.as_ref()))
+    });
+    let files = loop {
+        tokio::select! {
+            res = &mut walk => break res?,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {
+                use std::sync::atomic::Ordering;
+                progress(
+                    0,
+                    0,
+                    format!(
+                        "枚举中：已查看 {} 个目录项，找到 {} 个音频文件（这一步不读文件内容）",
+                        counters.entries.load(Ordering::Relaxed),
+                        counters.audio.load(Ordering::Relaxed),
+                    ),
+                );
+            }
+        }
+    };
     let total = files.len();
     progress(0, total, format!("枚举完成：{total} 个音频文件"));
 
@@ -437,11 +483,22 @@ mod tests {
         crate::fixtures::make_flac(&root.join("中文/周杰伦/魔杰座/01 - 稻香.flac")).unwrap();
         crate::fixtures::make_mp3(&root.join("待整理/x.mp3"), 4).unwrap();
         std::fs::write(root.join("note.txt"), b"x").unwrap();
-        std::fs::create_dir_all(root.join("@eaDir")).unwrap();
+        // @eaDir 是群晖的元数据目录，必须被跳过（make_flac 会自己建父目录）
         crate::fixtures::make_flac(&root.join("@eaDir/skip.flac")).unwrap();
 
-        let files = collect_audio_files(&root);
-        assert_eq!(files.len(), 2, "应为 2 个音频文件，实际 {files:?}");
+        // 枚举过程要能被观察到：进度上报靠的就是这两个计数
+        let counters = WalkCounters::default();
+        let files = collect_audio_files(&root, Some(&counters));
+        assert_eq!(files.len(), 2, "应为 2 个音频文件（@eaDir 被跳过），实际 {files:?}");
+        assert_eq!(
+            counters.audio.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "音频文件计数应为 2"
+        );
+        assert!(
+            counters.entries.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "目录项计数要能反映遍历过程"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
