@@ -31,6 +31,8 @@ mod tagio;
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use tower::Layer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
@@ -146,7 +148,19 @@ fn build_router(state: AppState, config: &Config) -> Router {
     match config.resolve_static_dir() {
         Some(dir) => {
             info!("静态前端目录：{}", dir.display());
-            router.fallback_service(ServeDir::new(dir).append_index_html_on_directories(true))
+            // 静态文件一律「用前必须回服务器校验」：这套前端没有构建步骤，文件名里没有内容
+            // 哈希，而反代/浏览器会按扩展名把 js/css 缓存起来（真踩过：openresty 把旧 app.js
+            // 缓存到第二天 00:30，浏览器拿到「新 HTML + 旧 JS」，登录框根本不出现）。
+            // no-cache 不是「不缓存」，而是「每次使用前校验」，配合 ETag/Last-Modified 只是多
+            // 一次 304，代价可以忽略。
+            let files = ServeDir::new(dir).append_index_html_on_directories(true);
+            router.fallback_service(
+                SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-cache, must-revalidate"),
+                )
+                .layer(files),
+            )
         }
         None => {
             warn!("没找到静态前端目录（可用 METATIDY_STATIC_DIR 指定），/ 将只回 JSON 提示");

@@ -1,23 +1,23 @@
 /**
- * 密码登录（后端在 `backend-rs/src/auth.rs`）。
+ * 密码登录的「外壳」部分（后端在 `backend-rs/src/auth.rs`）。
  *
- * 后端没设 `METATIDY_PASSWORD` 时这里几乎全是空操作：`/api/session` 回 `required: false`，
- * 页面照旧直接进，只在顶栏挂一个红色的「未设密码」提醒。
+ * **登录框本身不在这里**，而在 `index.html` 的兜底脚本（`window.__MT_AUTH`）里。
+ * 原因：反代/CDN 会按扩展名把 .js 缓存成旧版本（真踩过：openresty 把旧 app.js 缓存到第二天
+ * 00:30，浏览器拿到「新 HTML + 旧 JS」——旧 JS 不知道要去问 /api/session，界面只弹一句
+ * 「请先登录」，登录框永远不出现）。HTML 不被缓存，所以「能不能登录」必须由 HTML 里的脚本保证。
  *
- * 设了密码之后的流程：
- *   1. 启动先问 `/api/session`；
- *   2. 需要登录且没有会话 → 铺一层全屏遮罩要口令，**通过之前一个数据请求都不发**
- *      （否则一屏 401 会把 toast 刷满，还会让人以为「这软件坏了」）；
- *   3. 任何请求撞到 401（会话过期 / 在别处退出登录）→ 遮罩自己弹回来。
- *      遮罩**不允许 Esc 关掉**：关掉之后界面是一片空数据，比遮罩更误导。
+ * 这里只负责：顶栏登录态胶囊、退出按钮、以及任何 401 之后的接管。
  */
 
 import { api } from "./api.js";
 import * as ui from "./ui.js";
 
 let session = { required: false, authenticated: true, session_days: 0, warning: "" };
-let veil = null;
 let authedHandler = null;
+
+function gate() {
+  return window.__MT_AUTH || null;
+}
 
 /** 当前会话状态。 */
 export function current() {
@@ -29,9 +29,12 @@ export function onAuthenticated(handler) {
   authedHandler = handler;
 }
 
-/** 问后端要不要登录，并顺手更新顶栏。 */
+/** 问后端要不要登录（复用 HTML 兜底脚本已经发出的那次请求），并更新顶栏。 */
 export async function loadSession() {
-  session = await api.session();
+  const hook = gate();
+  let data = hook ? await hook.ready : null;
+  if (!data) data = await api.session();
+  session = data;
   applyChrome();
   return session;
 }
@@ -53,104 +56,21 @@ export function applyChrome() {
   }
 }
 
-function buildVeil() {
-  const reason = ui.el("p", { class: "hint", id: "auth-reason", text: "请输入访问密码。" });
-  const input = ui.el("input", {
-    type: "password",
-    id: "auth-password",
-    autocomplete: "current-password",
-    placeholder: "访问密码",
-    "aria-label": "访问密码",
-  });
-  const submit = ui.el("button", {
-    type: "submit",
-    class: "btn btn-primary",
-    id: "auth-submit",
-    text: "登录",
-  });
-  const form = ui.el("form", { class: "auth-card", id: "auth-form", novalidate: true }, [
-    ui.el("h2", { text: "需要登录" }),
-    ui.el("p", { class: "hint", text: "这个服务启用了密码保护（METATIDY_PASSWORD）。" }),
-    ui.el("label", { class: "auth-field" }, [
-      ui.el("span", { class: "hint", text: "访问密码" }),
-      input,
-    ]),
-    reason,
-    ui.el("div", { class: "auth-actions" }, [submit]),
-    ui.el("p", {
-      class: "hint",
-      text: "连续输错 5 次会锁 5 分钟。忘了密码就改容器的 METATIDY_PASSWORD 再重新部署。",
-    }),
-  ]);
-  const wrap = ui.el(
-    "div",
-    { class: "auth-veil", id: "auth-veil", role: "dialog", "aria-modal": "true", "aria-label": "登录" },
-    [form],
-  );
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    submitLogin(input, submit, reason);
-  });
-  return { wrap, input, submit, reason };
-}
-
-/** 弹登录遮罩（已经开着就只更新提示，不擦掉用户已经敲进去的口令）。 */
+/** 弹登录框（真正的 DOM 在 index.html 里，这里只是转发）。 */
 export function showLoginOverlay(message = "") {
-  if (!veil) veil = buildVeil();
-  const wasOpen = veil.wrap.dataset.open === "true";
-  if (message) {
-    veil.reason.textContent = message;
-    veil.reason.classList.remove("hint-err");
-  }
-  if (!veil.wrap.isConnected) document.body.append(veil.wrap);
-  veil.wrap.dataset.open = "true";
-  if (!wasOpen) {
-    veil.input.value = "";
-    window.setTimeout(() => veil.input.focus(), 0);
-  }
-}
-
-/** 收起登录遮罩。 */
-export function hideLoginOverlay() {
-  if (!veil) return;
-  veil.wrap.dataset.open = "false";
-  if (veil.wrap.isConnected) veil.wrap.remove();
-}
-
-async function submitLogin(input, submit, reason) {
-  const password = input.value;
-  if (!password) {
-    reason.textContent = "请输入密码。";
-    reason.classList.add("hint-err");
-    input.focus();
+  const hook = gate();
+  if (hook) {
+    hook.show(message);
     return;
   }
-  submit.disabled = true;
-  submit.textContent = "登录中…";
-  reason.classList.remove("hint-err");
-  reason.textContent = "正在验证…";
-  try {
-    const info = await api.login(password);
-    // 用后端回的答案更新本地状态：否则顶栏会一直挂着「未登录」
-    session = {
-      required: info.required !== false,
-      authenticated: true,
-      session_days: info.session_days || session.session_days,
-      warning: "",
-    };
-    applyChrome();
-    hideLoginOverlay();
-    input.value = "";
-    if (authedHandler) await authedHandler();
-  } catch (err) {
-    // 401 会先触发 metatidy:unauthorized（遮罩重新显示），这里再用真实原因覆盖提示
-    reason.textContent = (err && err.message) || "登录失败";
-    reason.classList.add("hint-err");
-    input.select();
-  } finally {
-    submit.disabled = false;
-    submit.textContent = "登录";
-  }
+  // 理论上到不了这里（index.html 一定带兜底脚本），但别静默失败
+  ui.toast("warn", "需要登录", message || "请输入访问密码。");
+}
+
+/** 收起登录框。 */
+export function hideLoginOverlay() {
+  const hook = gate();
+  if (hook) hook.hide();
 }
 
 export function init() {
@@ -163,11 +83,22 @@ export function init() {
       } catch {
         // 会话可能早就失效了：照样回登录页
       }
-      // 整页重载：列表里还留着刚才的数据，重载后才会变成干净的登录遮罩
+      // 整页重载：列表里还留着刚才的数据，重载后才会变成干净的登录框
       location.reload();
     });
   }
 
+  // 登录成功（index.html 的兜底脚本广播）
+  window.addEventListener("metatidy:authenticated", (event) => {
+    // preventDefault = 「界面由我接管，不用整页重载」（兜底脚本据此判断静态 JS 是不是旧版本：
+    // 没人接管它就自己 reload 一次）
+    event.preventDefault();
+    session = { ...session, ...(event.detail || {}), authenticated: true };
+    applyChrome();
+    if (authedHandler) authedHandler();
+  });
+
+  // 任何请求撞到 401（会话过期 / 在别处退出登录）
   window.addEventListener("metatidy:unauthorized", () => {
     session = { ...session, required: true, authenticated: false };
     applyChrome();

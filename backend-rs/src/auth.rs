@@ -281,6 +281,27 @@ pub async fn login(State(state): State<AppState>, req: Request) -> Result<Respon
             .map(|c| c.0),
     );
 
+    // 先把 body 读掉，再决定怎么回答：**不消费请求体就直接返回**会让 hyper 关掉这条连接，
+    // 客户端拿到的是「连接被重置」而不是我们的 401/429（Windows 上实测就是
+    // ConnectionResetError 10054；Linux 上只是碰巧先读到响应，所以 CI 一直没暴露）。
+    let user_agent: String = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+
+    let bytes = to_bytes(req.into_body(), LOGIN_BODY_LIMIT)
+        .await
+        .map_err(|_| AppError::bad_request("请求体读取失败或过大"))?;
+    let payload: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let given = payload
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
     // 没配口令：登录接口直接说「不需要」，前端也就不会弹遮罩。
     let Some(expected) = state.config.auth_password.clone() else {
         return Ok(json_with_cookie(
@@ -300,25 +321,6 @@ pub async fn login(State(state): State<AppState>, req: Request) -> Result<Respon
             "密码错误次数过多，请 {secs} 秒后再试"
         )));
     }
-
-    // 先把要用的头读出来，再消费 body（Request 被 into_body 吃掉之后就拿不到了）
-    let user_agent: String = req
-        .headers()
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .chars()
-        .take(200)
-        .collect();
-
-    let bytes = to_bytes(req.into_body(), LOGIN_BODY_LIMIT)
-        .await
-        .map_err(|_| AppError::bad_request("请求体读取失败或过大"))?;
-    let payload: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    let given = payload
-        .get("password")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
 
     if !password_matches(&expected, given) {
         let left = record_failure(&key);
@@ -379,14 +381,44 @@ pub async fn require_auth(State(state): State<AppState>, req: Request, next: Nex
     if state.config.auth_password.is_none() {
         return next.run(req).await;
     }
-    if let Some(token) = token_from_headers(req.headers()) {
-        match verify(&state.db, &token).await {
-            Ok(true) => return next.run(req).await,
-            Ok(false) => {}
-            Err(err) => warn!("校验会话失败：{err}"),
+    let authorized = match token_from_headers(req.headers()) {
+        Some(token) => match verify(&state.db, &token).await {
+            Ok(ok) => ok,
+            Err(err) => {
+                warn!("校验会话失败：{err}");
+                false
+            }
+        },
+        None => false,
+    };
+    if authorized {
+        return next.run(req).await;
+    }
+    // 拒绝之前把请求体丢掉：不消费 body 就直接返回会让 hyper 关掉这条连接，客户端可能拿到
+    // 「连接被重置」而不是干净的 401（登录接口那边实测踩到过，这里一并防住）。
+    let (_, body) = req.into_parts();
+    drain_body(body).await;
+    unauthorized_response()
+}
+
+/// 丢掉请求体（最多 256KB，防住「一直发」的客户端），只为让连接能正常收尾。
+async fn drain_body(body: axum::body::Body) {
+    use futures::StreamExt;
+
+    // Body 不是 Stream，得先 into_data_stream()
+    let mut stream = body.into_data_stream();
+    let mut dropped = 0usize;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                dropped += bytes.len();
+                if dropped > 256 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
-    unauthorized_response()
 }
 
 // -------------------------------------------------------------------- 测试

@@ -256,6 +256,17 @@ def main() -> int:
               icon.status_code == 200 and "<svg" in icon.text,
               f"HTTP {icon.status_code} {icon.headers.get('content-type', '')}")
 
+        # 静态 JS 可能被反代/CDN 缓存成旧版本（真踩过：openresty 把旧 app.js 缓存到第二天 00:30，
+        # 浏览器拿到「新 HTML + 旧 JS」，旧 JS 不认识登录接口，界面只弹一句「请先登录」）。
+        # 所以：登录框必须由不被缓存的 HTML 兜底，静态资源必须要求「用前回服务器校验」。
+        check("首屏自带登录兜底（静态 JS 是旧版本也能登录）",
+              'id="auth-veil"' in root_page.text and "__MT_AUTH" in root_page.text,
+              f"{len(root_page.text)} 字节")
+        app_js = requests.get(f"{BASE}/app.js", timeout=20)
+        check("静态资源要求回服务器校验（no-cache）",
+              "no-cache" in app_js.headers.get("cache-control", ""),
+              app_js.headers.get("cache-control", "（没有 Cache-Control）"))
+
         print("\n=== 8. 密码登录 ===")
         # 8.1 主实例没设 METATIDY_PASSWORD：必须完全不需要登录（旧调用方与本地开发都不受影响）
         sess = requests.get(f"{BASE}/api/session", timeout=20).json()

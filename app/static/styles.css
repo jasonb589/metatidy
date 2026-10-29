@@ -968,6 +968,13 @@ img.brand-mark {
   word-break: break-word;
 }
 
+/* `hidden` 属性必须真的隐藏：.btn / .badge / .auth-veil 都自带 display，会盖掉浏览器的
+   [hidden] { display: none }，于是「退出」按钮、任务徽章、扫描进度条全都会空着露在外面
+   （实测踩到：反代缓存旧 JS 时，界面上甚至挂着一个点不动的「退出」按钮）。 */
+[hidden] {
+  display: none !important;
+}
+
 /* 登录遮罩：全屏挡住界面 —— 未通过之前连空表格都不给看（省得被当成「软件坏了」） */
 .auth-veil {
   position: fixed;

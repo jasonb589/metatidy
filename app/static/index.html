@@ -586,6 +586,125 @@
 
 <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
 
+<!-- 登录遮罩 + 兜底脚本
+     为什么放在 HTML 里而不是 JS 模块里：反代/CDN 可能把 JS 缓存成旧版本（真踩过：openresty
+     按扩展名缓存 js 到第二天 00:30，于是浏览器拿到「新 HTML + 旧 app.js」——旧 JS 根本不会去
+     问 /api/session，界面只弹一句「请先登录」，登录框永远不出现）。HTML 不被缓存，所以这段
+     兜底一定是最新的、登录框一定出得来。auth.js 只负责顶栏状态、退出按钮和 401 接管。 -->
+<div class="auth-veil" id="auth-veil" role="dialog" aria-modal="true" aria-label="登录" hidden>
+  <form class="auth-card" id="auth-form" novalidate>
+    <h2>需要登录</h2>
+    <p class="hint">这个服务启用了密码保护（METATIDY_PASSWORD）。</p>
+    <label class="auth-field">
+      <span class="hint">访问密码</span>
+      <input type="password" id="auth-password" autocomplete="current-password" placeholder="访问密码" aria-label="访问密码">
+    </label>
+    <p class="hint" id="auth-reason">请输入访问密码。</p>
+    <div class="auth-actions">
+      <button type="submit" class="btn btn-primary" id="auth-submit">登录</button>
+    </div>
+    <p class="hint">连续输错 5 次会锁 5 分钟。忘了密码就改容器的 METATIDY_PASSWORD 再重新部署。</p>
+  </form>
+</div>
+
+<script>
+  // 登录兜底：不依赖任何模块，静态 JS 被缓存成旧版时它照样能用。
+  window.__MT_AUTH = (function () {
+    var veil = document.getElementById("auth-veil");
+    var form = document.getElementById("auth-form");
+    var input = document.getElementById("auth-password");
+    var submit = document.getElementById("auth-submit");
+    var reason = document.getElementById("auth-reason");
+    var state = { required: false, authenticated: true, session_days: 30, warning: "" };
+    var open = false;
+
+    function show(message) {
+      if (message) {
+        reason.textContent = message;
+        reason.classList.remove("hint-err");
+      }
+      if (!open) input.value = "";
+      open = true;
+      veil.hidden = false;
+      window.setTimeout(function () {
+        try { input.focus(); } catch (e) { /* 忽略 */ }
+      }, 0);
+    }
+
+    function hide() {
+      open = false;
+      veil.hidden = true;
+    }
+
+    function busy(on) {
+      submit.disabled = on;
+      submit.textContent = on ? "登录中…" : "登录";
+    }
+
+    function fail(message) {
+      reason.textContent = message;
+      reason.classList.add("hint-err");
+      try { input.select(); } catch (e) { /* 忽略 */ }
+    }
+
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var password = input.value;
+      if (!password) { fail("请输入密码。"); return; }
+      busy(true);
+      reason.classList.remove("hint-err");
+      reason.textContent = "正在验证…";
+      fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: password }),
+        credentials: "same-origin",
+        cache: "no-store"
+      })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (!res.ok) throw new Error((data && data.detail) || res.status + " 登录失败");
+            return data;
+          });
+        })
+        .then(function (info) {
+          state.required = info.required !== false;
+          state.authenticated = true;
+          state.session_days = info.session_days || state.session_days;
+          state.warning = "";
+          hide();
+          input.value = "";
+          // 通知外壳：auth.js 收到后会 preventDefault，表示「我来接管」（更新顶栏 + 继续启动界面）。
+          // 没人接管说明静态 JS 是旧版本（比如被反代缓存了），那就整页重载一次：重载后 Cookie
+          // 已经在，兜底脚本直接放行，旧版界面也能正常用。
+          var taken = !window.dispatchEvent(
+            new CustomEvent("metatidy:authenticated", { detail: state, cancelable: true })
+          );
+          if (!taken) window.setTimeout(function () { location.reload(); }, 0);
+        })
+        .catch(function (err) { fail((err && err.message) || "登录失败"); })
+        .then(function () { busy(false); });
+    });
+
+    // 启动先问一次；在通过之前界面不会发任何数据请求（app.js 会复用这个结果）
+    var ready = fetch("/api/session", { credentials: "same-origin", cache: "no-store" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data) return null;
+        state = data;
+        if (data.required && !data.authenticated) show("请输入访问密码。");
+        return data;
+      })
+      .catch(function () { return null; });
+
+    return {
+      ready: ready,
+      show: show,
+      hide: hide,
+      get state() { return state; },
+    };
+  })();
+</script>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 [package]
 name = "metatidy-server"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.80"
 description = "metatidy Rust 后端：索引优先的音乐元数据工作台"
@@ -10,7 +10,7 @@ license = "LicenseRef-Proprietary"
 # HTTP
 axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
-tower-http = { version = "0.5", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.5", features = ["fs", "trace", "cors", "set-header"] }
 tokio = { version = "1", features = ["full"] }
 
 # 数据库 / 缓存（一等公民，不是可选补丁）

@@ -230,6 +230,23 @@ services:
 | 认证不依赖 Redis | Redis 挂了顶多丢任务进度，不该把人锁在门外 |
 
 > Python 版（`app/`）保留为契约参考实现，**没有**这层登录保护；线上跑的是 Rust 版。
+
+### 反代/CDN 缓存静态 JS 会出什么事
+
+这套前端没有构建步骤，文件名不带内容哈希。如果前面挂的反代/CDN 按扩展名缓存 js/css，部署后
+浏览器可能拿到「**新 HTML + 旧 JS**」——旧 JS 不认识登录接口，界面只会弹一句「请先登录」，
+登录框永远不出现（真实踩到过：openresty 把旧 `app.js` 缓存到第二天 00:30 才刷新）。
+
+已经做了两层防护，不改反代也能登录：
+
+1. 静态资源统一带 `Cache-Control: no-cache, must-revalidate`：用前必须回服务器校验，配合
+   `ETag`/`Last-Modified` 只是一次 304；
+2. **登录框由 `index.html` 里的内联脚本兜底**（HTML 不被缓存）：即使静态 JS 是旧版本，登录框
+   照样出得来，登录成功后整页重载一次就能用。
+
+顺手建议：把反代对该站的 js/css 缓存关掉，或改成按需回源（nginx 里类似
+`proxy_cache_bypass $cookie_metatidy_session;`）。
+
 ---
 
 ## 本地开发

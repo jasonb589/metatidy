@@ -104,7 +104,8 @@ export const api = {
   // 登录（后端没设 METATIDY_PASSWORD 时 session 直接回 required:false，前端就不弹框）
   session: () => request(`${API}/session`),
   login: (password) => request(`${API}/login`, { method: "POST", body: { password } }),
-  logout: () => request(`${API}/logout`, { method: "POST", body: {} }),
+  // 退出登录不带请求体：后端不必读它，也就不会出现「没消费 body 就返回」的收尾问题
+  logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
   track: (id) => request(`${API}/tracks/${id}`),
