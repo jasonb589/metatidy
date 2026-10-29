@@ -531,8 +531,9 @@ pub struct CandidateWrite {
 /// `POST /api/lyrics/preview`：**只抓歌词、不写文件**（界面上那个「试抓歌词」按钮）。
 ///
 /// 请求体：`{"track_id": 1, "title": "…", "artist": "…", "album": "…", "duration": 223.5}`
-/// —— 后四项可省略，省略时用索引里的曲目信息。候选里的值优先：这样「试抓」和真正写入用的是
-/// 同一组关键词（否则试抓到的和写进去的可能不是同一个版本，反而误导）。
+/// —— 后四项可省略，省略时用索引里的曲目信息。候选里的值优先（这样「试抓」和真正写入用的是
+/// 同一组关键词）；但候选的歌手有时是外文（例如网易云给的「稻香 — Jay」），歌词源会匹配不上，
+/// 所以查不到时会**退回用曲目自己的标签再查一次**，并在 `used` 里说明最后用的是哪一组。
 ///
 /// 走的是写入时同一条歌词链：网易云 → QQ → LRCLIB → 酷狗。
 pub async fn lyrics_preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
@@ -558,14 +559,15 @@ pub async fn lyrics_preview(State(state): State<AppState>, body: Bytes) -> ApiRe
         .filter(|secs| *secs > 0.0)
         .or_else(|| (track.duration > 0.0).then_some(track.duration));
 
-    let found = scrapers::fetch_lyrics(
-        &HTTP,
-        title.trim(),
-        artist.trim(),
-        Some(album.as_str()).map(str::trim).filter(|s| !s.is_empty()),
-        duration,
-    )
-    .await;
+    let mut found = lyrics_for(&title, &artist, &album, duration).await;
+    let mut used = "候选";
+    if found.is_none() && (title.trim() != track.title.trim() || artist.trim() != track.artist.trim())
+    {
+        // 候选的关键词查不到 → 用索引里这首曲目自己的标签再试一次（用户要的是「这首歌的歌词」）
+        let track_duration = (track.duration > 0.0).then_some(track.duration).or(duration);
+        found = lyrics_for(&track.title, &track.artist, &track.album, track_duration).await;
+        used = "曲目标签";
+    }
 
     Ok(Json(match found {
         Some((text, source)) => json!({
@@ -573,6 +575,7 @@ pub async fn lyrics_preview(State(state): State<AppState>, body: Bytes) -> ApiRe
             "source": source,
             "lines": text.lines().filter(|line| !line.trim().is_empty()).count(),
             "chars": text.chars().count(),
+            "used": used,
             "title": title,
             "artist": artist,
             "album": album,
@@ -582,12 +585,30 @@ pub async fn lyrics_preview(State(state): State<AppState>, body: Bytes) -> ApiRe
             "source": "",
             "lines": 0,
             "chars": 0,
+            "used": used,
             "detail": "四个源都没取到歌词（网易云 → QQ → LRCLIB → 酷狗）",
             "title": title.clone(),
             "artist": artist.clone(),
             "album": album.clone(),
         }),
     }))
+}
+
+/// 走一遍歌词链（网易云 → QQ → LRCLIB → 酷狗）；空专辑名不传。
+async fn lyrics_for(
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration: Option<f64>,
+) -> Option<(String, String)> {
+    scrapers::fetch_lyrics(
+        &HTTP,
+        title.trim(),
+        artist.trim(),
+        Some(album.trim()).filter(|s| !s.is_empty()),
+        duration,
+    )
+    .await
 }
 
 /// `null` / 空串 / 空数组都算「没给」（Python 是 `v not in (None, "")`）。

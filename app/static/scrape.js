@@ -44,6 +44,7 @@ const DEFAULT_WRITE_FIELDS = ["title", "artist", "album", "albumartist", "genre"
 
 let nodes = null;
 let batchAbort = false;
+let fetchedLyrics = null;
 
 export function init() {
   nodes = {
@@ -479,6 +480,7 @@ function renderCandidates() {
 
 function chooseCandidate(index) {
   state.scrape.chosenIndex = index;
+  fetchedLyrics = null; // 换了候选，之前试抓的那一份就不能再用了
   const cand = state.scrape.candidates[index] || {};
   const preset = new Set();
   DEFAULT_WRITE_FIELDS.forEach((field) => {
@@ -549,7 +551,21 @@ async function tryFetchLyrics() {
       duration: Number(cand.duration) || 0,
     });
     if (res.lyrics) {
-      renderLyricsPreview({ lyrics: res.lyrics }, { source: res.source || "" });
+      fetchedLyrics = {
+        index: state.scrape.chosenIndex,
+        text: res.lyrics,
+        source: res.source || "",
+      };
+      // 候选的关键词查不到时后端会退回用曲目标签再查一次，这里把这件事说明白
+      renderLyricsPreview(
+        { lyrics: res.lyrics },
+        {
+          source:
+            res.used === "曲目标签"
+              ? `${res.source || "未知来源"}（按曲目标签查的）`
+              : res.source || "",
+        },
+      );
       ui.toast("ok", "抓到歌词（还没写入）", `${res.source || "未知来源"} · ${res.lines} 行 ${res.chars} 字`);
     } else {
       renderLyricsPreview({ lyrics: "" });
@@ -644,6 +660,11 @@ async function previewAndWrite() {
   const row = currentTrackRow();
   const cand = state.scrape.candidates[state.scrape.chosenIndex];
   if (!row || !cand) return;
+  // 「试抓歌词」抓到的那一份原样带进写入：后端优先用候选里的歌词，这样「你看到的」和
+  // 「写进去的」是同一份（否则写入时后端会再抓一次，可能换一个版本）。
+  const fetched =
+    fetchedLyrics && fetchedLyrics.index === state.scrape.chosenIndex ? fetchedLyrics : null;
+  const writeCand = fetched ? { ...cand, lyrics: fetched.text } : cand;
   syncChosenFieldsFromDom();
 
   const values = {};
@@ -671,7 +692,13 @@ async function previewAndWrite() {
     // 说明文字必须与实际勾选一致：没勾封面就不能出现「封面」，否则会被读成封面也会写。
     const noDiffWhy = [];
     if (writeCover) noDiffWhy.push("封面从数据源下载");
-    if (writeLyrics) noDiffWhy.push("歌词取候选内容，候选没带就由后端再查一次");
+    if (writeLyrics) {
+      noDiffWhy.push(
+        fetched
+          ? `歌词用你刚试抓的那一份（${fetched.source || "未知来源"}）`
+          : "歌词取候选内容，候选没带就由后端再查一次",
+      );
+    }
     const coverHints = [];
     if (nodes.writeCover.checked && !cand.cover) {
       coverHints.push("勾了「写封面」，但这个候选没有封面地址，本次写不上封面。");
@@ -728,7 +755,7 @@ async function previewAndWrite() {
 
     const result = await api.scrapeApply({
       track_id: Number(row.id),
-      candidate: cand,
+      candidate: writeCand,
       fields: Object.keys(values),
       write_cover: writeCover,
       write_lyrics: writeLyrics,

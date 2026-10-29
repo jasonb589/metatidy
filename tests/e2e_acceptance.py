@@ -195,11 +195,25 @@ def main() -> int:
               not requests.get(f"{BASE}/api/tracks/{song['id']}", timeout=20).json().get("has_lyrics"),
               "has_lyrics 仍为假")
 
+        # 候选的关键词查不到时要能退回曲目标签再查一次（真实踩到：网易云候选的歌手是「Jay」，
+        # 拿它去查歌词源一个都匹配不上，用户就会觉得「试抓没用」）
+        fallback = requests.post(f"{BASE}/api/lyrics/preview", json={
+            "track_id": song["id"], "title": "稻香", "artist": "Jay", "album": "稻香",
+            "duration": 198,
+        }, timeout=180).json()
+        check("试抓歌词：候选查不到会退回曲目标签",
+              fallback.get("used") == "曲目标签",
+              f"used={fallback.get('used')!r} lyrics={'有' if fallback.get('lyrics') else '无'}"
+              f" source={fallback.get('source')!r}")
+
         # 真写一次歌词（用户的实际用法：勾「写歌词」+「覆盖已有值」）—— 之前这条路径完全没有覆盖
         if lyr_data.get("lyrics"):
             wrote = requests.post(f"{BASE}/api/scrape/apply", json={
                 "track_id": song["id"],
-                "candidate": {"title": "稻香", "artist": "周杰伦", "album": "魔杰座"},
+                # 界面会把「试抓歌词」的结果原样带进候选 → 后端优先用候选里的歌词，
+                # 这样「看到的」和「写进去的」一定是同一份
+                "candidate": {"title": "稻香", "artist": "周杰伦", "album": "魔杰座",
+                              "lyrics": lyr_data["lyrics"]},
                 "fields": [], "write_cover": False, "write_lyrics": True,
             }, timeout=180).json()
             check("写歌词：后端回报 lyrics=true", wrote.get("lyrics") is True,
@@ -208,6 +222,9 @@ def main() -> int:
             lyric_keys = [key for key in back.keys() if "lyric" in key.lower()]
             check("写歌词：磁盘上真的有歌词", bool(lyric_keys) and bool(back.get(lyric_keys[0])),
                   f"歌词标签键 {lyric_keys}，全部键 {list(back.keys())[:8]}")
+            check("写歌词：写进去的就是试抓看到的那一份",
+                  bool(lyric_keys) and back.get(lyric_keys[0])[0] == lyr_data["lyrics"],
+                  f"磁盘 {len(back.get(lyric_keys[0])[0]) if lyric_keys else 0} 字 / 预览 {len(lyr_data['lyrics'])} 字")
             lyric_detail = requests.get(f"{BASE}/api/tracks/{song['id']}", timeout=20).json()
             # 注意：has_lyrics 是 0/1（与 Python 版契约一致），不能跟 True 做严格比较
             check("写歌词：索引标记为有歌词", bool(lyric_detail.get("has_lyrics")),
