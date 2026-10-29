@@ -949,3 +949,21 @@ img.brand-mark {
 [data-theme="light"] .chip.is-bad {
   border-color: rgba(207, 34, 46, 0.35);
 }
+
+/* 歌词预览：候选自带歌词就摊开看，长歌词自己滚；配色走变量，日夜主题通用 */
+.lyrics-box { margin-top: var(--s2); }
+.lyrics-box > summary { cursor: pointer; }
+.lyrics-box pre {
+  margin: var(--s2) 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  background: var(--bg-2);
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

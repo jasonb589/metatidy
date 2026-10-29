@@ -73,6 +73,9 @@ export function init() {
     writeFields: ui.byId("write-fields"),
     writeCover: ui.byId("write-cover"),
     writeLyrics: ui.byId("write-lyrics"),
+    lyricsBox: ui.byId("write-lyrics-box"),
+    lyricsMeta: ui.byId("write-lyrics-meta"),
+    lyricsText: ui.byId("write-lyrics-text"),
     writeNormalize: ui.byId("write-normalize"),
     writeOverwrite: ui.byId("write-overwrite"),
     applyBtn: ui.byId("btn-scrape-apply"),
@@ -136,6 +139,8 @@ export function init() {
   });
   nodes.writeFields.addEventListener("change", syncChosenFieldsFromDom);
   nodes.applyBtn.addEventListener("click", previewAndWrite);
+  // 勾选框一改，预览里的说明也跟着变（否则「勾了写歌词」看不到任何反馈）
+  nodes.writeLyrics.addEventListener("change", renderWritePanel);
 
   nodes.batchUseCurrent.addEventListener("click", () => {
     const row = currentTrackRow();
@@ -482,6 +487,32 @@ function chooseCandidate(index) {
   renderWritePanel();
 }
 
+/** 歌词预览。
+ *
+ * 为什么要它：原来只能勾「写歌词」却看不到会写进去什么，等于盲勾。
+ * - 候选自带歌词 → 直接摊开展示（行数 / 字数 + 全文）；
+ * - 候选不带歌词 → 说明写入时后端会按标题/歌手再查一次（不假装有）；
+ * - 写入完成后 → 用后端返回的**真实写入内容**刷新（`written: true`）。 */
+function renderLyricsPreview(cand, { written = false } = {}) {
+  const box = nodes.lyricsBox;
+  if (!box) return;
+  const text = String((cand && cand.lyrics) || "").trim();
+  box.hidden = false;
+  if (!text) {
+    box.open = false;
+    nodes.lyricsText.textContent = "";
+    nodes.lyricsMeta.textContent =
+      nodes.writeLyrics && nodes.writeLyrics.checked
+        ? "候选不带歌词；写入时后端会按标题/歌手再查一次（网易云 → QQ → LRCLIB → 酷狗）"
+        : "候选不带歌词；勾选「写歌词」后，写入时后端会再查一次";
+    return;
+  }
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== "").length;
+  nodes.lyricsMeta.textContent = `${written ? "已写入 " : ""}${lines} 行 · ${text.length} 字`;
+  nodes.lyricsText.textContent = text;
+  box.open = true;
+}
+
 function renderWritePanel() {
   const row = currentTrackRow();
   const cand = state.scrape.candidates[state.scrape.chosenIndex];
@@ -518,6 +549,8 @@ function renderWritePanel() {
   if (!hasLyrics && !nodes.writeLyrics.checked) {
     nodes.writeLyrics.parentElement.title = "候选没有内嵌歌词，勾选后后端会按标题/歌手再查一次";
   }
+
+  renderLyricsPreview(cand);
 
   WRITE_FIELDS.forEach((field) => {
     const value = cand[field];
@@ -652,6 +685,7 @@ async function previewAndWrite() {
         ],
       }),
     );
+    renderLyricsPreview({ lyrics: result.lyrics }, { written: true });
     ui.toast("ok", "刮削写入完成", `${row.title || row.filename}：${writtenFields.map(ui.fieldLabel).join("、") || "无字段"}`);
     emit("status:refresh");
     emit("tracks:refresh");
