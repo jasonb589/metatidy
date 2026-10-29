@@ -189,6 +189,7 @@ pub async fn scan(
     // 枚举可能很久（云盘上光是遍历目录就要几分钟），所以边遍历边上报：
     // `total` 要等遍历完才知道，这段时间进度一直是 0，界面看着就像卡死了。
     let counters = std::sync::Arc::new(WalkCounters::default());
+    let mut last_log = std::time::Instant::now();
     let walk_counters = counters.clone();
     let mut walk = tokio::task::spawn_blocking(move || {
         collect_audio_files(&walk_root, Some(walk_counters.as_ref()))
@@ -198,6 +199,15 @@ pub async fn scan(
             res = &mut walk => break res?,
             _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {
                 use std::sync::atomic::Ordering;
+                // 同时按 10 秒节流写一行日志：容器日志里能看见进度在动
+                if last_log.elapsed() >= std::time::Duration::from_secs(10) {
+                    last_log = std::time::Instant::now();
+                    tracing::info!(
+                        "枚举中：已查看 {} 个目录项，找到 {} 个音频文件",
+                        counters.entries.load(Ordering::Relaxed),
+                        counters.audio.load(Ordering::Relaxed),
+                    );
+                }
                 progress(
                     0,
                     0,
@@ -219,30 +229,41 @@ pub async fn scan(
         repo::existing_state(pool).await?
     };
 
-    // 增量判断：mtime 与 size 都没变就不碰这个文件
-    let mut pending: Vec<(PathBuf, f64, i64)> = Vec::new();
-    for path in &files {
-        let meta = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        let size = meta.len() as i64;
-        let key = crate::models::path_key(path);
-        let unchanged = known
-            .get(&key)
-            .map(|(prev_mtime, prev_size)| (prev_mtime - mtime).abs() < 1e-6 && *prev_size == size)
-            .unwrap_or(false);
-        if unchanged {
-            continue;
-        }
-        pending.push((path.clone(), mtime, size));
-    }
+    // 增量判断：mtime 与 size 都没变就不碰这个文件。
+    //
+    // **必须放在 spawn_blocking 里**：`std::fs::metadata` 是同步调用，云盘/慢盘上
+    // 一次 stat 要几十毫秒，在 async 上下文里逐个文件调用会把 tokio 的工作线程占满
+    // ——表现就是「扫描一开始，/api/jobs 与 /api/tracks 全部 30 秒超时」（实测踩过）。
+    let (files, pending): (Vec<PathBuf>, Vec<(PathBuf, f64, i64)>) =
+        tokio::task::spawn_blocking(move || {
+            let mut pending: Vec<(PathBuf, f64, i64)> = Vec::new();
+            for path in &files {
+                let meta = match std::fs::metadata(path) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let size = meta.len() as i64;
+                let key = crate::models::path_key(path);
+                let unchanged = known
+                    .get(&key)
+                    .map(|(prev_mtime, prev_size)| {
+                        (prev_mtime - mtime).abs() < 1e-6 && *prev_size == size
+                    })
+                    .unwrap_or(false);
+                if unchanged {
+                    continue;
+                }
+                pending.push((path.clone(), mtime, size));
+            }
+            (files, pending)
+        })
+        .await?;
 
     let skipped = total - pending.len();
     let mut added = 0usize;

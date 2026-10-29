@@ -142,6 +142,8 @@ impl JobStore {
         .bind(kind)
         .execute(&self.pool)
         .await?;
+        // 起任务就写一行日志：否则「日志里什么都没有」会被误读成「没在跑」
+        tracing::info!("任务开始：kind={kind} id={job_id}");
         Ok(job_id)
     }
 

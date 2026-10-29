@@ -29,6 +29,19 @@ pub async fn connect_and_migrate(config: &Config) -> anyhow::Result<PgPool> {
         .await
         .context("执行数据库迁移失败")?;
 
+    // 上一次进程可能是被强杀的（容器重启/重新部署）：把还挂在 queued/running 的任务
+    // 标成中断，否则界面上会永远挂着一个「正在跑」的僵尸任务（实测踩过）。
+    if let Err(err) = sqlx::query(
+        "UPDATE jobs SET state = 'error', message = '容器重启导致任务中断', \
+         error = '容器重启导致任务中断', updated_at = now() \
+         WHERE state IN ('queued', 'running')",
+    )
+    .execute(&pool)
+    .await
+    {
+        tracing::warn!("清理中断任务失败（不影响启动）：{err}");
+    }
+
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await
