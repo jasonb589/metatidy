@@ -46,6 +46,8 @@ ENDPOINTS = [
 # 这些键是 Rust 版**有意**新增/改变的（见 PORT_NOTES 与契约），不当作缺失
 KNOWN_DIFFS = {
     "/api/status": {"engine", "postgres", "redis", "db_path", "data_dir"},
+    # Rust 侧新增的两个标志（Python 契约里没有），列表项多这两个键是有意的
+    "/api/tracks?page_size=3": {"tags_loaded", "path_derived"},
 }
 
 

@@ -548,6 +548,9 @@ pub fn light_track_json(track: &Track) -> Value {
         "scraped_at": ts(track.scraped_at),
         "mtime": track.mtime,
         "size": track.size,
+        // Rust 侧新增：让前端与验收都能看出「这行只是从路径建的索引，还是真读过标签」
+        "tags_loaded": track.tags_loaded,
+        "path_derived": track.path_derived,
     })
 }
 
@@ -910,6 +913,7 @@ mod tests {
             "id", "path", "dir", "filename", "ext", "title", "artist", "album", "albumartist",
             "genre", "year", "track", "disc", "language", "albumtype", "has_cover", "has_lyrics",
             "duration", "indexed_at", "edited_at", "scraped_at", "mtime", "size",
+            "tags_loaded", "path_derived",
         ] {
             assert!(json.get(key).is_some(), "缺少键 {key}");
         }

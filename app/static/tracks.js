@@ -136,10 +136,8 @@ export function init() {
   nodes.reload.addEventListener("click", () => refresh());
   nodes.scanBtn.addEventListener("click", startScan);
 
-  // 快速扫描与「全量重扫」是互斥语义：勾了快速，全量那个就没意义了
-  nodes.scanFast.addEventListener("change", () => {
-    nodes.scanFull.disabled = nodes.scanFast.checked;
-  });
+  // 「快速扫描」与「全量重扫」可以叠加：fast 只从路径建索引（不打开文件），
+  // full 忽略 mtime 缓存强制重算——两个一起勾就是「按目录结构把整库重算一遍」。
   nodes.editSelected.addEventListener("click", () => openEdit(selectionRows()));
 
   nodes.checkPage.addEventListener("change", () => {
