@@ -51,8 +51,8 @@ pub const PREVIEW_DISPLAY_LIMIT: usize = 500;
 /// 做成函数而不是 `const`：`Value` 的构造不是 const fn。
 pub fn user_setting_defaults() -> Vec<(&'static str, Value)> {
     vec![
-        ("dir_template", json!("{language}/{artist}/{album}")),
-        ("filename_template", json!("{track:02} - {title}")),
+        ("dir_template", json!(crate::templates::DEFAULT_DIR_TEMPLATE)),
+        ("filename_template", json!(crate::templates::DEFAULT_FILENAME_TEMPLATE)),
         ("conflict_policy", json!("rename")),
         ("unknown_artist", json!("未知艺术家")),
         ("unknown_album", json!("未知专辑")),

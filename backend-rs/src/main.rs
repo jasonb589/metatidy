@@ -555,8 +555,8 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
 
     let plan_opts = PlanOptions {
         library_root: &root,
-        dir_template: "{language?}/{artist}/{album}",
-        filename_template: "{track:02} - {title}",
+        dir_template: crate::templates::DEFAULT_DIR_TEMPLATE,
+        filename_template: crate::templates::DEFAULT_FILENAME_TEMPLATE,
         conflict_policy: "rename",
         unknown_artist: "未知艺术家",
         unknown_album: "未知专辑",

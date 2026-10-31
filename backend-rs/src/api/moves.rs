@@ -76,7 +76,8 @@ pub async fn move_preview(State(state): State<AppState>, body: Bytes) -> ApiResu
         .trim()
         .to_string();
     let dir_template = if dir_template.is_empty() {
-        setting_text(&settings, "dir_template").unwrap_or_else(|| "{language}/{artist}/{album}".to_string())
+        setting_text(&settings, "dir_template")
+            .unwrap_or_else(|| crate::templates::DEFAULT_DIR_TEMPLATE.to_string())
     } else {
         dir_template
     };
@@ -84,7 +85,8 @@ pub async fn move_preview(State(state): State<AppState>, body: Bytes) -> ApiResu
         .trim()
         .to_string();
     let filename_template = if filename_template.is_empty() {
-        setting_text(&settings, "filename_template").unwrap_or_else(|| "{title}".to_string())
+        setting_text(&settings, "filename_template")
+            .unwrap_or_else(|| crate::templates::DEFAULT_FILENAME_TEMPLATE.to_string())
     } else {
         filename_template
     };
@@ -409,8 +411,9 @@ pub async fn template_test(
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
     let query = RawQuery(params);
-    let dir_template = query.str("dir_template", "{language}/{artist}/{album}");
-    let filename_template = query.str("filename_template", "{track:02} - {title}");
+    let dir_template = query.str("dir_template", crate::templates::DEFAULT_DIR_TEMPLATE);
+    let filename_template =
+        query.str("filename_template", crate::templates::DEFAULT_FILENAME_TEMPLATE);
     let track_id = match query.opt_str("track_id") {
         Some(raw) => Some(super::path_i64(&raw, "track_id")?),
         None => None,

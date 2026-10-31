@@ -28,6 +28,20 @@ static WHITESPACE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("正则�
 
 const MAX_SEGMENT_LEN: usize = 120;
 
+/// 目录层级模板的默认值。
+///
+/// CLI 自检、设置接口的默认值、整理移动的兜底、模板自检**四处共用这一份** ——
+/// 以前它们各写各的（有的带 `?` 有的不带、文件名兜底甚至写成 `{title}`），
+/// 会出现「设置页显示一个模板、整理移动预览按另一个模板算」的错觉。
+pub const DEFAULT_DIR_TEMPLATE: &str = "{language?}/{artist}/{album}";
+
+/// 文件名模板的默认值。
+///
+/// 注意它**不含歌手**：默认布局里歌手已经在目录层级（`{artist}` 那一段），
+/// 文件名再带一遍会很长。想让文件名带上歌手，把设置里的文件名模板改成
+/// `{title} - {artist}` 即可（设置页的「实时试渲染」会立刻显示结果）。
+pub const DEFAULT_FILENAME_TEMPLATE: &str = "{track:02} - {title}";
+
 /// Windows 保留设备名，必须避开。
 const WINDOWS_RESERVED: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -383,6 +397,22 @@ mod tests {
         let v = values_of(&t);
         assert_eq!(render_filename("{track:02} - {title}", &v, Some(".flac")), "稻香.flac");
         assert_eq!(render_filename("{track:02}. {title}", &v, Some(".flac")), "稻香.flac");
+    }
+
+    #[test]
+    fn artist_can_be_put_into_filename_by_template() {
+        // 用户的实际诉求：文件名要是「探故知 - 浅影阿」。
+        // 默认模板不含歌手（默认布局里歌手已经在目录层级），想让文件名带上歌手就改模板。
+        let t = track();
+        let mut v = values_of(&t);
+        v.insert("title".to_string(), "探故知".to_string());
+        v.insert("artist".to_string(), "浅影阿".to_string());
+        assert_eq!(
+            render_filename("{title} - {artist}", &v, Some(".flac")),
+            "探故知 - 浅影阿.flac"
+        );
+        // 默认模板确实不含歌手（这条断言是给以后改默认值的人看的）
+        assert!(!DEFAULT_FILENAME_TEMPLATE.contains("{artist}"));
     }
 
     #[test]
