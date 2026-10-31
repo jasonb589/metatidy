@@ -15,31 +15,6 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  test:
-    name: 测试
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest httpx
-
-      - name: 离线测试（阻断门禁）
-        env:
-          METATIDY_OFFLINE: "1"
-        run: python -m pytest -q
-
-      - name: 联网测试（含真实数据源，允许失败）
-        continue-on-error: true
-        run: python -m pytest -q
-
   rust:
     name: Rust 后端
     runs-on: ubuntu-latest
@@ -151,14 +126,10 @@ jobs:
           echo "两次都失败"
           exit 1
 
-      # 端到端验收：与 Python 版**同一套 31 项检查**，这次打的是编译出来的 Rust 二进制。
-      # E2E_SERVER_CMD 用「相对仓库根」的路径（脚本以仓库根为 cwd 启动服务端），
-      # 端口由 METATIDY_PORT 传给服务端（脚本自身固定轮询 8097）。
+      # 端到端验收：真服务 + 真 Postgres/Redis + 真实数据源。脚本默认就用仓库里的
+      # backend-rs/target/release/metatidy-server（端口由脚本通过 METATIDY_PORT 传给服务端）。
       # 先清库：验收里断言「索引 5 首」，前面的自检留下的行会让它假红。
       - name: 端到端验收（真实服务 + Postgres + Redis + 真实数据源）
-        env:
-          METATIDY_PORT: "8097"
-          E2E_SERVER_CMD: ./backend-rs/target/release/metatidy-server
         run: |
           psql "$DATABASE_URL" -c 'TRUNCATE tracks, jobs, move_plans, alias_artist, alias_album RESTART IDENTITY;' || true
           python "$GITHUB_WORKSPACE/tests/e2e_acceptance.py" "$GITHUB_WORKSPACE" /tmp/metatidy-e2e

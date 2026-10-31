@@ -84,15 +84,25 @@ def main() -> int:
         "METATIDY_MUSIC_DIR": str(music),
         "METATIDY_DATA_DIR": str(data),
         "METATIDY_LIBRARY_ROOT": str(music),
+        # 端口必须和脚本轮询的 PORT 一致：Rust 版读 METATIDY_PORT，不认命令行 --port
+        "METATIDY_PORT": str(PORT),
         "PYTHONIOENCODING": "utf-8",
     }
-    # 服务端启动命令可覆盖：CI 里用它验收 Rust 二进制，默认仍是 Python 版。
-    # 用 sys.executable 而不是写死 venv 路径，Linux/Windows 都能跑。
+    # 服务端启动命令：默认就用仓库里的 Rust 二进制（Python 版已删除）；可用 E2E_SERVER_CMD 覆盖
+    # （CI 里指到 target/release 下那个）。
     override = os.environ.get("E2E_SERVER_CMD", "").strip()
     if override:
         argv = override.split()
     else:
-        argv = [sys.executable, "-m", "uvicorn", "app.main:app", "--port", str(PORT), "--log-level", "warning"]
+        default_bin = REPO / "backend-rs" / "target" / "release" / "metatidy-server"
+        if not default_bin.exists():
+            print(
+                f"找不到服务端二进制：{default_bin}\n"
+                "先构建：cargo build --release --manifest-path backend-rs/Cargo.toml\n"
+                "或用 E2E_SERVER_CMD 指定（例如 ./backend-rs/target/debug/metatidy-server）。"
+            )
+            return 2
+        argv = [str(default_bin)]
     proc = subprocess.Popen(
         argv,
         cwd=str(REPO),

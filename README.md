@@ -31,15 +31,7 @@ Web 界面，单容器部署，适合放在 NAS / 小主机上长期跑。
 
 ## 快速开始（Docker）
 
-> **注意：仓库是私有的，所以 GHCR 上的镜像默认也是私有的。** 拉取前需要登录一次：
->
-> ```bash
-> echo "<你的 GitHub PAT，需勾选 read:packages>" | docker login ghcr.io -u jasonb589 --password-stdin
-> ```
->
-> 想让别人匿名拉取，去 GitHub → Packages → metatidy → Package settings 把可见性改成 Public。
-> 后端是 Rust 的编译产物，**镜像里只有二进制、没有源码**，所以「闭源」和「镜像可匿名拉取」
-> 这两件事第一次可以同时成立（Python 版做不到这点）。
+> 镜像已公开：`docker pull ghcr.io/jasonb589/metatidy:latest` 直接可用，不需要登录。
 
 ### docker compose（推荐）
 
@@ -229,8 +221,6 @@ services:
 | 口令在内存里定长比较，不存哈希 | 口令只存在于容器环境变量，没有落盘的哈希可存；比较用定长实现，避开时序侧信道 |
 | 认证不依赖 Redis | Redis 挂了顶多丢任务进度，不该把人锁在门外 |
 
-> Python 版（`app/`）保留为契约参考实现，**没有**这层登录保护；线上跑的是 Rust 版。
-
 ### 挂在反代后面（限速要按真实客户端 IP）
 
 前面挂了 Nginx Proxy Manager / Traefik 这类反代时，容器看到的来源 IP 永远是反代那一个（例如
@@ -287,15 +277,15 @@ cargo run --release -- --selftest-index    # 扫描/增量/语言推断/标签�
 cargo run --release -- --selftest-scrape   # 真实联网：4 个源 + 歌词 + 封面
 ```
 
-端到端验收（与 Python 版用的是**同一套检查**；脚本会自己起服务）：
+端到端验收（脚本会自己起服务，默认就用仓库里的 Rust 二进制）：
 
 ```bash
-# 验收 Rust 二进制
+cargo build --release --manifest-path backend-rs/Cargo.toml
+python tests/e2e_acceptance.py "$PWD" /tmp/metatidy-e2e
+
+# 也可以自己指定服务端二进制与端口：
 E2E_SERVER_CMD="./backend-rs/target/release/metatidy-server" METATIDY_PORT=8097 \
   python tests/e2e_acceptance.py "$PWD" /tmp/metatidy-e2e
-
-# 不设 E2E_SERVER_CMD 则用 Python 版（python -m uvicorn app.main:app）
-python tests/e2e_acceptance.py "$PWD" /tmp/metatidy-e2e
 ```
 
 ---
@@ -317,10 +307,8 @@ backend-rs/           Rust 后端（现役，镜像就是它编译出来的）
   src/normalize.rs    多歌手归一化（& 规则）
   migrations/         Postgres 建表与索引
   Dockerfile          镜像定义（构建上下文是仓库根，因为要带 app/static）
-app/                  Python 版本：**参考实现**，接口契约以它为准（镜像已不再用它）
-  static/             无构建前端（原生 HTML/CSS/JS，完全离线可用；两个版本共用）
-metatidy_core/        Python 版的数据源实现（从既有产线项目迁移，已剥离 GUI 依赖）
-tests/                Python 单元测试 + e2e_acceptance.py（端到端验收脚本）
+app/static/           无构建前端（原生 HTML/CSS/JS，完全离线可用）
+tests/                audiofix.py（生成验收样本）+ e2e_acceptance.py（端到端验收脚本）
 ```
 
 前端是**零构建**的原生实现：没有 npm、没有 CDN、没有打包步骤，镜像断网也能正常用。
@@ -353,7 +341,7 @@ tests/                Python 单元测试 + e2e_acceptance.py（端到端验收�
   - 直接可用：MusicBrainz、iTunes（4 区）、网易云、QQ音乐、酷狗、酷我、Deezer、TheAudioDB。
   - Last.fm：内置 key 已被上游吊销（HTTP 403），要用请自备 `LASTFM_API_KEY`。
   - TheAudioDB：上游没有中文曲库数据，中文歌只能靠其它源。
-  - 需自备 key：Spotify / Genius / Discogs；YouTube Music 未实现（Python 版依赖的可选库本来也拿不到结果）。
+  - 需自备 key：Spotify / Genius / Discogs；YouTube Music 未实现。
   - 酷我的封面 URL 在上游普遍 404，它的候选可能没有封面。
 - 语言兜底只认「已知语言目录名」，自造目录名不会被当成语言（宁可不猜）。
 - 服务本身没有账号体系，**不要直接暴露到公网**；放在内网或前面套一层带认证的反代。
