@@ -487,7 +487,7 @@ function renderSelectionBar() {
         ui.el("span", { class: "truncate", style: { maxWidth: "180px" }, text: row.title || row.filename || String(row.id) }),
       ]),
     ),
-    count > rows.length ? ui.el("span", { class: "hint", text: `…等 ${count} 首` }) : null,
+    count > rows.length ? ui.el("span", { class: "hint", text: `…等 ${count} 首` }) : "",
     ui.el("div", { class: "spacer" }),
     ui.el("button", {
       type: "button",
