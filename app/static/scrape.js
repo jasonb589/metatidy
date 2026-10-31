@@ -441,6 +441,8 @@ function renderCandidates() {
       "div",
       {
         class: "cand",
+        // 给 CSS 一层专辑封面色晕（.cand::before 读 --art）
+        style: { "--art": cand.cover ? `url("${cand.cover}")` : "none" },
         role: "button",
         tabindex: "0",
         "aria-pressed": chosen ? "true" : "false",

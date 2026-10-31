@@ -640,6 +640,11 @@ function openEdit(rows) {
   ui.setText(nodes.drawerScope, rows.length === 1 ? `1 首：${first.title || first.filename}` : `${rows.length} 首`);
   nodes.drawerScope.title = rows.length === 1 ? first.path || "" : rows.map((row) => row.title || row.filename).join("\n");
   nodes.drawer.dataset.open = "true";
+  // 抽屉头也用这张封面做色晕（.drawer-head::before 读 --art）
+  nodes.drawer.style.setProperty(
+    "--art",
+    first.has_cover ? `url("/api/tracks/${first.id}/cover?size=64")` : "none",
+  );
   nodes.drawer.setAttribute("aria-hidden", "false");
   nodes.drawer.inert = false;
   // 等一帧：抽屉用 visibility 过渡，切换当帧直接 focus 有概率落空

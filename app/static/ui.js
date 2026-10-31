@@ -14,7 +14,13 @@ export function el(tag, props = null, children = null) {
       else if (key === "html") throw new Error("禁止使用 innerHTML");
       else if (key === "value") node.value = value;
       else if (key === "dataset") Object.assign(node.dataset, value);
-      else if (key === "style" && typeof value === "object") Object.assign(node.style, value);
+      else if (key === "style" && typeof value === "object") {
+        // 自定义属性（--x）必须走 setProperty，Object.assign 会静默丢掉
+        for (const [k, v] of Object.entries(value)) {
+          if (k.startsWith("--")) node.style.setProperty(k, String(v));
+          else node.style[k] = v;
+        }
+      }
       else if (key.startsWith("on") && typeof value === "function") {
         node.addEventListener(key.slice(2).toLowerCase(), value);
       } else if (value === true) node.setAttribute(key, "");
