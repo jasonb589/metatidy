@@ -3232,48 +3232,395 @@ fn lyrics_score(res: &Value, title: &str, artist: &str, duration: Option<f64>) -
     score
 }
 
-/// 酷狗歌词候选评分（`_kugou_score`；无 fuzz 分支）。
-fn kugou_lyrics_score(candidate: &Value, kw_title: &str, kw_artist: &str, keyword: &str, duration: Option<f64>) -> i64 {
-    let s_name = s_of(candidate.get("songname")).to_lowercase();
-    let s_artist = s_of(candidate.get("singername")).to_lowercase();
-    let mut score = 0i64;
-    if kw_title.contains(&s_name) || s_name.contains(kw_title) {
-        score += 4;
-    }
-    if !kw_artist.is_empty() {
-        if kw_artist.contains(&s_artist) || s_artist.contains(kw_artist) {
-            score += 3;
+// ==================== 歌词（多源并发 + 打分挑选） ====================
+//
+// 2026-11 重做。原来只有 LRCLIB → 酷狗两段串行，实测在 18 首真实歌曲上只中 7 首（39%），
+// 且 7 首全部来自 LRCLIB —— 华语/日韩一首都没中，因为：
+//   1. 网易云、QQ 这两条最全的华语/日韩源**根本没接**（注释里写着有，代码里没有）；
+//   2. 酷狗走的 `mobilecdn.kugou.com` 在 HTTPS 下**证书与域名不匹配**，请求直接被拒；
+//   3. LRCLIB 只有西方曲库，而且对 IP 限流（实测 503 ServerOverloaded / 429）。
+//
+// 现在四个源**并发**查、各自打分，再挑分数最高且达标的一条：
+//   网易云 → QQ → LRCLIB → 酷狗（同分时官方源优先）
+// 并发的好处：最坏耗时 ≈ 最慢的那个源，而不是四个相加。
+// 打分的好处：网易云/QQ 对冷门西方歌常常只有翻唱，靠分数把它们挡掉，而不是写进文件。
+
+/// 一条歌词候选：分数 + 正文 + 源名。
+struct LyricHit {
+    score: i64,
+    text: String,
+    source: &'static str,
+}
+
+/// 采用的最低分。`score_lyric_hit` 里标题完全一致给 40、互相包含给 25，
+/// 所以这个阈值等价于「标题必须基本对上」。
+const LYRICS_MIN_SCORE: i64 = 25;
+
+/// 匹配用归一化：全角转半角、丢掉空白与标点、小写。中日韩汉字会被 `is_alphanumeric` 保留。
+fn norm_lyric_key(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        let c = match ch {
+            '\u{3000}' => ' ',
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch),
+            _ => ch,
+        };
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
         }
     }
-    let kw_lower = keyword.to_lowercase();
-    if kw_lower.contains(&s_name) || s_name.contains(&kw_lower) {
-        score += 2;
+    out
+}
+
+/// 标题的几种查法：原文 + 去掉括号内容 + 去掉 " - xxx" 这类后缀。
+/// 例：`稻香 (Live)` → `稻香`；`七里香 - Remastered 2019` → `七里香`。
+fn lyric_title_variants(title: &str) -> Vec<String> {
+    fn push(out: &mut Vec<String>, text: &str) {
+        let text = text.trim();
+        if !text.is_empty() && !out.iter().any(|x| x == text) {
+            out.push(text.to_string());
+        }
     }
-    if kw_lower.contains(&s_artist) || s_artist.contains(&kw_lower) {
-        score += 1;
+    let mut out: Vec<String> = Vec::new();
+    push(&mut out, title);
+    let mut stripped = String::new();
+    let mut depth = 0i32;
+    for ch in title.chars() {
+        match ch {
+            '(' | '（' | '[' | '【' => depth += 1,
+            ')' | '）' | ']' | '】' => depth -= 1,
+            _ if depth <= 0 => stripped.push(ch),
+            _ => {}
+        }
     }
-    if let Some(dur) = duration.filter(|d| *d != 0.0) {
-        if let Some(cand_duration) = f_of(candidate.get("duration")).filter(|d| *d != 0.0) {
-            let diff = (cand_duration as i64 - dur as i64).abs();
-            if diff <= 5 {
-                score += 2;
-            } else if diff <= 15 {
-                score += 1;
-            } else if diff > 30 {
-                score -= 3;
-            }
+    push(&mut out, &stripped);
+    for sep in [" - ", " – ", " — ", " _ "] {
+        if let Some((head, _)) = stripped.split_once(sep) {
+            push(&mut out, head);
+        }
+    }
+    out
+}
+
+/// 跨源统一打分：标题 0/25/40 + 歌手 0/15/25 + 时长 -15/0/10/20。
+/// 标题完全对不上直接 0 分（调用方会淘汰），避免把别的歌的歌词写进文件。
+fn score_lyric_hit(
+    want_title: &str,
+    want_artist: &str,
+    want_duration: Option<f64>,
+    got_title: &str,
+    got_artist: &str,
+    got_duration: Option<f64>,
+) -> i64 {
+    let want_title_key = norm_lyric_key(want_title);
+    let got_title_key = norm_lyric_key(got_title);
+    if want_title_key.is_empty() || got_title_key.is_empty() {
+        return 0;
+    }
+    let title_exact = want_title_key == got_title_key;
+    let title_contains = !title_exact
+        && (want_title_key.contains(&got_title_key) || got_title_key.contains(&want_title_key));
+    if !title_exact && !title_contains {
+        return 0;
+    }
+    let want_artist_key = norm_lyric_key(want_artist);
+    let got_artist_key = norm_lyric_key(got_artist);
+    let artist_exact = !want_artist_key.is_empty() && want_artist_key == got_artist_key;
+    let artist_contains = !artist_exact
+        && !want_artist_key.is_empty()
+        && !got_artist_key.is_empty()
+        && (want_artist_key.contains(&got_artist_key)
+            || got_artist_key.contains(&want_artist_key));
+    // 关键：标题只是「包含」关系时，歌手也必须对上。
+    // 否则拿「zzzz-不存在的歌 / zzzz」去搜，一个标题恰好叫 zzzz 的结果会被
+    // `want.contains(got)` 判成命中（e2e 真抓到过这个假阳性）。
+    if title_contains && !artist_exact && !artist_contains && !want_artist_key.is_empty() {
+        return 0;
+    }
+    let mut score = if title_exact { 40 } else { 25 };
+    if artist_exact {
+        score += 25;
+    } else if artist_contains {
+        score += 15;
+    }
+    if let (Some(want), Some(got)) = (
+        want_duration.filter(|d| *d > 0.0),
+        got_duration.filter(|d| *d > 0.0),
+    ) {
+        let diff = (want - got).abs();
+        if diff <= 3.0 {
+            score += 20;
+        } else if diff <= 8.0 {
+            score += 10;
+        } else if diff > 25.0 {
+            score -= 15;
         }
     }
     score
 }
 
-async fn lrclib_lyrics(
+/// 剥掉 LRC 的时间戳与元数据标记（`[..]`），只留真正的歌词文字。
+///
+/// 必须**先剥再判断**：酷狗对纯音乐会返回一整段 `[id:]/[ar:]/[ti:]/[hash:]/…` 元数据
+/// 加上一行「纯音乐，请欣赏」，原始文本有一百多字，不剥掉就会绕过下面的长度判定。
+fn lyric_body(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
+        let mut in_bracket = false;
+        for ch in trimmed.chars() {
+            match ch {
+                '[' => in_bracket = true,
+                ']' => in_bracket = false,
+                _ if !in_bracket => out.push(ch),
+                _ => {}
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// 有没有真正的歌词文字（只有时间戳/元数据不算）。
+fn has_lyric_content(text: &str) -> bool {
+    lyric_body(text).trim().chars().count() >= 2
+}
+
+/// 占位歌词识别：QQ/酷狗对纯音乐会返回「此歌曲为没有填词的纯音乐，请您欣赏」这类文本，
+/// 把它当歌词写进文件是错的。剥掉元数据后只在**短内容**上判定，避免误伤真歌词里的同名词。
+fn is_placeholder_lyrics(text: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "没有填词的纯音乐",
+        "此歌曲为没有填词",
+        "纯音乐，请欣赏",
+        "纯音乐,请欣赏",
+        "暂无歌词",
+        "该歌曲没有歌词",
+        "no lyrics",
+    ];
+    let compact: String = lyric_body(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if compact.chars().count() > 80 {
+        return false;
+    }
+    let lower = compact.to_lowercase();
+    NEEDLES.iter().any(|needle| lower.contains(needle))
+}
+
+/// 网易云：搜索 → 打分挑一条 → 歌词接口。华语/日韩最全。
+async fn netease_lyrics(
+    client: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: Option<f64>,
+) -> Option<LyricHit> {
+    for query_title in lyric_title_variants(title) {
+        let keyword = format!("{query_title} {artist}");
+        let keyword = keyword.trim();
+        let form = [
+            ("s", keyword),
+            ("type", "1"),
+            ("offset", "0"),
+            ("total", "true"),
+            ("limit", "10"),
+        ];
+        let (status, data) = post_form_json(
+            client,
+            "https://music.163.com/api/search/get/web",
+            &form,
+            hdrs(&[("Referer", "https://music.163.com/")]),
+            Duration::from_secs(10),
+        )
+        .await?;
+        if status != 200 {
+            continue;
+        }
+        let songs = data
+            .pointer("/result/songs")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut best: Option<(i64, i64)> = None;
+        for song in &songs {
+            let got_title = s_of(song.get("name"));
+            let got_artist = song
+                .get("artists")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .map(|a| s_of(a.get("name")))
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_default();
+            // 网易云的 duration 是毫秒
+            let got_duration = i_of(song.get("duration")).map(|ms| ms as f64 / 1000.0);
+            let score = score_lyric_hit(
+                &query_title,
+                artist,
+                duration,
+                &got_title,
+                &got_artist,
+                got_duration,
+            );
+            let id = i_of(song.get("id")).unwrap_or(0);
+            if score <= 0 || id == 0 {
+                continue;
+            }
+            if best.map(|(s, _)| score > s).unwrap_or(true) {
+                best = Some((score, id));
+            }
+        }
+        let Some((score, id)) = best else {
+            continue;
+        };
+        let url = format!("https://music.163.com/api/song/lyric?id={id}&lv=-1&kv=-1&tv=-1");
+        let (status, data) = get_json(
+            client,
+            &url,
+            &[],
+            hdrs(&[("Referer", "https://music.163.com/")]),
+            Duration::from_secs(10),
+        )
+        .await?;
+        if status != 200 {
+            continue;
+        }
+        let lyric = s_of(data.pointer("/lrc/lyric"));
+        // 没有原文时退而求其次用翻译（总比没有强）
+        let text = if lyric.trim().is_empty() {
+            s_of(data.pointer("/tlyric/lyric"))
+        } else {
+            lyric
+        };
+        let text = text.trim_start_matches('\u{feff}').to_string();
+        if text.trim().is_empty() || is_placeholder_lyrics(&text) || !has_lyric_content(&text) {
+            continue;
+        }
+        return Some(LyricHit {
+            score,
+            text,
+            source: "网易云音乐",
+        });
+    }
+    None
+}
+
+/// QQ 音乐：搜索 → 打分挑一条 → 歌词接口。
+/// 注意它的歌词接口响应头是 `text/html`，正文其实是 JSON（所以照常按 JSON 解析）。
+async fn qq_lyrics(
+    client: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: Option<f64>,
+) -> Option<LyricHit> {
+    for query_title in lyric_title_variants(title) {
+        let keyword = format!("{query_title} {artist}");
+        let params = vec![
+            ("w".to_string(), keyword.trim().to_string()),
+            ("format".to_string(), "json".to_string()),
+            ("n".to_string(), "10".to_string()),
+            ("p".to_string(), "1".to_string()),
+            ("cr".to_string(), "1".to_string()),
+            ("aggr".to_string(), "0".to_string()),
+            ("inCharset".to_string(), "utf8".to_string()),
+            ("outCharset".to_string(), "utf-8".to_string()),
+        ];
+        let (status, data) = get_json(
+            client,
+            "https://c.y.qq.com/soso/fcgi-bin/client_search_cp",
+            &params,
+            hdrs(&[("Referer", "https://y.qq.com/")]),
+            Duration::from_secs(10),
+        )
+        .await?;
+        if status != 200 {
+            continue;
+        }
+        let list = data
+            .pointer("/data/song/list")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut best: Option<(i64, String)> = None;
+        for song in &list {
+            let got_title = s_of(song.get("songname"));
+            let got_artist = song
+                .get("singer")
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .map(|a| s_of(a.get("name")))
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_default();
+            let got_duration = f_of(song.get("interval"));
+            let score = score_lyric_hit(
+                &query_title,
+                artist,
+                duration,
+                &got_title,
+                &got_artist,
+                got_duration,
+            );
+            let mid = s_of(song.get("songmid"));
+            if score <= 0 || mid.is_empty() {
+                continue;
+            }
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, mid));
+            }
+        }
+        let Some((score, mid)) = best else {
+            continue;
+        };
+        let url = with_query(
+            "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg",
+            &[
+                ("songmid", mid.as_str()),
+                ("format", "json"),
+                ("nobase64", "1"),
+                ("g_tk", "5381"),
+            ],
+        );
+        let (status, data) = get_json(
+            client,
+            &url,
+            &[],
+            hdrs(&[("Referer", "https://y.qq.com/portal/player.html")]),
+            Duration::from_secs(10),
+        )
+        .await?;
+        if status != 200 {
+            continue;
+        }
+        let text = html_unescape_light(&s_of(data.get("lyric")));
+        let text = text.trim_start_matches('\u{feff}').to_string();
+        if text.trim().is_empty() || is_placeholder_lyrics(&text) || !has_lyric_content(&text) {
+            continue;
+        }
+        return Some(LyricHit {
+            score,
+            text,
+            source: "QQ 音乐",
+        });
+    }
+    None
+}
+
+/// LRCLIB：先精确接口，再搜索兜底（搜索用原有 `lyrics_score` 排序，最后统一打分）。
+async fn lrclib_hit(
     client: &reqwest::Client,
     title: &str,
     artist: &str,
     album: Option<&str>,
     duration: Option<f64>,
-) -> Option<String> {
+) -> Option<LyricHit> {
     let mut params: Vec<(String, String)> = vec![
         ("track_name".to_string(), title.to_string()),
         ("artist_name".to_string(), artist.to_string()),
@@ -3294,130 +3641,203 @@ async fn lrclib_lyrics(
     .await
     {
         if status == 200 {
-            // Python：return data.get('syncedLyrics', data.get('plainLyrics'))，**不再走搜索兜底**
             let value = data
                 .get("syncedLyrics")
                 .or_else(|| data.get("plainLyrics"))
                 .cloned()
                 .unwrap_or(Value::Null);
             let text = s_of(Some(&value));
-            return if text.is_empty() { None } else { Some(text) };
+            if !text.trim().is_empty() {
+                let score = score_lyric_hit(
+                    title,
+                    artist,
+                    duration,
+                    &s_of(data.get("trackName")),
+                    &s_of(data.get("artistName")),
+                    f_of(data.get("duration")),
+                );
+                if score >= LYRICS_MIN_SCORE {
+                    return Some(LyricHit {
+                        score,
+                        text,
+                        source: "Lrclib.net",
+                    });
+                }
+            }
         }
     }
-    let search_params = vec![("q".to_string(), format!("{title} {artist}"))];
-    let (status, data) = get_json(
-        client,
-        "https://lrclib.net/api/search",
-        &search_params,
-        HeaderMap::new(),
-        Duration::from_secs(15),
-    )
-    .await?;
-    if status != 200 {
-        return None;
-    }
-    let results = data.as_array().filter(|a| !a.is_empty())?;
-    let mut scored: Vec<(usize, i64)> = results
-        .iter()
-        .enumerate()
-        .map(|(i, res)| (i, lyrics_score(res, title, artist, duration)))
-        .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    for (i, _) in &scored {
-        if truthy(results[*i].get("syncedLyrics")) {
-            return Some(s_of(results[*i].get("syncedLyrics")));
+    for query_title in lyric_title_variants(title) {
+        let search_params = vec![("q".to_string(), format!("{query_title} {artist}"))];
+        let Some((status, data)) = get_json(
+            client,
+            "https://lrclib.net/api/search",
+            &search_params,
+            HeaderMap::new(),
+            Duration::from_secs(15),
+        )
+        .await
+        else {
+            continue;
+        };
+        if status != 200 {
+            continue;
         }
-    }
-    for (i, _) in &scored {
-        if truthy(results[*i].get("plainLyrics")) {
-            return Some(s_of(results[*i].get("plainLyrics")));
+        let Some(results) = data.as_array().filter(|a| !a.is_empty()) else {
+            continue;
+        };
+        let mut scored: Vec<(usize, i64)> = results
+            .iter()
+            .enumerate()
+            .map(|(i, res)| (i, lyrics_score(res, &query_title, artist, duration)))
+            .collect();
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        for pick in ["syncedLyrics", "plainLyrics"] {
+            for (i, _) in &scored {
+                let res = &results[*i];
+                if !truthy(res.get(pick)) {
+                    continue;
+                }
+                let text = s_of(res.get(pick));
+                let score = score_lyric_hit(
+                    &query_title,
+                    artist,
+                    duration,
+                    &s_of(res.get("trackName")),
+                    &s_of(res.get("artistName")),
+                    f_of(res.get("duration")),
+                );
+                if score >= LYRICS_MIN_SCORE && !text.trim().is_empty() {
+                    return Some(LyricHit {
+                        score,
+                        text,
+                        source: "Lrclib.net",
+                    });
+                }
+            }
         }
     }
     None
 }
 
-async fn kugou_lyrics(client: &reqwest::Client, keyword: &str, duration: Option<f64>) -> Option<String> {
-    let search_url = format!(
-        "https://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword={keyword}&page=1&pagesize=5"
-    );
-    let (_, data) = get_json(
-        client,
-        &search_url,
-        &[],
-        HeaderMap::new(),
-        Duration::from_secs(15),
-    )
-    .await?;
-    let candidates = data
-        .pointer("/data/info")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if candidates.is_empty() {
-        return None;
-    }
-    let kw_lower = keyword.to_lowercase();
-    let parts: Vec<&str> = kw_lower.split_whitespace().collect();
-    let kw_title = parts.first().copied().unwrap_or(kw_lower.as_str()).to_string();
-    let kw_artist = parts.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
-    let mut best_idx = 0usize;
-    let mut best_score = -1i64;
-    for (idx, candidate) in candidates.iter().enumerate() {
-        let score = kugou_lyrics_score(candidate, &kw_title, &kw_artist, keyword, duration);
-        if score > best_score {
-            best_score = score;
-            best_idx = idx;
+/// 酷狗：搜索 → krcs → download。
+///
+/// 搜索必须走 `songsearch.kugou.com/song_search_v2`：原来的 `mobilecdn.kugou.com`
+/// 在 HTTPS 下证书与域名不匹配（实测 SSL: Hostname mismatch），请求会被直接拒掉，
+/// 这也是它以前一次都没命中的原因。新接口字段名不同（`SongName`/`SingerName`/`FileHash`），
+/// 下载回来的 LRC 还带 BOM，都要处理。
+async fn kugou_hit(
+    client: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration: Option<f64>,
+) -> Option<LyricHit> {
+    for query_title in lyric_title_variants(title) {
+        let keyword = format!("{query_title} {artist}");
+        let params = vec![
+            ("keyword".to_string(), keyword.trim().to_string()),
+            ("page".to_string(), "1".to_string()),
+            ("pagesize".to_string(), "10".to_string()),
+            ("platform".to_string(), "WebFilter".to_string()),
+            ("format".to_string(), "json".to_string()),
+        ];
+        let (status, data) = get_json(
+            client,
+            "https://songsearch.kugou.com/song_search_v2",
+            &params,
+            hdrs(&[("Referer", "https://www.kugou.com/")]),
+            Duration::from_secs(10),
+        )
+        .await?;
+        if status != 200 {
+            continue;
         }
+        let lists = data
+            .pointer("/data/lists")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut best: Option<(i64, String)> = None;
+        for entry in &lists {
+            let got_title = s_of(entry.get("SongName"));
+            let got_artist = s_of(entry.get("SingerName"));
+            let got_duration = f_of(entry.get("Duration"));
+            let score = score_lyric_hit(
+                &query_title,
+                artist,
+                duration,
+                &got_title,
+                &got_artist,
+                got_duration,
+            );
+            let hash = s_of(entry.get("FileHash"));
+            if score <= 0 || hash.is_empty() {
+                continue;
+            }
+            if best.as_ref().map(|(s, _)| score > *s).unwrap_or(true) {
+                best = Some((score, hash));
+            }
+        }
+        let Some((score, hash)) = best else {
+            continue;
+        };
+        let krcs_url = format!(
+            "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash={hash}&album_audio_id="
+        );
+        let (_, lrc_data) = get_json(
+            client,
+            &krcs_url,
+            &[],
+            HeaderMap::new(),
+            Duration::from_secs(10),
+        )
+        .await?;
+        let first = lrc_data
+            .get("candidates")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first());
+        let Some(info) = first else {
+            continue;
+        };
+        let access_key = s_of(info.get("accesskey"));
+        let id_val = s_of(info.get("id"));
+        let dl_url = format!(
+            "https://lyrics.kugou.com/download?ver=1&client=pc&id={id_val}&accesskey={access_key}&fmt=lrc&charset=utf8"
+        );
+        let (_, json_res) = get_json(
+            client,
+            &dl_url,
+            &[],
+            HeaderMap::new(),
+            Duration::from_secs(10),
+        )
+        .await?;
+        let b64 = s_of(json_res.get("content"));
+        if b64.is_empty() {
+            continue;
+        }
+        let Some(bytes) = b64_decode(&b64) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes)
+            .trim_start_matches('\u{feff}')
+            .to_string();
+        if text.trim().is_empty() || is_placeholder_lyrics(&text) || !has_lyric_content(&text) {
+            continue;
+        }
+        return Some(LyricHit {
+            score,
+            text,
+            source: "酷狗音乐",
+        });
     }
-    let best_hash = s_of(candidates[best_idx].get("hash"));
-    if best_hash.is_empty() {
-        return None;
-    }
-    let lrc_url = format!(
-        "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash={best_hash}&album_audio_id="
-    );
-    let (_, lrc_data) = get_json(
-        client,
-        &lrc_url,
-        &[],
-        HeaderMap::new(),
-        Duration::from_secs(15),
-    )
-    .await?;
-    let status_ok = i_of(lrc_data.get("status")).unwrap_or(0) == 200;
-    let first = lrc_data
-        .get("candidates")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first());
-    if !status_ok || first.is_none() {
-        return None;
-    }
-    let info = first?;
-    let access_key = s_of(info.get("accesskey"));
-    let id_val = s_of(info.get("id"));
-    let dl_url = format!(
-        "https://lyrics.kugou.com/download?ver=1&client=pc&id={id_val}&accesskey={access_key}&fmt=lrc&charset=utf8"
-    );
-    let (_, json_res) = get_json(
-        client,
-        &dl_url,
-        &[],
-        HeaderMap::new(),
-        Duration::from_secs(15),
-    )
-    .await?;
-    let b64 = s_of(json_res.get("content"));
-    if b64.is_empty() {
-        return None;
-    }
-    let bytes = b64_decode(&b64)?;
-    Some(String::from_utf8_lossy(&bytes).to_string())
+    None
 }
 
-/// 歌词链：LRCLIB → 酷狗（本 App 路径上拿不到 netease_id / qq_mid，所以只有第 3、4 段）。
+/// 歌词链：四个源**并发**查，各自打分，挑分数最高且达标的一条。
 ///
-/// 注意契约 H-1：Python 的 `/api/scrape/apply` 把 duration 当 album 传（参数错位），
-/// 这里按批量路径的**正确**语义实现（album 是专辑名，duration 是秒数）。
+/// 同分时按 网易云 > QQ > LRCLIB > 酷狗 取前面的（官方源优先，歌词质量更稳）。
+/// 标题对不上（`score_lyric_hit` 返回 0）、占位歌词（纯音乐提示）、没有真正歌词行的一律淘汰，
+/// 宁可返回 None 让上层提示「没取到」，也不写错歌词。
 pub async fn fetch_lyrics(
     client: &reqwest::Client,
     title: &str,
@@ -3425,13 +3845,27 @@ pub async fn fetch_lyrics(
     album: Option<&str>,
     duration: Option<f64>,
 ) -> Option<(String, String)> {
-    if let Some(text) = lrclib_lyrics(client, title, artist, album, duration).await {
-        return Some((text, "Lrclib.net".to_string()));
+    let (netease, qq, lrclib, kugou) = tokio::join!(
+        netease_lyrics(client, title, artist, duration),
+        qq_lyrics(client, title, artist, duration),
+        lrclib_hit(client, title, artist, album, duration),
+        kugou_hit(client, title, artist, duration),
+    );
+    let mut best: Option<LyricHit> = None;
+    for hit in [netease, qq, lrclib, kugou].into_iter().flatten() {
+        if hit.score < LYRICS_MIN_SCORE
+            || hit.text.trim().is_empty()
+            || is_placeholder_lyrics(&hit.text)
+            || !has_lyric_content(&hit.text)
+        {
+            continue;
+        }
+        // 只有严格更高分才替换 → 同分保留前面的（优先级更高）
+        if best.as_ref().map(|cur| hit.score > cur.score).unwrap_or(true) {
+            best = Some(hit);
+        }
     }
-    if let Some(text) = kugou_lyrics(client, &format!("{title} {artist}"), duration).await {
-        return Some((text, "酷狗音乐".to_string()));
-    }
-    None
+    best.map(|hit| (hit.text, hit.source.to_string()))
 }
 
 // ==================== 封面（E 节） ====================
@@ -4728,17 +5162,83 @@ mod tests {
     }
 
     #[test]
-    fn kugou_lyrics_score_table() {
-        let candidate = json!({"songname": "稻香", "singername": "周杰伦", "duration": 223});
+    fn norm_lyric_key_folds_fullwidth_and_punct() {
+        assert_eq!(norm_lyric_key("稻香 (Live)"), "稻香live");
+        assert_eq!(norm_lyric_key("ＡＢＣ－１２３"), "abc123");
+        assert_eq!(norm_lyric_key("Nuvole Bianche"), "nuvolebianche");
+        assert_eq!(norm_lyric_key(""), "");
+    }
+
+    #[test]
+    fn lyric_title_variants_strips_brackets_and_suffixes() {
+        assert_eq!(lyric_title_variants("稻香"), vec!["稻香"]);
+        assert_eq!(lyric_title_variants("稻香 (Live)"), vec!["稻香 (Live)", "稻香"]);
         assert_eq!(
-            kugou_lyrics_score(&candidate, "稻香", "周杰伦", "稻香 周杰伦", Some(223.0)),
-            4 + 3 + 2 + 1 + 2
+            lyric_title_variants("七里香 - Remastered 2019"),
+            vec!["七里香 - Remastered 2019", "七里香"]
         );
-        let far = json!({"songname": "别的歌", "singername": "某人", "duration": 400});
+        // 括号里的连字符不能被当成后缀切掉
         assert_eq!(
-            kugou_lyrics_score(&far, "稻香", "周杰伦", "稻香 周杰伦", Some(223.0)),
-            -3
+            lyric_title_variants("Get Lucky (feat. A - B)"),
+            vec!["Get Lucky (feat. A - B)", "Get Lucky"]
         );
+    }
+
+    #[test]
+    fn score_lyric_hit_rejects_other_songs() {
+        // 标题一致 + 歌手一致 + 时长差 1s
+        assert_eq!(
+            score_lyric_hit("稻香", "周杰伦", Some(223.0), "稻香", "周杰伦", Some(224.0)),
+            40 + 25 + 20
+        );
+        // 标题对不上 → 0 分（调用方会淘汰，避免写错歌词）
+        assert_eq!(
+            score_lyric_hit("稻香", "周杰伦", Some(223.0), "夜曲", "周杰伦", Some(227.0)),
+            0
+        );
+        // 歌手对不上（网易云首条常是翻唱）：只剩标题分 + 时长分
+        assert_eq!(
+            score_lyric_hit("稻香", "周杰伦", Some(223.0), "稻香", "Lucky小爱", Some(231.0)),
+            40 + 10
+        );
+        // 时长差 >25s 要扣分
+        assert_eq!(
+            score_lyric_hit("稻香", "周杰伦", Some(223.0), "稻香", "周杰伦", Some(400.0)),
+            40 + 25 - 15
+        );
+        // 脏标题：括号后缀不影响命中（归一化后是包含关系）
+        assert_eq!(
+            score_lyric_hit("稻香 (Live)", "周杰伦", None, "稻香", "周杰伦", None),
+            25 + 25
+        );
+        // 假阳性守卫：标题只是「包含」关系、歌手又对不上 → 0 分。
+        // 真实踩到（e2e 抓到）：拿「zzzz-不存在的歌 / zzzz」去搜，QQ 返回了一个标题
+        // 恰好是 zzzz 的结果，`want.contains(got)` 把它判成了命中。
+        assert_eq!(
+            score_lyric_hit("zzzz-不存在的歌", "zzzz", None, "zzzz", "某人", None),
+            0
+        );
+    }
+
+    #[test]
+    fn placeholder_and_content_detection() {
+        // QQ 对纯音乐会返回这种占位文本，必须当「没找到」
+        assert!(is_placeholder_lyrics("[00:00:00]此歌曲为没有填词的纯音乐，请您欣赏"));
+        assert!(is_placeholder_lyrics("暂无歌词"));
+        // 真实样本（酷狗对纯音乐）：整段元数据 + 一行「纯音乐，请欣赏」，原始 166 字，
+        // 剥掉 [id:]/[ar:]/[ti:]/[hash:] 之后只剩 7 字 —— 必须先剥再判长度，否则会漏过。
+        let kugou_instrumental = "[id:$00000000]\n[ar:arkady sevidov]\n[ti:June]\n[by:]\n\
+[hash:4399c9872c7235b60b58ce88dc487897]\n[al:]\n[sign:]\n[qq:]\n[total:320317]\n[offset:0]\n\
+[00:01.58]纯音乐，请欣赏\n";
+        assert!(is_placeholder_lyrics(kugou_instrumental));
+        assert!(!is_placeholder_lyrics("[00:12.00]窗外的麻雀 在电线杆上多嘴"));
+        // 长文本即使命中关键词也不算占位（避免误伤真歌词）
+        let long = format!("[00:01.00]{}\n", "这是一句真歌词".repeat(12));
+        assert!(!is_placeholder_lyrics(&long));
+        // 只有元数据/时间戳 → 没有真正的歌词行
+        assert!(!has_lyric_content("[ti:稻香]\n[ar:周杰伦]\n[al:魔杰座]\n[by:]\n[offset:0]"));
+        assert!(!has_lyric_content(""));
+        assert!(has_lyric_content("[ti:稻香]\n[00:12.00]窗外的麻雀"));
     }
 
     // ---------- 源过滤 / 排序 / 上下文过滤 ----------

@@ -304,7 +304,7 @@ async fn run_scrape_selftest(config: &Config) -> anyhow::Result<()> {
                 head.replace('\n', " ")
             );
         }
-        None => println!("  [--] 歌词：LRCLIB 与酷狗都没取到（不视为失败）"),
+        None => println!("  [--] 歌词：网易云 / QQ / LRCLIB / 酷狗 四个源都没取到（不视为失败）"),
     }
 
     match outcome.candidates.iter().find(|c| !c.cover.is_empty()) {

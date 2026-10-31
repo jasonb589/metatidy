@@ -1,6 +1,6 @@
 [package]
 name = "metatidy-server"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.80"
 description = "metatidy Rust 后端：索引优先的音乐元数据工作台"
