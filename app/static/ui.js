@@ -41,6 +41,68 @@ export function append(node, children) {
   return node;
 }
 
+/**
+ * 内联 SVG 图标（零外部依赖，跟 `currentColor` 走，所以日夜主题自动适配）。
+ *
+ * 只做 16px 的描边图标：`stroke-width=1.6`、`stroke-linecap=round`，
+ * 视觉重量和 12.5px 的按钮文字相当，不会喧宾夺主。
+ */
+const ICON_PATHS = {
+  scan: "M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7M9 3h2.5A1.5 1.5 0 0 1 13 4.5V7M13 9v2.5a1.5 1.5 0 0 1-1.5 1.5H9M7 13H4.5A1.5 1.5 0 0 1 3 11.5V9",
+  refresh: "M13 3v3.5H9.5M3 13V9.5h3.5M13 6.5A5 5 0 0 0 4.2 5.4M3 9.5a5 5 0 0 0 8.8 1.1",
+  filter: "M2.5 3.5h11l-4.2 4.7v4.6l-2.6 1.4V8.2z",
+  edit: "M11.2 2.6a1.7 1.7 0 0 1 2.4 2.4l-7.4 7.4-3 .6.6-3zM9.6 4.2l2.4 2.4",
+  close: "M3.5 3.5l9 9M12.5 3.5l-9 9",
+  search: "M7.2 12.4a5.2 5.2 0 1 0 0-10.4 5.2 5.2 0 0 0 0 10.4zM11.4 11.4l2.4 2.4",
+  check: "M3 8.5l3.4 3.4L13 5",
+  music: "M6 12.5a1.9 1.9 0 1 0 0-3.8 1.9 1.9 0 0 0 0 3.8zM7.9 10.6V3.4l5.4 1.2M13.3 9.9a1.9 1.9 0 1 1-3.8 0 1.9 1.9 0 0 1 3.8 0z",
+  album: "M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zM8 9.6a1.6 1.6 0 1 0 0-3.2 1.6 1.6 0 0 0 0 3.2z",
+  artist: "M8 8.2a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2zM2.9 13.4a5.1 5.1 0 0 1 10.2 0",
+  lyrics: "M3 3.5h10M3 6.5h7M3 9.5h10M3 12.5h5",
+  cover: "M2.6 3.5h10.8v9H2.6zM2.6 10l3-3 2.6 2.6 2-1.8 3 3",
+  move: "M6 12.5V3.5M3 6.2l3-2.7 3 2.7M10 3.5v9M7 9.8l3 2.7 3-2.7",
+  settings: "M8 10.1a2.1 2.1 0 1 0 0-4.2 2.1 2.1 0 0 0 0 4.2zM8 1.9l1 1.6 1.9-.3.5 1.8 1.7.9-.8 1.7.8 1.7-1.7.9-.5 1.8-1.9-.3-1 1.6-1-1.6-1.9.3-.5-1.8-1.7-.9.8-1.7-.8-1.7 1.7-.9.5-1.8 1.9.3z",
+  command: "M5.6 2.6a1.9 1.9 0 1 1 0 3.8h4.8a1.9 1.9 0 1 1 0-3.8 1.9 1.9 0 0 1 1.9 1.9v4.8a1.9 1.9 0 1 1-1.9 1.9 1.9 1.9 0 0 1-1.9-1.9H5.6a1.9 1.9 0 1 1-1.9-1.9 1.9 1.9 0 0 1 1.9-1.9",
+  jobs: "M8 2.6a5.4 5.4 0 1 0 0 10.8A5.4 5.4 0 0 0 8 2.6zM8 5.6V8l1.8 1.2",
+  warn: "M8 2.6l5.6 9.8H2.4zM8 6.4v3M8 11h.01",
+  info: "M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12zM8 7.4v3.4M8 5.4h.01",
+  logout: "M6.4 13.5H4a1.5 1.5 0 0 1-1.5-1.5V4A1.5 1.5 0 0 1 4 2.5h2.4M9.6 11.2L12.8 8 9.6 4.8M12.8 8H6.4",
+  theme: "M8 13.4a5.4 5.4 0 1 0 0-10.8 5.4 5.4 0 0 0 0 10.8zM8 2.6v10.8",
+  empty: "M2.6 9.4l2-4.4h6.8l2 4.4v3H2.6zM2.6 9.4h3l.8 1.4h3.2l.8-1.4h3",
+  plus: "M8 3.5v9M3.5 8h9",
+};
+
+export function icon(name, { size = 16, cls = "" } = {}) {
+  const path = ICON_PATHS[name];
+  if (!path) return null;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.6");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", `ico-svg ${cls}`.trim());
+  for (const d of path.split("M").filter(Boolean)) {
+    const p = document.createElementNS(ns, "path");
+    p.setAttribute("d", `M${d}`);
+    svg.append(p);
+  }
+  return svg;
+}
+
+/** 给按钮之类「只有文字」的元素补一个前置图标（已有就不重复加）。 */
+export function withIcon(node, name, { size = 15 } = {}) {
+  const ico = icon(name, { size });
+  if (!node || !ico || node.querySelector(".ico-svg")) return node;
+  node.prepend(ico);
+  return node;
+}
+
 export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
   return node;

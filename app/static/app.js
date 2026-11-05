@@ -12,6 +12,7 @@ import * as move from "./move.js";
 import * as settings from "./settings.js";
 import * as theme from "./theme.js";
 import * as auth from "./auth.js";
+import * as palette from "./palette.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
 const loadedTabs = new Set();
@@ -29,6 +30,8 @@ function boot() {
   settings.init();
   theme.init();
   auth.init();
+  // 命令面板（Ctrl/⌘+K）：纯新增组件，别的模块通过 palette:* 事件响应
+  palette.initPalette();
 
   wireTabs();
   wireJobs();

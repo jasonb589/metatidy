@@ -1245,3 +1245,110 @@ details[open] > summary.lbl::before { content: "▾"; }
   .skeleton-row { animation: none !important; background: var(--bg-2); }
   .spinner { animation-duration: 900ms !important; animation-iteration-count: infinite !important; }
 }
+
+/* ===========================================================================
+   14. 命令面板（Ctrl/⌘+K）
+   =========================================================================== */
+
+.palette-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh var(--s4) var(--s4);
+  background: var(--scrim);
+  backdrop-filter: blur(3px);
+  animation: palette-in var(--t) var(--ease-out) both;
+}
+@keyframes palette-in { from { opacity: 0; } to { opacity: 1; } }
+
+.palette {
+  width: min(680px, 100%);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r4);
+  box-shadow: var(--e3), var(--hairline-top);
+  overflow: hidden;
+  animation: palette-box var(--t-slow) var(--ease-spring) both;
+}
+@keyframes palette-box {
+  from { opacity: 0; transform: translateY(-8px) scale(0.99); }
+  to { opacity: 1; transform: none; }
+}
+
+.palette-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-3);
+}
+.palette-head input {
+  border: none;
+  background: transparent;
+  height: 34px;
+  padding: 0;
+  font-size: 14px;
+  color: var(--fg);
+}
+.palette-head input:focus { box-shadow: none; background: transparent; border-color: transparent; }
+.palette-head input::placeholder { color: var(--fg-3); }
+
+.palette-body { overflow: auto; padding: var(--s2); }
+.palette-list { display: flex; flex-direction: column; gap: 2px; }
+
+.palette-item {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 1px solid transparent;
+  border-radius: var(--r2);
+  background: transparent;
+  color: var(--fg-2);
+  font: 400 13px/1.4 var(--font);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out);
+}
+.palette-item .palette-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-item .palette-hint { flex: none; font-size: 11px; color: var(--fg-3); }
+.palette-item.is-active { background: var(--accent-grad-soft); border-color: var(--accent-line); color: var(--fg); }
+
+.palette-empty { padding: var(--s4); text-align: center; color: var(--fg-3); font-size: 12px; }
+
+.palette-foot {
+  display: flex;
+  gap: var(--s4);
+  padding: var(--s2) var(--s4);
+  border-top: 1px solid var(--line);
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.palette-key { display: inline-flex; align-items: center; gap: 4px; }
+
+/* 顶栏里的入口按钮 */
+.btn-palette { gap: 6px; color: var(--fg-3); }
+.btn-palette:hover:not(:disabled) { color: var(--fg); }
+
+kbd {
+  font: 500 10px/1 var(--mono);
+  padding: 3px 5px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r1);
+  background: var(--bg-2);
+  color: var(--fg-2);
+}
+
+/* 内联图标：跟文字对齐、不被压扁 */
+.ico-svg { flex: none; vertical-align: -2px; }
+.btn .ico-svg { margin-right: 1px; }
