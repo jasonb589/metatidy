@@ -56,6 +56,7 @@ export function init() {
     scanFast: ui.byId("scan-fast"),
     scanPrune: ui.byId("scan-prune"),
     scanProgress: ui.byId("scan-progress"),
+    scanRoot: ui.byId("scan-root"),
     updated: ui.byId("tracks-updated"),
     total: ui.byId("tracks-total"),
     reload: ui.byId("btn-tracks-reload"),
@@ -555,13 +556,15 @@ async function startScan() {
   const fast = nodes.scanFast.checked;
   const full = nodes.scanFull.checked;
   const prune = nodes.scanPrune.checked;
+  // 留空 = 整个库；填子目录（相对音乐目录）就只走这一支，新增专辑时不用全库重走
+  const root = (nodes.scanRoot.value || "").trim();
   nodes.scanBtn.disabled = true;
   nodes.scanBtn.textContent = "扫描中…";
   const progress = ui.createProgress(nodes.scanProgress, {
-    label: fast ? "快速扫描（只建索引）" : full ? "全量扫描" : "扫描",
+    label: `${fast ? "快速扫描（只建索引）" : full ? "全量扫描" : "扫描"}${root ? ` · 只扫 ${root}` : ""}`,
   });
   try {
-    const { job_id: jobId } = await api.scan({ full, prune, fast });
+    const { job_id: jobId } = await api.scan({ full, prune, fast, root });
     const job = await pollJob(jobId, { onTick: (tick) => progress.update(tick) });
     progress.finish(job);
     if (job.state === "error") {
@@ -570,7 +573,7 @@ async function startScan() {
       let summary = "";
       try {
         const result = JSON.parse(job.result || "{}");
-        summary = `扫描 ${result.scanned ?? 0} 个文件（新增 ${result.added ?? 0}，更新 ${result.updated ?? 0}，跳过 ${result.skipped ?? 0}，移除 ${result.removed ?? 0}）`;
+        summary = `扫描 ${result.scanned ?? 0} 个文件（新增 ${result.added ?? 0}，更新 ${result.updated ?? 0}，跳过 ${result.skipped ?? 0}，移除 ${result.removed ?? 0}）${root ? `；范围 ${root}` : ""}`;
       } catch {
         summary = "扫描完成";
       }
@@ -586,6 +589,7 @@ async function startScan() {
   } finally {
     nodes.scanBtn.disabled = false;
     nodes.scanBtn.textContent = "扫描曲库";
+    nodes.scanRoot.value = "";
     emit("status:refresh");
     await refresh();
     emit("jobs:refresh");

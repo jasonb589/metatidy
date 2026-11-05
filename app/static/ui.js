@@ -398,9 +398,10 @@ export function diffView(items = []) {
 export function createProgress(host, { label = "任务" } = {}) {
   const bar = el("i");
   const barWrap = el("div", { class: "progress-bar" }, [bar]);
-  const count = el("span", { class: "count", text: "0/0" });
+  const count = el("span", { class: "count", text: "" });
   const msg = el("span", { class: "msg", text: "等待后端开始…" });
-  const meta = el("div", { class: "progress-meta" }, [count, msg]);
+  const eta = el("span", { class: "eta", text: "" });
+  const meta = el("div", { class: "progress-meta" }, [count, msg, eta]);
   const status = el("div", { class: "hint" });
   const node = el("div", { class: "progress" }, [
     el("div", { class: "row tight" }, [el("span", { class: "lbl", text: label, style: { marginBottom: "0" } }), status]),
@@ -413,17 +414,69 @@ export function createProgress(host, { label = "任务" } = {}) {
   host.append(node);
 
   let lastJob = null;
+  let startedAt = 0; // 任务第一次回调的时间
+  let phaseStart = 0; // 当前阶段开始的时间
+  let phaseDone = 0; // 当前阶段开始时的 done
+  let phaseKey = ""; // 阶段标识（由 done/total 推出来，不去解析后端文案）
+
+  /** 由 done/total 推出阶段：枚举目录 → 读取文件 → 收尾。 */
+  function phaseOf(total, done) {
+    if (!total) return "枚举目录";
+    return done >= total ? "收尾" : "读取文件";
+  }
+
+  /** 秒数说成人话。 */
+  function humanDuration(seconds) {
+    const s = Math.max(0, Math.round(seconds));
+    if (s < 60) return `${s} 秒`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} 分 ${s % 60} 秒`;
+    return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  }
+
+  /**
+   * 预估剩余时间。
+   *
+   * 用**当前阶段**的速率算（阶段切换时重置基准）：枚举阶段没有总数，只能给速率；
+   * 读取阶段前几秒样本太少，会给出很离谱的数字，所以样本不足时只报「已用时」。
+   */
+  function estimateText(now, total, done) {
+    const elapsed = (now - startedAt) / 1000;
+    if (elapsed < 3) return "";
+    const span = (now - phaseStart) / 1000;
+    const progressed = done - phaseDone;
+    if (!total) {
+      if (span < 3 || progressed <= 0) return `已用时 ${humanDuration(elapsed)}`;
+      return `已用时 ${humanDuration(elapsed)} · 约 ${Math.round(progressed / span)} 项/秒`;
+    }
+    if (span < 3 || progressed < 5) return `已用时 ${humanDuration(elapsed)}`;
+    const rate = progressed / span;
+    if (!(rate > 0)) return `已用时 ${humanDuration(elapsed)}`;
+    const remain = (total - done) / rate;
+    if (!Number.isFinite(remain) || remain < 1) return `已用时 ${humanDuration(elapsed)}`;
+    return `已用时 ${humanDuration(elapsed)} · 剩余约 ${humanDuration(remain)}`;
+  }
 
   return {
     node,
     update(job) {
       lastJob = job;
+      const now = Date.now();
+      if (!startedAt) startedAt = now;
       const total = Number(job.total) || 0;
       const done = Number(job.done) || 0;
-      count.textContent = total ? `${done}/${total}` : `${done}`;
-      status.textContent = job.state === "running" ? "进行中" : job.state === "done" ? "已完成" : "出错";
+      const phase = phaseOf(total, done);
+      if (phase !== phaseKey) {
+        phaseKey = phase;
+        phaseStart = now;
+        phaseDone = done;
+      }
+      // 计数槽：读取阶段是「已完成/总数」，枚举阶段是目录项数（阶段文字会说明是哪个）
+      count.textContent = total ? `${done}/${total}` : done ? `${done} 项` : "";
+      status.textContent = job.state === "running" ? phase : job.state === "done" ? "已完成" : "出错";
       status.className = `hint ${job.state === "error" ? "hint-err" : job.state === "done" ? "hint-ok" : ""}`;
       msg.textContent = job.message || job.error || "";
+      eta.textContent = job.state === "running" ? estimateText(now, total, done) : "";
       if (total > 0) {
         barWrap.classList.remove("indet");
         const percent = Math.max(0, Math.min(100, (done / total) * 100));
@@ -440,21 +493,20 @@ export function createProgress(host, { label = "任务" } = {}) {
     finish(job) {
       if (job) this.update(job);
       barWrap.classList.remove("indet");
-      const total = Number(job && job.total) || 0;
-      const done = Number(job && job.done) || 0;
       if (job && job.state === "error") {
         bar.style.width = "100%";
         bar.style.background = "var(--err)";
         status.textContent = "失败";
         status.className = "hint hint-err";
+        eta.textContent = "";
         return;
       }
       // 完成后不再展示 done/total：后端进度写库有节流（400ms/20 项），
       // 结束时记录的 done 可能小于 total，显示成比例反而误导。
       count.textContent = "";
+      eta.textContent = "";
       bar.style.width = "100%";
       bar.style.background = "var(--ok)";
-      void done;
     },
     context: () => lastJob,
   };

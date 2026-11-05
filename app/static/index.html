@@ -77,6 +77,10 @@
           <label class="check"><input type="checkbox" id="scan-fast"><span>快速扫描（只建索引、不读文件，云盘必用）</span></label>
           <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫（忽略缓存，慢）</span></label>
           <label class="check"><input type="checkbox" id="scan-prune" checked><span>清理已删除的文件记录</span></label>
+          <label class="row-inline flex-1" title="只扫描这个子目录（相对音乐目录），留空 = 整个库。新增几张专辑时用它，就不用把整个库再走一遍。">
+            <span class="lbl">只扫这个子目录</span>
+            <input type="text" id="scan-root" placeholder="留空 = 整个库，例如 中文/浅影阿" autocomplete="off">
+          </label>
           <span class="hint">扫描只更新索引，不改动音频标签。</span>
           <div class="spacer"></div>
           <span class="hint" id="tracks-updated"></span>

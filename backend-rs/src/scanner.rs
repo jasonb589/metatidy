@@ -110,6 +110,42 @@ pub fn collect_audio_files(root: &Path, counters: Option<&WalkCounters>) -> Vec<
     out
 }
 
+/// 解析「只扫这个子目录」的输入。
+///
+/// 空 → 整个音乐目录；相对路径 → 相对音乐目录；绝对路径 → 原样。
+/// 无论哪种都必须落在音乐目录内：否则会把库外的目录也建进索引，
+/// 而 prune 又是按「本次扫到的文件」去清理索引，后果很难收拾。
+pub fn resolve_scan_root(music_dir: &Path, raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(music_dir.to_path_buf());
+    }
+    let candidate = PathBuf::from(raw);
+    let joined = if candidate.is_absolute() {
+        candidate
+    } else {
+        music_dir.join(candidate)
+    };
+    // 归一化掉 `.` / `..`，避免 `中文/../..` 这种写法绕过下面的库内检查
+    let mut normalized = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let base = crate::models::path_key(music_dir);
+    let base = base.trim_end_matches(std::path::MAIN_SEPARATOR).to_string();
+    let key = crate::models::path_key(&normalized);
+    if key != base && !key.starts_with(&format!("{base}{}", std::path::MAIN_SEPARATOR)) {
+        return Err("扫描目录必须在音乐目录内".to_string());
+    }
+    Ok(normalized)
+}
+
 /// 从路径推断出来的字段（快速模式用）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PathDerived {
@@ -208,13 +244,15 @@ pub async fn scan(
                         counters.audio.load(Ordering::Relaxed),
                     );
                 }
+                // `done` 传目录项数：这样界面能显示「已枚举 N 项」并算出速率。
+                // `total` 仍然是 0 —— 没遍历完就不知道总数，进度条据此保持「不确定态」。
+                let entries = counters.entries.load(Ordering::Relaxed);
+                let audio = counters.audio.load(Ordering::Relaxed);
                 progress(
-                    0,
+                    entries,
                     0,
                     format!(
-                        "枚举中：已查看 {} 个目录项，找到 {} 个音频文件（这一步不读文件内容）",
-                        counters.entries.load(Ordering::Relaxed),
-                        counters.audio.load(Ordering::Relaxed),
+                        "枚举中：已查看 {entries} 个目录项，找到 {audio} 个音频文件（这一步不读文件内容）"
                     ),
                 );
             }
@@ -338,8 +376,21 @@ pub async fn scan(
     if opts.prune {
         let on_disk: HashSet<String> =
             files.iter().map(|p| crate::models::path_key(p)).collect();
+        // 只清理**本次扫描范围内**的索引。
+        //
+        // 以前是拿「全库已索引」减去「本次扫到的文件」，于是只扫一个子目录时，
+        // 子树之外的曲目会被整体当成「已删除」而删掉索引 —— 而「清理已删除的文件记录」
+        // 在界面上默认就是勾选的，所以这个坑很容易踩到。
+        // 扫整个库时 root 就是库根，行为与以前完全一致。
+        let root_key = crate::models::path_key(&opts.root);
+        let base = root_key.trim_end_matches(std::path::MAIN_SEPARATOR);
+        let scope_prefix = format!("{base}{}", std::path::MAIN_SEPARATOR);
         let indexed = repo::all_paths(pool).await?;
-        let gone: Vec<String> = indexed.into_iter().filter(|p| !on_disk.contains(p)).collect();
+        let gone: Vec<String> = indexed
+            .into_iter()
+            .filter(|p| p == base || p.starts_with(&scope_prefix))
+            .filter(|p| !on_disk.contains(p))
+            .collect();
         removed = repo::delete_paths(pool, &gone).await?;
     }
 
@@ -498,6 +549,36 @@ mod tests {
         assert_eq!(split_track_prefix("2008"), (String::new(), String::new()));
         // 纯英文标题不拆
         assert_eq!(split_track_prefix("Hello"), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn scan_root_must_stay_inside_library() {
+        let base = std::env::temp_dir().join("metatidy-lib");
+        // 空 / 纯空白 → 整个库
+        assert_eq!(resolve_scan_root(&base, "").unwrap(), base);
+        assert_eq!(resolve_scan_root(&base, "   ").unwrap(), base);
+        // 相对路径 → 相对库根（界面上让用户直接填「中文/浅影阿」这种）
+        assert_eq!(
+            resolve_scan_root(&base, "中文/浅影阿").unwrap(),
+            base.join("中文").join("浅影阿")
+        );
+        // 库内的绝对路径 → 原样
+        assert_eq!(
+            resolve_scan_root(&base, &base.join("中文").to_string_lossy()).unwrap(),
+            base.join("中文")
+        );
+        // 库内绕一圈 → 归一化后仍在库内
+        assert_eq!(
+            resolve_scan_root(&base, "中文/浅影阿/../陈奕迅").unwrap(),
+            base.join("中文").join("陈奕迅")
+        );
+        // 往上走 → 拒绝
+        assert!(resolve_scan_root(&base, "..").is_err());
+        assert!(resolve_scan_root(&base, "../../etc").is_err());
+        assert!(resolve_scan_root(&base, "中文/../../..").is_err());
+        // 库外的绝对路径 → 拒绝
+        let outside = base.parent().unwrap().join("metatidy-outside");
+        assert!(resolve_scan_root(&base, &outside.to_string_lossy()).is_err());
     }
 
     #[test]

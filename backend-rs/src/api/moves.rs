@@ -302,12 +302,11 @@ pub async fn scan(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let prune = body_bool(&payload, "prune", true)?;
     // Rust 扩展：`fast` 只建索引不打开文件（Python 没有这个开关）
     let fast = body_bool(&payload, "fast", false)?;
+    // 「只扫这个子目录」：留空 = 整个库；相对路径按库根解析；越界直接 400。
+    // 有了它，新增几张专辑时不用把整个库再走一遍（云盘上遍历目录才是慢的那一步）。
     let root = body_str(&payload, "root", "").trim().to_string();
-    let root = if root.is_empty() {
-        state.config.music_dir.clone()
-    } else {
-        PathBuf::from(root)
-    };
+    let root = crate::scanner::resolve_scan_root(&state.config.music_dir, &root)
+        .map_err(ApiError::bad_request)?;
     let workers = match payload.get("workers") {
         None | Some(Value::Null) => state.config.scan_workers,
         Some(_) => body_i64(&payload, "workers", state.config.scan_workers as i64)?.max(1) as usize,

@@ -802,6 +802,7 @@ mark.hl { background: var(--accent-soft); color: inherit; border-radius: 2px; pa
 @keyframes indet { from { transform: translateX(-110%); } to { transform: translateX(340%); } }
 .progress-meta { display: flex; gap: var(--s2); align-items: baseline; font-size: 11.5px; color: var(--fg-3); min-width: 0; }
 .progress-meta .msg { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-meta .eta { margin-left: auto; color: var(--fg-3); white-space: nowrap; }
 
 /* 结果块（失败清单等） */
 .result-block { display: flex; flex-direction: column; gap: var(--s2); }
