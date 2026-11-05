@@ -240,7 +240,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { box-shadow: 
   left: -9999px;
   top: 0;
   z-index: 100;
-  background: var(--accent);
+  background: var(--accent-grad);
   color: var(--on-accent);
   padding: var(--s2) var(--s3);
   border-radius: 0 0 var(--r2) 0;
@@ -356,8 +356,8 @@ img.brand-mark { background: none; padding: 0; object-fit: contain; }
     color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out),
     transform var(--t-fast) var(--ease-out);
 }
-.btn:hover:not(:disabled) { background: var(--bg-4); border-color: var(--line-2); transform: translateY(-1px); box-shadow: var(--e1), var(--hairline-top); }
-.btn:active:not(:disabled) { background: var(--bg-2); transform: translateY(0); box-shadow: var(--hairline-top); }
+.btn:hover:not(:disabled) { background-color: var(--bg-4); border-color: var(--line-2); transform: translateY(-1px); box-shadow: var(--e1), var(--hairline-top); }
+.btn:active:not(:disabled) { background-color: var(--bg-2); transform: translateY(0); box-shadow: var(--hairline-top); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .btn-primary {
@@ -374,7 +374,7 @@ img.brand-mark { background: none; padding: 0; object-fit: contain; }
 .btn-danger:hover:not(:disabled) { background: var(--err-soft); border-color: var(--err); color: var(--err-fg); filter: brightness(1.12); }
 
 .btn-ok { background: var(--ok-soft); border-color: var(--ok-line); color: var(--ok-fg); }
-.btn-ok:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-ok:hover:not(:disabled) { filter: brightness(1.12); background-color: var(--ok-soft); }
 
 .btn-ghost { background: transparent; border-color: transparent; color: var(--fg-2); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-3); color: var(--fg); border-color: var(--line); }
@@ -382,6 +382,10 @@ img.brand-mark { background: none; padding: 0; object-fit: contain; }
 .btn-sm { height: var(--h-ctl-sm); padding: 0 var(--s2); font-size: 11.5px; }
 .btn-lg { height: var(--h-ctl-lg); padding: 0 var(--s4); font-size: 13px; }
 .btn-icon { padding: 0 var(--s2); }
+
+/* .btn 自带 box-shadow，且规则比 :focus-visible 更靠后 —— 同特异性下会把焦点环盖掉，补回来 */
+.btn:focus-visible { box-shadow: var(--ring), var(--hairline-top); }
+.btn-primary:focus-visible { box-shadow: var(--ring), var(--hairline-top), var(--glow-soft); }
 
 input[type="text"], input[type="number"], input[type="search"], input[type="password"],
 select, textarea {
@@ -522,7 +526,7 @@ label.check span { white-space: nowrap; overflow: hidden; text-overflow: ellipsi
 .badge-err { background: var(--err-soft); border-color: var(--err-line); color: var(--err-fg); }
 .badge-info { background: var(--info-soft); border-color: var(--info-line); color: var(--info-fg); }
 .badge-accent { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent-2); }
-.badge-mute { color: var(--fg-3); }
+.badge-mute { color: var(--fg-3); background: var(--bg-2); }
 .badge-mono { font-family: var(--mono); }
 .count-chip { font-variant-numeric: tabular-nums; }
 
@@ -708,7 +712,7 @@ td.path, .path-cell { font-family: var(--mono); font-size: 11px; color: var(--fg
   vertical-align: middle;
 }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.thumb.ph { color: var(--fg-3); font-size: 9px; letter-spacing: -0.3px; }
+.thumb.ph { color: var(--fg-3); background: var(--bg-2); font-size: 9px; letter-spacing: -0.3px; }
 .thumb-lg { width: 72px; height: 72px; border-radius: var(--r2); }
 .thumb-lg.ph { font-size: 10px; }
 
@@ -1019,7 +1023,7 @@ body:has(.drawer[data-open="true"]) .toast-stack { right: calc(400px + var(--s4)
 
 .workbench {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr) 360px;
+  grid-template-columns: 320px minmax(0, 1fr) 400px;
   gap: var(--s3);
   align-items: start;
 }
@@ -1436,3 +1440,20 @@ table.data tbody tr.is-active {
 
 /* 空状态用真图标时颜色跟主色走（外框尺寸由 .empty .ico 的 44px 盒子决定） */
 .empty .ico .ico-svg { color: var(--accent-2); }
+
+/* 不支持 backdrop-filter 的环境（旧浏览器）里，玻璃面会退化成半透明色块、让底层文字
+   成块透出来 —— 这类环境改用不透明底色，宁可没有玻璃感也不要糊在一起 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .drawer, .palette { background: var(--bg-1); }
+}
+
+/* 还没预览计划时「移动计划」卡片是一块空白板 —— 给一句引导；
+   一旦 JS 往 #move-plan-state 里塞了内容，:empty 自然失效 */
+#move-plan-state:empty::before {
+  content: "还没有计划：选好范围后点「预览计划」，这里会按模板列出 源路径 → 目标路径 的差异。";
+  display: block;
+  padding: var(--s2) 0;
+  color: var(--fg-3);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
