@@ -12,6 +12,7 @@ import * as ui from "./ui.js";
 import {
   state,
   emit,
+  on,
   isSelected,
   toggleSelect,
   selectRows,
@@ -139,6 +140,55 @@ export function init() {
     resetFilters();
     refresh();
   });
+
+  // 恢复上次的筛选/排序/每页，并挂上表格键盘导航
+  loadPrefs();
+  wireTableKeys();
+
+  // 命令面板（Ctrl/⌘+K）只发事件，真正做事在这里
+  on("palette:scan", (payload = {}) => {
+    if (nodes.scanBtn.disabled) return; // 已有扫描在跑，别叠第二个
+    // 面板给的是明确模式，设成互斥，结果才可预期
+    if (payload.fast) {
+      nodes.scanFast.checked = true;
+      nodes.scanFull.checked = false;
+    }
+    if (payload.full) {
+      nodes.scanFull.checked = true;
+      nodes.scanFast.checked = false;
+    }
+    if (state.tab !== "tracks") location.hash = "#tracks";
+    startScan();
+  });
+  on("palette:reload", () => refresh());
+  on("palette:clear-filters", () => {
+    resetFilters();
+    refresh();
+  });
+  on("palette:focus-search", () => {
+    const focus = () => {
+      nodes.q.focus();
+      nodes.q.select();
+    };
+    // 切页签要先等 hashchange → activateTab 把面板显出来，隐藏元素聚焦会被忽略
+    if (state.tab === "tracks") focus();
+    else {
+      location.hash = "#tracks";
+      setTimeout(focus, 60);
+    }
+  });
+  on("palette:track", (row) => {
+    if (!row) return;
+    const open = () => {
+      const fresh = state.tracks.items.find((item) => String(item.id) === String(row.id));
+      openEdit([fresh || row]);
+    };
+    if (state.tab === "tracks") open();
+    else {
+      location.hash = "#tracks";
+      setTimeout(open, 60);
+    }
+  });
   nodes.reload.addEventListener("click", () => refresh());
   nodes.scanBtn.addEventListener("click", startScan);
 
@@ -224,6 +274,149 @@ function syncControls() {
   nodes.fNoAlbum.checked = state.tracks.filters.no_album;
 }
 
+/* ------------------------------------------------- 筛选 chips / 偏好 / 键盘 */
+
+/** 筛选键 → 中文名（chips 上显示）。 */
+const FILTER_LABELS = {
+  language: "语言",
+  albumtype: "专辑类型",
+  genre: "流派",
+  year: "年份",
+  missing_cover: "缺封面",
+  missing_lyrics: "缺歌词",
+  no_artist: "无歌手",
+  no_album: "无专辑",
+};
+
+const PREFS_KEY = "metatidy.tracks.prefs";
+
+/** 把已启用的筛选条件画成可单个移除的 chips。 */
+function renderFilterChips() {
+  const box = ui.byId("filter-chips");
+  if (!box) return;
+  const active = FILTER_KEYS.filter((key) => {
+    const value = state.tracks.filters[key];
+    return typeof value === "boolean" ? value : Boolean(String(value || "").trim());
+  });
+  ui.clear(box);
+  box.hidden = active.length === 0;
+  active.forEach((key) => {
+    const value = state.tracks.filters[key];
+    const text =
+      typeof value === "boolean"
+        ? FILTER_LABELS[key] || key
+        : `${FILTER_LABELS[key] || key}：${value}`;
+    const x = ui.el("button", { class: "x", type: "button", title: "移除这个条件", text: "×" });
+    x.addEventListener("click", () => {
+      state.tracks.filters[key] = typeof value === "boolean" ? false : "";
+      syncControls();
+      state.tracks.page = 1;
+      refresh();
+    });
+    box.append(ui.el("span", { class: "filter-chip" }, [ui.el("b", { text }), x]));
+  });
+}
+
+/** 记住筛选 / 排序 / 每页，刷新后不丢。 */
+function savePrefs() {
+  try {
+    localStorage.setItem(
+      PREFS_KEY,
+      JSON.stringify({
+        q: state.tracks.q,
+        sort: state.tracks.sort,
+        order: state.tracks.order,
+        page_size: state.tracks.page_size,
+        filters: state.tracks.filters,
+      }),
+    );
+  } catch {
+    /* 隐私模式等场景写不了，忽略 */
+  }
+}
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (typeof saved.q === "string") state.tracks.q = saved.q;
+      if (typeof saved.sort === "string") state.tracks.sort = saved.sort;
+      if (saved.order === "asc" || saved.order === "desc") state.tracks.order = saved.order;
+      if ([50, 100, 200].includes(Number(saved.page_size))) state.tracks.page_size = Number(saved.page_size);
+      FILTER_KEYS.forEach((key) => {
+        const value = saved.filters ? saved.filters[key] : undefined;
+        if (typeof value === "boolean" || typeof value === "string") state.tracks.filters[key] = value;
+      });
+    }
+  } catch {
+    /* 存坏了就当没有 */
+  }
+  syncControls();
+}
+
+/** 键盘导航：`/` 聚焦搜索、`↑↓` 选行、`Enter` 打开编辑、空格勾选、`Esc` 取消。 */
+function wireTableKeys() {
+  let activeRow = null;
+  const rows = () => [...nodes.tbody.querySelectorAll("tr")];
+
+  function setActive(row) {
+    rows().forEach((r) => r.classList.remove("is-active"));
+    activeRow = row || null;
+    if (activeRow) {
+      activeRow.classList.add("is-active");
+      activeRow.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function move(delta) {
+    const list = rows();
+    if (!list.length) return;
+    const index = list.indexOf(activeRow);
+    const next =
+      index === -1
+        ? delta > 0
+          ? 0
+          : list.length - 1
+        : Math.min(list.length - 1, Math.max(0, index + delta));
+    setActive(list[next]);
+  }
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const tag = (target && target.tagName) || "";
+    const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || Boolean(target && target.isContentEditable);
+    // 已聚焦按钮/链接时不抢方向键与空格，让它们保持原生行为
+    const interactive = typing || tag === "BUTTON" || tag === "A";
+
+    if (event.key === "/" && !typing) {
+      event.preventDefault();
+      nodes.q.focus();
+      nodes.q.select();
+      return;
+    }
+    if (event.key === "Escape" && activeRow) {
+      setActive(null);
+      return;
+    }
+    if (interactive) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      move(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      move(-1);
+    } else if (event.key === " " && activeRow) {
+      event.preventDefault();
+      activeRow.querySelector('input[type="checkbox"]')?.click();
+    } else if (event.key === "Enter" && activeRow) {
+      event.preventDefault();
+      const btn = activeRow.querySelector("td:last-child button") || activeRow.querySelector("button");
+      btn?.click();
+    }
+  });
+}
+
 /* --------------------------------------------------------------- 数据 */
 
 export async function refresh() {
@@ -258,6 +451,8 @@ export async function refresh() {
   renderTable();
   renderPager();
   renderSelectionBar();
+  renderFilterChips();
+  savePrefs();
 }
 
 /** 库统计条 + 语言/类型下拉选项（依赖 /api/status）。 */
@@ -266,19 +461,19 @@ export function onStatus(status) {
   const filters = state.tracks.filters;
 
   const cards = [
-    { key: "tracks", label: "歌曲", value: ui.fmtNum(stats.tracks || 0) },
-    { key: "artists", label: "歌手", value: ui.fmtNum(stats.artists || 0) },
-    { key: "albums", label: "专辑", value: ui.fmtNum(stats.albums || 0) },
-    { key: "missing_cover", label: "缺封面", value: ui.fmtNum(stats.missing_cover || 0), filter: "missing_cover", miss: true },
-    { key: "missing_lyrics", label: "缺歌词", value: ui.fmtNum(stats.missing_lyrics || 0), filter: "missing_lyrics", miss: true },
-    { key: "bytes", label: "占用", value: ui.fmtBytes(stats.bytes || 0) },
+    { key: "tracks", label: "歌曲", value: ui.fmtNum(stats.tracks || 0), ico: "music" },
+    { key: "artists", label: "歌手", value: ui.fmtNum(stats.artists || 0), ico: "artist" },
+    { key: "albums", label: "专辑", value: ui.fmtNum(stats.albums || 0), ico: "album" },
+    { key: "missing_cover", label: "缺封面", value: ui.fmtNum(stats.missing_cover || 0), filter: "missing_cover", miss: true, ico: "cover" },
+    { key: "missing_lyrics", label: "缺歌词", value: ui.fmtNum(stats.missing_lyrics || 0), filter: "missing_lyrics", miss: true, ico: "lyrics" },
+    { key: "bytes", label: "占用", value: ui.fmtBytes(stats.bytes || 0), ico: "disk" },
   ];
 
   ui.clear(nodes.strip);
   cards.forEach((card) => {
     const active = card.filter ? Boolean(filters[card.filter]) : false;
     const body = [
-      ui.el("span", { class: "k", text: card.label }),
+      ui.el("span", { class: "k" }, [ui.icon(card.ico, { size: 13 }), ui.el("span", { text: card.label })]),
       ui.el("span", { class: `v ${card.miss && Number(String(card.value).replace(/[^\d]/g, "")) > 0 ? "miss" : ""}`.trim(), text: card.value }),
     ];
     if (card.filter) {

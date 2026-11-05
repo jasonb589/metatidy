@@ -1352,3 +1352,72 @@ kbd {
 /* 内联图标：跟文字对齐、不被压扁 */
 .ico-svg { flex: none; vertical-align: -2px; }
 .btn .ico-svg { margin-right: 1px; }
+
+/* ===========================================================================
+   15. 筛选 chips / 浮动批量条 / 图标细节
+   =========================================================================== */
+
+/* 已启用的筛选条件：可视化 + 单个移除 */
+.filter-chips { display: flex; flex-wrap: wrap; gap: var(--s1); }
+.filter-chips[hidden] { display: none; }
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 2px 0 var(--s2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+.filter-chip b { color: var(--fg); font-weight: 500; }
+.filter-chip .x {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-3);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  line-height: 1;
+}
+.filter-chip .x:hover { background: var(--bg-3); color: var(--fg); }
+
+/* 批量操作条：选中时浮在底部中间，不再藏在卡片里 */
+#selection-bar {
+  position: fixed;
+  left: 50%;
+  bottom: var(--s4);
+  transform: translateX(-50%);
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  max-width: min(760px, 94vw);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  box-shadow: var(--e3), var(--hairline-top);
+  animation: bar-in var(--t-slow) var(--ease-spring) both;
+}
+@keyframes bar-in {
+  from { opacity: 0; transform: translate(-50%, 10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+#selection-bar .lbl { margin-bottom: 0; white-space: nowrap; }
+
+/* 表格当前行（键盘导航）与统计格图标 */
+table.data tbody tr.is-active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--accent);
+}
+.stat .k .ico-svg { color: var(--accent-2); opacity: 0.9; }
