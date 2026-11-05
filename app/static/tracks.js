@@ -423,6 +423,8 @@ export async function refresh() {
   state.tracks.loading = true;
   state.tracks.error = "";
   renderTableStatus();
+  // 加载中先把骨架行铺上（已有旧数据时保持旧行，避免闪一下）
+  renderTable();
   const params = {
     q: state.tracks.q,
     page: state.tracks.page,
@@ -540,7 +542,7 @@ function renderTableStatus() {
   const stats = (state.status && state.status.stats) || {};
   if ((stats.tracks || 0) === 0) {
     nodes.tableStatus.append(
-      ui.emptyState("00", "曲库还是空的", "后端还没有索引到任何音频文件。扫描会遍历音乐目录并按 mtime 增量解析标签，不会改动文件。", [
+      ui.emptyState("music", "曲库还是空的", "后端还没有索引到任何音频文件。扫描会遍历音乐目录并按 mtime 增量解析标签，不会改动文件。", [
         ui.el("button", {
           type: "button",
           class: "btn btn-primary",
@@ -554,7 +556,7 @@ function renderTableStatus() {
   }
   if (!state.tracks.total) {
     nodes.tableStatus.append(
-      ui.emptyState("··", "没有匹配的曲目", "当前搜索或筛选条件下没有结果，试试放宽条件。", [
+      ui.emptyState("search", "没有匹配的曲目", "当前搜索或筛选条件下没有结果，试试放宽条件。", [
         ui.el("button", {
           type: "button",
           class: "btn",
@@ -576,6 +578,14 @@ function renderTable() {
   ui.clear(nodes.tbody);
   const rows = state.tracks.items;
   const fragment = document.createDocumentFragment();
+
+  // 首屏加载：先铺骨架行，别让表格空白或高度跳动
+  if (state.tracks.loading && !rows.length) {
+    ui.skeletonRows(8).forEach((tr) => fragment.append(tr));
+    nodes.tbody.append(fragment);
+    nodes.tableWrap.hidden = false; // 骨架行得看得见（空结果时容器本来是收起的）
+    return;
+  }
 
   rows.forEach((row, index) => {
     const tr = ui.el("tr", { dataset: { id: row.id } });

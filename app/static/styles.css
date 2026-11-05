@@ -684,7 +684,7 @@ table.data thead th.sortable { cursor: pointer; }
 table.data thead th.sortable:hover { color: var(--fg); background: var(--bg-3); }
 table.data thead th .sort-mark { color: var(--accent); margin-left: 3px; font-size: 10px; }
 table.data tbody tr { transition: background-color var(--t-fast) var(--ease-out); }
-table.data tbody tr:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+table.data tbody tr:hover:not(.skeleton-row) { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 table.data tbody tr[aria-selected="true"] { background: var(--accent-soft); }
 table.data tbody tr[aria-selected="true"]:hover { background: var(--accent-soft); }
 tr.enter { animation: row-in var(--t) var(--ease-spring) both; }
@@ -756,7 +756,7 @@ mark.hl { background: var(--accent-soft); color: inherit; border-radius: 2px; pa
 @keyframes spin { to { transform: rotate(360deg); } }
 .skeleton-row {
   height: var(--row-h);
-  background: linear-gradient(90deg, var(--bg-2), var(--bg-3) 40%, var(--bg-2));
+  background: linear-gradient(90deg, var(--bg-2) 0%, color-mix(in srgb, var(--bg-3), var(--fg-3) 30%) 45%, var(--bg-2) 100%);
   background-size: 200% 100%;
   animation: shimmer 1200ms linear infinite;
 }
@@ -1421,3 +1421,18 @@ table.data tbody tr.is-active {
   box-shadow: inset 2px 0 0 0 var(--accent);
 }
 .stat .k .ico-svg { color: var(--accent-2); opacity: 0.9; }
+
+/* ===========================================================================
+   16. 卡片标题图标 / 任务项 / 空状态图标 / 骨架行
+   =========================================================================== */
+
+/* 小标题带图标时保持图标与文字垂直居中 */
+.card-head h2 { display: inline-flex; align-items: center; gap: var(--s2); }
+.card-head h2 .ico-svg { color: var(--accent-2); flex: none; }
+
+/* 任务面板空态：图标 + 一行说明 */
+.jobs-empty { display: flex; align-items: center; gap: var(--s2); }
+.jobs-empty .ico-svg { color: var(--fg-3); flex: none; }
+
+/* 空状态用真图标时颜色跟主色走（外框尺寸由 .empty .ico 的 44px 盒子决定） */
+.empty .ico .ico-svg { color: var(--accent-2); }

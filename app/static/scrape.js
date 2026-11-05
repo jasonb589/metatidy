@@ -262,7 +262,7 @@ function renderPick() {
 
   if (!state.scrape.pickItems.length) {
     nodes.pickList.append(
-      ui.emptyState("··", state.scrape.pickQ ? "没有匹配的曲目" : "曲库还没有曲目", state.scrape.pickQ ? "换个关键词试试。" : "先到「曲库」页扫描一次。"),
+      ui.emptyState("search", state.scrape.pickQ ? "没有匹配的曲目" : "曲库还没有曲目", state.scrape.pickQ ? "换个关键词试试。" : "先到「曲库」页扫描一次。"),
     );
     ui.clear(nodes.pickPager);
     return;

@@ -35,6 +35,7 @@ function boot() {
 
   wireTabs();
   wireJobs();
+  decorateCardHeads();
 
   on("status:refresh", () => {
     loadStatus().catch(() => {});
@@ -232,6 +233,34 @@ function wireJobs() {
   ui.byId("jobs-refresh").addEventListener("click", () => refreshJobs().catch(() => {}));
 }
 
+/** 任务类型 → 图标名（未知类型不显示图标）。 */
+const JOB_KIND_ICONS = { scan: "scan", scrape: "search", move: "move" };
+
+/** 卡片小标题 → 图标名。纯装饰：文案对不上就不加，不影响任何功能。 */
+const CARD_ICONS = {
+  "最近任务": "jobs",
+  "曲目": "music",
+  "数据源": "search",
+  "批量刮削": "scan",
+  "目录层级模板": "move",
+  "范围与策略": "filter",
+  "移动计划": "move",
+  "后端状态": "info",
+  "整理与写入设置": "settings",
+  "歌手别名库": "artist",
+  "专辑别名库": "album",
+};
+
+/** 给每个卡片小标题补一个图标（幂等：已有图标就跳过）。 */
+function decorateCardHeads() {
+  document.querySelectorAll(".card-head h2").forEach((h2) => {
+    const name = CARD_ICONS[(h2.textContent || "").trim()];
+    if (!name || h2.querySelector(".ico-svg")) return;
+    const svg = ui.icon(name, { size: 14 });
+    if (svg) h2.prepend(svg);
+  });
+}
+
 async function refreshJobs() {
   const data = await api.jobs();
   const list = data.jobs || [];
@@ -245,14 +274,14 @@ async function refreshJobs() {
   const host = ui.byId("jobs-list");
   ui.clear(host);
   if (!list.length) {
-    host.append(ui.el("div", { class: "hint", text: "还没有任务记录：扫描、批量刮削、整理执行都会出现在这里。" }));
+      host.append(ui.el("div", { class: "hint jobs-empty" }, [ui.icon("jobs", { size: 14 }), ui.el("span", { text: "还没有任务记录：扫描、批量刮削、整理执行都会出现在这里。" })]));
     return;
   }
   list.forEach((job) => {
     const percent = job.total ? Math.round((job.done / job.total) * 100) : null;
     host.append(
       ui.el("div", { class: "row", style: { gap: "var(--s2)", alignItems: "baseline" } }, [
-        ui.el("span", { class: "badge", text: ui.jobKindLabel(job.kind) }),
+          ui.el("span", { class: "badge" }, [ui.icon(JOB_KIND_ICONS[job.kind], { size: 12 }), ui.el("span", { text: ui.jobKindLabel(job.kind) })]),
         ui.jobStateBadge(job.state),
         ui.el("span", { class: "hint mono", text: job.id }),
         ui.el("span", {

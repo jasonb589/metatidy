@@ -259,13 +259,32 @@ export function loadingLine(text = "加载中…") {
   return el("div", { class: "loading-line" }, [el("span", { class: "spinner", "aria-hidden": "true" }), el("span", { text })]);
 }
 
-export function emptyState(icon, title, description, actions = []) {
+export function emptyState(glyph, title, description, actions = []) {
+  // 第一个参数：图标名（渲染 SVG）或旧式两字文本（"00" / "··"）
+  const svg = ICON_PATHS[glyph] ? icon(glyph, { size: 30 }) : null;
   return el("div", { class: "empty" }, [
-    el("div", { class: "ico", "aria-hidden": "true", text: icon }),
+    svg
+      ? el("div", { class: "ico", "aria-hidden": "true" }, [svg])
+      : el("div", { class: "ico", "aria-hidden": "true", text: glyph }),
     el("h3", { text: title }),
     description ? el("p", { text: description }) : null,
     actions.length ? el("div", { class: "row", style: { justifyContent: "center" } }, actions) : null,
   ]);
+}
+
+/**
+ * 表格骨架屏占位行：首屏加载时铺几行，避免表格空白与高度跳动。
+ * 行高与微光动画由 .skeleton-row 负责（含 prefers-reduced-motion 降级）；
+ * 列数默认 11，与曲库表一致，空单元格让列宽保持原样。
+ */
+export function skeletonRows(count = 8, cols = 11) {
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    const cells = [];
+    for (let c = 0; c < cols; c += 1) cells.push(el("td", {}));
+    rows.push(el("tr", { class: "skeleton-row", "aria-hidden": "true" }, cells));
+  }
+  return rows;
 }
 
 /* ------------------------------------------------------------------ 提示条 */
