@@ -196,6 +196,8 @@ function render() {
     const row = document.createElement("button");
     row.type = "button";
     row.className = `palette-item${index === active ? " is-active" : ""}`;
+    // 读屏能播报当前高亮项（item 是原生 button，键盘导航不用额外处理）
+    if (index === active) row.setAttribute("aria-current", "true");
     const ico = icon(item.ico || "command", { size: 15 });
     if (ico) row.append(ico);
     const main = document.createElement("span");
