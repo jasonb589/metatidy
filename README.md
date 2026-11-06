@@ -332,6 +332,50 @@ tests/                audiofix.py（生成验收样本）+ e2e_acceptance.py（�
 
 ---
 
+## 自动增量扫描（现状：探测器就绪，自动扫描还没接）
+
+扫描**本身就是增量的**（按 mtime + size 跳过没变过的文件），缺的是「谁来判断该扫了」。
+打算用**文件变更监听**而不是定时轮询，因为 CloudDrive2 能把挂载盘接进操作系统的变更通知：
+
+> 官方文档：CloudDrive2 让挂载出来的云盘文件系统也支持这套机制。挂载盘里创建、删除、重命名或
+> 修改文件时，使用 FileSystemWatcher 或 FileNotify 的第三方程序都会收到通知。Emby、Jellyfin、
+> Plex 这类媒体管理程序，就是靠它来发现媒体目录里多了新片子。（该特性是 CD2 的 **PRO** 功能）
+
+**但同一页也写死了两条限制，所以先实测、再决定主路径：**
+
+1. **只有「经 CloudDrive2 发生」的改动才有事件** —— 云服务商不提供文件变更通知，你在网盘
+   官方 App / 网页里上传、删除、改名的文件，CD2 无从知晓，也发不出事件；
+2. 要让它发现，得在 CD2「我的文件」里**刷新那个网盘目录**（开了「目录缓存持久化」时，
+   刷新会拿新读到的目录内容与缓存做 diff，差异照常生成事件）。
+
+探测器是只读的、不需要数据库：
+
+```bash
+# ① 直接对容器里的库目录跑（不用进容器）
+docker exec -it metatidy /usr/local/bin/metatidy-server --watch-probe /music/中文/浅影阿
+
+# ② 加 --watch-probe-self-test：会在监听目录里创建并删除一个隐藏临时文件
+#    （.metatidy-watch-probe-*.tmp，非音频、不参与索引），用来确认「本机这一侧」链路是通的
+docker exec -it metatidy /usr/local/bin/metatidy-server \
+  --watch-probe /music/中文/浅影阿 --watch-probe-self-test
+```
+
+它会打印：目录数、宿主机的 `fs.inotify.max_user_watches`、以及实时收到的每个事件。按屏幕提示做
+三步实测（CD2 Web UI / WebDAV 放文件 → 网盘官方 App 或网页放文件 → 在 CD2 里刷新那个目录），
+就能确定该用「监听」还是「定时对账」。
+
+**注意 inotify watch 上限**：递归监听要为**每个目录**建一个 watch，库里有 6000+ 目录时，宿主机
+`fs.inotify.max_user_watches`（常见默认 8192）可能不够，不够会报 `ENOSPC`：
+
+```bash
+sysctl -w fs.inotify.max_user_watches=65536
+# NAS 上要写进 /etc/sysctl.conf 或开机任务，否则重启就丢
+```
+
+自动扫描接上之前，新增音乐后用曲库页的「**只扫这个子目录**」输入框扫那一个目录即可，几秒完事。
+
+---
+
 ## 已知限制
 
 - 支持写标签的格式：**mp3 / flac / m4a / ogg(oga/opus)**。wav/aiff/wma/ape 不写。

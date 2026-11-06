@@ -23,7 +23,7 @@ use crate::tagio;
 pub const AUDIO_EXTENSIONS: &[&str] = &[".mp3", ".flac", ".m4a", ".ogg", ".oga", ".opus"];
 
 /// 一定要跳过的系统/缓存目录。
-const SKIP_DIRS: &[&str] = &[
+pub const SKIP_DIRS: &[&str] = &[
     "@eaDir",
     "#recycle",
     "$RECYCLE.BIN",

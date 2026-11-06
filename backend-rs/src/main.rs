@@ -27,6 +27,7 @@ mod repo;
 mod scanner;
 mod scrapers;
 mod tagio;
+mod watcher;
 
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
@@ -75,6 +76,17 @@ async fn main() -> anyhow::Result<()> {
         let path = args.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--probe-tags 需要文件路径"))?;
         let tags = tag_probe(path)?;
         println!("{}", serde_json::to_string_pretty(&tags)?);
+        return Ok(());
+    }
+
+    // 子命令：文件变更监听探测器（只读；`--watch-probe-self-test` 会在监听目录里
+    // 创建并删除一个隐藏临时文件，用来确认「本机这一侧」的监听链路是通的）
+    if let Some(pos) = args.iter().position(|a| a == "--watch-probe") {
+        let dir = args
+            .get(pos + 1)
+            .ok_or_else(|| anyhow::anyhow!("--watch-probe 需要目录路径"))?;
+        let self_test = args.iter().any(|a| a == "--watch-probe-self-test");
+        watcher::run_watch_probe(std::path::Path::new(dir), self_test).await?;
         return Ok(());
     }
 
