@@ -5,6 +5,7 @@
  */
 
 const listeners = new Map();
+let selectionMembersRevision = 0;
 
 export function on(event, handler) {
   if (!listeners.has(event)) listeners.set(event, new Set());
@@ -132,23 +133,29 @@ export function rowSnapshot(row) {
 
 export function toggleSelect(row, force) {
   const id = Number(row.id);
+  const existed = state.selection.has(id);
   const want = force === undefined ? !state.selection.has(id) : Boolean(force);
   if (want) state.selection.set(id, rowSnapshot(row));
   else state.selection.delete(id);
+  if (existed !== want) selectionMembersRevision += 1;
   emit("selection:changed");
   return want;
 }
 
 export function selectRows(rows, want = true) {
+  let changed = false;
   rows.forEach((row) => {
     const id = Number(row.id);
+    if (state.selection.has(id) !== want) changed = true;
     if (want) state.selection.set(id, rowSnapshot(row));
     else state.selection.delete(id);
   });
+  if (changed) selectionMembersRevision += 1;
   emit("selection:changed");
 }
 
 export function clearSelection() {
+  if (state.selection.size) selectionMembersRevision += 1;
   state.selection.clear();
   emit("selection:changed");
 }
@@ -165,13 +172,18 @@ export function selectionCount() {
   return state.selection.size;
 }
 
+/** Membership only: fresh labels do not invalidate a review of the same IDs. */
+export function selectionRevision() { return selectionMembersRevision; }
+
 export function removeFromSelection(ids) {
   let changed = false;
   ids.forEach((id) => {
     if (state.selection.delete(Number(id))) changed = true;
   });
-  if (changed) emit("selection:changed");
+  if (changed) { selectionMembersRevision += 1; emit("selection:changed"); }
 }
+
+window.addEventListener("metatidy:unauthorized", clearSelection);
 
 export function currentTrackRow() {
   const id = state.currentTrackId;

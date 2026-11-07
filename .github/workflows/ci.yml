@@ -39,6 +39,7 @@ jobs:
           node tests/ui-review-queue.mjs
           node tests/ui-move-review.mjs
           node tests/ui-jobs-history.mjs
+          node tests/ui-selection-review.mjs
       - name: 保存桌面与手机预览
         if: always()
         uses: actions/upload-artifact@v4

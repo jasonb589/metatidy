@@ -4,7 +4,7 @@
 //! - `/api/tracks/preview`：只读文件算差异（`tagio::preview_update`），绝不落盘
 //! - `/api/tracks/apply`：真写标签 + 同步索引（写失败进 `failed[]`，不中断整批）
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 
 use axum::body::Bytes;
@@ -21,8 +21,8 @@ use crate::AppState;
 
 use super::{
     alias_table, apply_aliases, bad_kind, body_field_map, body_ids, changes_json, fields_json,
-    full_track_json, light_track_json, path_i64, prepare_fields, raw_tags_json, ApiError, ApiResult,
-    RawQuery, PREVIEW_DISPLAY_LIMIT,
+    full_track_json, light_track_json, path_i64, prepare_fields, raw_tags_json, unique_ids, ApiError,
+    ApiResult, RawQuery, PREVIEW_DISPLAY_LIMIT,
 };
 
 /// `/api/tracks`：只查索引的分页列表。
@@ -85,6 +85,80 @@ pub async fn list_tracks(
         "pages": page.pages,
         "items": items,
     })))
+}
+
+/// Resolve an explicit selection against PostgreSQL only. Missing index rows
+/// remain visible in their original position; this never stats an audio path.
+pub async fn selection(State(state): State<AppState>, body: Bytes) -> ApiResult {
+    let payload = super::parse_body(&body)?;
+    let ids = unique_ids(body_ids(&payload, "ids")?);
+    let (page, page_size, pages, range) = selection_page(&payload, ids.len())?;
+    let total = ids.len() as i64;
+    let page_ids = &ids[range];
+
+    let mut transaction = state.db.begin().await.map_err(anyhow::Error::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let found_total: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tracks WHERE id = ANY($1) AND id > 0")
+            .bind(&ids)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(anyhow::Error::from)?;
+    let tracks: Vec<Track> = sqlx::query_as(&format!(
+        "SELECT {} FROM tracks WHERE id = ANY($1) AND id > 0",
+        repo::TRACK_COLUMNS,
+    ))
+    .bind(page_ids)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(anyhow::Error::from)?;
+    transaction.commit().await.map_err(anyhow::Error::from)?;
+    let tracks: HashMap<_, _> = tracks.into_iter().map(|track| (track.id, track)).collect();
+    let items = selection_items(page_ids, &tracks);
+    Ok(Json(json!({
+        "total": total, "selected_total": total, "found_total": found_total,
+        "missing_total": total - found_total, "page": page, "page_size": page_size,
+        "pages": pages, "items": items,
+    })))
+}
+
+fn selection_page(
+    payload: &serde_json::Map<String, Value>,
+    total: usize,
+) -> Result<(i64, i64, i64, std::ops::Range<usize>), ApiError> {
+    let page_size = super::body_i64(payload, "page_size", 100)?;
+    if !(1..=200).contains(&page_size) {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["body", "page_size"],
+            "每页已选曲目数须为 1–200",
+            json!(page_size),
+            Some(json!({"ge": 1, "le": 200})),
+        ));
+    }
+    let requested = super::body_i64(payload, "page", 1)?;
+    let total = total as i64;
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / page_size + 1
+    };
+    let page = requested.clamp(1, pages.max(1));
+    let start = ((page - 1) * page_size) as usize;
+    let end = start.saturating_add(page_size as usize).min(total as usize);
+    Ok((page, page_size, pages, start..end))
+}
+
+fn selection_items(ids: &[i64], tracks: &HashMap<i64, Track>) -> Vec<Value> {
+    ids.iter()
+        .map(|id| match tracks.get(id) {
+            Some(track) => json!({"id": id, "status": "found", "track": light_track_json(track)}),
+            None => json!({"id": id, "status": "missing", "track": Value::Null}),
+        })
+        .collect()
 }
 
 /// `/api/tracks/{track_id}`：整行 + `file_exists`。
@@ -159,7 +233,7 @@ pub(super) fn prepare_update_fields(
 /// `POST /api/tracks/preview`：差异预览（只读文件）。
 pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = super::parse_body(&body)?;
-    let ids = body_ids(&payload, "ids")?;
+    let ids = unique_ids(body_ids(&payload, "ids")?);
     if ids.is_empty() {
         return Err(ApiError::bad_request("至少选择一首"));
     }
@@ -177,6 +251,8 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
     fields = apply_aliases(&fields, &artist_alias, &album_alias);
 
     let truncated = ids.len() > PREVIEW_DISPLAY_LIMIT;
+    let indexed = indexed_ids(&state, &ids).await?;
+    let index_missing_ids: Vec<_> = ids.iter().copied().filter(|id| !indexed.contains(id)).collect();
     let selected: Vec<i64> = ids.iter().take(PREVIEW_DISPLAY_LIMIT).copied().collect();
     let tracks = fetch_by_ids(&state, &selected).await?;
 
@@ -228,13 +304,17 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
         "items": items,
         "changed_fields": changed_total,
         "truncated": truncated,
+        "selected_total": ids.len(),
+        "previewed_total": selected.len(),
+        "index_missing_total": index_missing_ids.len(),
+        "index_missing_ids": index_missing_ids,
     })))
 }
 
 /// `POST /api/tracks/apply`：真写标签 + 同步索引。
 pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = super::parse_body(&body)?;
-    let ids = body_ids(&payload, "ids")?;
+    let ids = unique_ids(body_ids(&payload, "ids")?);
     if ids.is_empty() {
         return Err(ApiError::bad_request("至少选择一首"));
     }
@@ -257,9 +337,12 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let mut items: Vec<Value> = Vec::new();
     let mut applied_fields = BTreeSet::new();
     for track_id in &ids {
-        let Some(track) = repo::get_track(&state.db, *track_id).await? else {
-            failed.push(json!({ "track_id": track_id, "error": "索引里没有这条曲目", "stage": "lookup", "file_changed": false }));
-            continue;
+        let track = match selection_lookup(*track_id, repo::get_track(&state.db, *track_id).await) {
+            Ok(track) => track,
+            Err(detail) => {
+                failed.push(detail);
+                continue;
+            }
         };
         let path = std::path::Path::new(&track.path);
         match tagio::apply_update(path, &fields, overwrite, None, lyrics.as_deref()) {
@@ -429,20 +512,134 @@ pub async fn put_aliases(
     Ok(Json(json!({ "saved": saved })))
 }
 
-/// 一次取回多条曲目（按 id 建索引，避免 N 次查询）。
-pub async fn fetch_by_ids(
-    state: &AppState,
-    ids: &[i64],
-) -> Result<HashMap<i64, Track>, ApiError> {
-    if ids.is_empty() {
-        return Ok(HashMap::new());
+/// Keep lookup failures in the per-item result after earlier files may have
+/// changed, instead of turning a partly completed batch into a bare HTTP 500.
+pub(super) fn selection_lookup(
+    track_id: i64,
+    outcome: anyhow::Result<Option<Track>>,
+) -> Result<Track, Value> {
+    match outcome {
+        Ok(Some(track)) if track_id > 0 => Ok(track),
+        lookup => {
+            let message = match lookup {
+                Err(error) => format!("读取曲目索引失败：{error}"),
+                _ => "索引里没有这条曲目".to_string(),
+            };
+            Err(
+                json!({"track_id": track_id, "status": "失败", "stage": "lookup",
+                "error": message, "file_changed": false}),
+            )
+        }
     }
-    let query = TrackQuery {
-        ids: ids.to_vec(),
-        page_size: ids.len() as i64,
-        ..Default::default()
-    };
-    let page = repo::list_tracks(&state.db, &query).await?;
-    Ok(page.items.into_iter().map(|t| (t.id, t)).collect())
 }
 
+/// Check the complete selection without loading tags or statting audio paths.
+async fn indexed_ids(state: &AppState, ids: &[i64]) -> Result<HashSet<i64>, ApiError> {
+    let found: Vec<i64> = sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND id > 0")
+        .bind(ids)
+        .fetch_all(&state.db)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(found.into_iter().collect())
+}
+
+/// The track list caps at 1000 rows. Chunk internally so every caller can
+/// resolve a complete explicit selection without silent first-page truncation.
+pub async fn fetch_by_ids(state: &AppState, ids: &[i64]) -> Result<HashMap<i64, Track>, ApiError> {
+    let mut tracks = HashMap::new();
+    for chunk in ids.chunks(1000) {
+        let query = TrackQuery {
+            ids: chunk.to_vec(),
+            page_size: chunk.len() as i64,
+            ..Default::default()
+        };
+        let page = repo::list_tracks(&state.db, &query).await?;
+        tracks.extend(
+            page.items
+                .into_iter()
+                .filter(|track| track.id > 0)
+                .map(|track| (track.id, track)),
+        );
+    }
+    Ok(tracks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_lookup_preserves_missing_and_database_failures_as_explicit_results() {
+        let missing = selection_lookup(77, Ok(None)).unwrap_err();
+        let database =
+            selection_lookup(88, Err(anyhow::anyhow!("connection unavailable"))).unwrap_err();
+        assert_eq!(missing["track_id"], 77);
+        assert_eq!(database["track_id"], 88);
+        for detail in [&missing, &database] {
+            assert_eq!(detail["status"], "失败");
+            assert_eq!(detail["stage"], "lookup");
+            assert_eq!(detail["file_changed"], false);
+        }
+        assert!(missing["error"].as_str().unwrap().contains("没有这条曲目"));
+        assert!(database["error"]
+            .as_str()
+            .unwrap()
+            .contains("connection unavailable"));
+        let track = Track {
+            id: 9,
+            ..Default::default()
+        };
+        assert_eq!(selection_lookup(9, Ok(Some(track.clone()))).unwrap().id, 9);
+        assert!(selection_lookup(0, Ok(Some(track))).is_err());
+    }
+
+    #[test]
+    fn selection_pagination_validates_size_and_clamps_without_overflow() {
+        let empty = serde_json::Map::new();
+        assert_eq!(selection_page(&empty, 0).unwrap(), (1, 100, 0, 0..0));
+        let last = json!({"page": i64::MAX, "page_size": 200});
+        assert_eq!(
+            selection_page(last.as_object().unwrap(), 1005).unwrap(),
+            (6, 200, 6, 1000..1005)
+        );
+        let first = json!({"page": -20, "page_size": 200});
+        assert_eq!(
+            selection_page(first.as_object().unwrap(), 1005).unwrap(),
+            (1, 200, 6, 0..200)
+        );
+        for invalid in [
+            json!({"page_size": 0}),
+            json!({"page_size": 201}),
+            json!({"page": "not-an-int"}),
+            json!({"page": 2.5}),
+            json!({"page_size": true}),
+        ] {
+            assert!(selection_page(invalid.as_object().unwrap(), 1005).is_err());
+        }
+    }
+
+    #[test]
+    fn selection_projection_keeps_missing_positions_and_does_not_claim_disk_existence() {
+        let track = Track {
+            id: 9,
+            path: "/offline/music/never-statted.flac".into(),
+            title: "索引里的曲目".into(),
+            ..Default::default()
+        };
+        let tracks = HashMap::from([(9, track)]);
+        let items = selection_items(&[7, 9, 0], &tracks);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![7, 9, 0]
+        );
+        assert_eq!(items[0]["status"], "missing");
+        assert!(items[0]["track"].is_null());
+        assert_eq!(items[1]["status"], "found");
+        assert_eq!(items[1]["track"]["title"], "索引里的曲目");
+        assert!(items[1]["track"].get("file_exists").is_none());
+        assert_eq!(items[2]["status"], "missing");
+    }
+}

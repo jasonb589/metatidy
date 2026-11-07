@@ -5,7 +5,7 @@
 
 import { api, ApiError } from "./api.js";
 import * as ui from "./ui.js";
-import { state, on } from "./store.js";
+import { state, on, selectionRevision } from "./store.js";
 import * as tracks from "./tracks.js";
 import * as albums from "./albums.js";
 import * as scrape from "./scrape.js";
@@ -17,6 +17,7 @@ import * as palette from "./palette.js";
 import { renderJobs, parseResult } from "./jobs-panel.js";
 import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOverview } from "./jobs-history.js";
 import { initKeyboardHelp } from "./keyboard-help.js";
+import { openSelectionReview } from "./selection-review.js";
 
 const TABS = ["tracks", "albums", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -85,10 +86,16 @@ function boot() {
   on("jobs:refresh", () => {
     refreshJobs().catch(() => {});
   });
-  on("library:batch-scrape", () => {
+  on("library:review-selection", () => {
+    if (!canUseWorkspace()) return;
+    closeJobs();
+    openSelectionReview({ onAction: (action, scope) => void handoffSelection(action, scope) });
+  });
+  on("library:batch-scrape", (scope) => {
     if (!canUseWorkspace() || !state.selection.size) return;
     activateTab("scrape", { focus: false }).then(() => {
       if (state.tab !== "scrape" || !canUseWorkspace()) return;
+      if (scope && scope.revision !== selectionRevision()) { ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后继续。"); return; }
       const button = ui.byId("btn-batch-run");
       button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
       document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
@@ -116,6 +123,25 @@ function boot() {
   startGuarded().catch((err) => {
     ui.toast("err", "初始化失败", err && err.message ? err.message : String(err));
   });
+}
+
+async function handoffSelection(action, scope) {
+  if (!canUseWorkspace() || !scope.rows.length || scope.revision !== selectionRevision()) return;
+  try {
+    const tab = action === "edit" ? "tracks" : action === "scrape" ? "scrape" : "move";
+    await activateTab(tab, { focus: false });
+    if (!canUseWorkspace() || state.tab !== tab || scope.revision !== selectionRevision()) {
+      ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后继续。"); return;
+    }
+    if (action === "edit") tracks.editSelection(scope.rows);
+    else if (action === "scrape") {
+      const button = ui.byId("btn-batch-run"); button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
+      document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
+      ui.toast("info", `批量刮削范围：全部已选 ${scope.rows.length} 首`, "请选择处理模式后手动开始；仅搜索审阅最多 200 首。");
+    } else if (move.selectSelectedScope()) {
+      ui.byId("btn-move-preview").scrollIntoView({ block: "center", behavior: "instant" }); ui.byId("btn-move-preview").focus({ preventScroll: true });
+    } else ui.toast("warn", "当前整理操作尚未结束", "请等待本次操作结束后，再从已选审阅进入整理。");
+  } catch (error) { reportNavigationError(error); }
 }
 
 async function showScopedTracks() {

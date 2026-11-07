@@ -265,6 +265,7 @@ export function init() {
     renderPick();
   });
   nodes.batchClear.addEventListener("click", () => clearSelection());
+  ui.byId("batch-review-selection").addEventListener("click", () => emit("library:review-selection"));
   document.querySelectorAll("input[name=batch-mode]").forEach((radio) => {
     radio.addEventListener("change", syncBatchMode);
   });
@@ -1060,7 +1061,7 @@ function syncBatchMode() {
   const isApply = mode && mode.value === "apply";
   nodes.batchThreshold.disabled = !isApply;
   nodes.batchThresholdHint.textContent = isApply
-    ? "0 = 后端不做阈值判断（只要有候选就写入最佳候选）；分数口径与后端一致，超过 100 也算高分。"
+    ? "自动写入最低分须为正数，匹配分可能超过 100。0 在后端表示仅搜索，不会自动写入。"
     : "当前模式不写文件，最低分只在「自动写入」下生效。";
   nodes.batchCover.disabled = !isApply;
   nodes.batchLyrics.disabled = !isApply;
@@ -1105,6 +1106,11 @@ async function runBatch() {
     await runBatchSearchOnly(ids, { fields, limit, sources, normalize });
     return;
   }
+  if (!Number.isFinite(threshold) || threshold <= 0) {
+    ui.toast("warn", "请设置有效的自动写入最低分", "填写大于 0 的分数；如需只搜索，请选择「仅搜索并逐首审阅」。");
+    nodes.batchThreshold.focus();
+    return;
+  }
   if (!fields.length && !writeCover && !writeLyrics) {
     ui.toast("warn", "没有选择要写入的字段", "至少勾选一个字段。");
     return;
@@ -1122,8 +1128,7 @@ async function runBatch() {
       { label: "写歌词", value: writeLyrics ? "是" : "否" },
       {
         label: "最低分",
-        value: threshold > 0 ? `${threshold}（低于该分数的只跳过，不写入）` : "0 —— 不设阈值，只要有候选就写入最佳候选",
-        danger: threshold <= 0,
+        value: `${threshold}（低于该分数的只跳过，不写入）`,
       },
     ],
     confirmLabel: `确认写入 ${ids.length} 首`,

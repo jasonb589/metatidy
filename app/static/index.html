@@ -16,6 +16,7 @@
 <link rel="stylesheet" href="./review-queue.css">
 <link rel="stylesheet" href="./move-review.css">
 <link rel="stylesheet" href="./jobs-center.css">
+<link rel="stylesheet" href="./selection-review.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -382,6 +383,7 @@
         <span class="badge count-chip" id="batch-count">未选择</span>
         <div class="grow">
           <button class="btn btn-sm" id="batch-use-current">把当前曲目加入</button>
+          <button class="btn btn-sm" id="batch-review-selection">审阅已选</button>
           <button class="btn btn-sm" id="batch-clear">清空选择</button>
         </div>
       </div>
@@ -398,7 +400,7 @@
           </label>
           <label class="row-inline">
             <span class="lbl">自动写入最低分</span>
-            <input type="number" id="batch-threshold" class="w-90" min="0" max="100" step="1" value="70" disabled>
+            <input type="number" id="batch-threshold" class="w-90" min="0" step="any" value="70" disabled>
           </label>
           <span class="hint" id="batch-threshold-hint">当前模式不写文件，最低分只在「自动写入」下生效。</span>
         </div>

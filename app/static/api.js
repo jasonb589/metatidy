@@ -108,6 +108,7 @@ export const api = {
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
+  trackSelection: (payload, options = {}) => request(`${API}/tracks/selection`, { ...options, method: "POST", body: payload }),
   track: (id) => request(`${API}/tracks/${id}`),
   trackLyrics: (id) => request(`${API}/tracks/${id}/lyrics`),
   previewTracks: (payload) => request(`${API}/tracks/preview`, { method: "POST", body: payload, timeout: 90000 }),

@@ -1115,6 +1115,7 @@ function renderSelectionBar() {
       ]),
     ),
     ui.el("div", { class: "spacer" }),
+    ui.el("button", { type: "button", id: "selection-review", class: "btn btn-sm", text: "审阅已选", onClick: () => emit("library:review-selection") }),
     ui.el("button", {
       type: "button", id: "selection-edit",
       class: "btn btn-sm btn-primary",
@@ -1310,6 +1311,9 @@ function openEdit(rows) {
   if (focusTarget) requestAnimationFrame(() => { if (isCurrentEdit(revision)) focusTarget.focus(); });
 }
 
+/** Review handoff carries the complete, immutable selection scope. */
+export function editSelection(rows) { openEdit(rows); }
+
 function closeEdit() {
   if (!state.edit.open) return;
   editRevision += 1;
@@ -1361,6 +1365,15 @@ async function runPreview() {
     const preview = await api.previewTracks({ ids, fields, normalize_artist: normalize, overwrite });
     if (!isCurrentEdit(revision)) return;
     ui.clear(nodes.drawerResult);
+    if (Number(preview.index_missing_total) > 0) {
+      const sameSelection = ids.length === state.selection.size && ids.every((id) => state.selection.has(id));
+      nodes.drawerResult.append(ui.notice("warn", `本次编辑范围有 ${ui.fmtNum(preview.index_missing_total)} 首不在曲库索引。这不表示磁盘文件已删除。${sameSelection ? "请先核对已选范围，再预览变更。" : "请刷新曲库，重新打开对应曲目后再编辑。"}`));
+      if (sameSelection) nodes.drawerResult.append(ui.el("button", { id: "edit-review-selection", type: "button", class: "btn btn-sm", text: "审阅已选并核对索引", onClick: () => {
+        if (ids.length !== state.selection.size || !ids.every((id) => state.selection.has(id))) { ui.toast("warn", "选择范围已变化", "请刷新曲库，重新打开对应曲目后再编辑。"); return; }
+        closeEdit(); emit("library:review-selection");
+      } }));
+      return;
+    }
     const previewItems = Array.isArray(preview.items) ? preview.items : [];
     if (!previewItems.length) throw new Error("所选曲目无法读取，请刷新曲库后重试。");
     if (previewItems.some((item) => !ids.includes(Number(item.track_id))) || (!preview.truncated && new Set(previewItems.map((item) => Number(item.track_id))).size !== ids.length)) {

@@ -38,6 +38,7 @@ from tests.albums_acceptance import check_albums  # noqa: E402
 from tests.write_acceptance import check_writes  # noqa: E402
 from tests.move_acceptance import check_moves  # noqa: E402
 from tests.jobs_acceptance import check_jobs  # noqa: E402
+from tests.selection_acceptance import check_selection  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -424,6 +425,8 @@ def main() -> int:
                   and requests.get(f"{auth_base}/api/jobs/unknown/report", timeout=20).status_code == 401)
             check("未登录不能浏览专辑（401）",
                   requests.get(f"{auth_base}/api/albums", timeout=20).status_code == 401)
+            check("未登录不能核对已选曲目索引（401）",
+                  requests.post(f"{auth_base}/api/tracks/selection", json={"ids": []}, timeout=20).status_code == 401)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -487,6 +490,8 @@ def main() -> int:
         check_moves(BASE, music, check, wait_job)
         print("\n=== 13. 任务历史、结果报告与状态一致性 ===")
         check_jobs(BASE, check)
+        print("\n=== 14. 全部已选曲目核对与去重写入 ===")
+        check_selection(BASE, music, check, wait_job)
     finally:
         proc.terminate()
         try:

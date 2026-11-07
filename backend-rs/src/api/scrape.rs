@@ -24,7 +24,7 @@ use crate::tagio;
 use crate::AppState;
 
 use super::status::enabled_sources;
-use super::tracks::{prepare_update_fields, sync_update_outcome};
+use super::tracks::{prepare_update_fields, selection_lookup, sync_update_outcome};
 use super::{apply_aliases, changes_json, parse_body, ApiError, ApiResult, HTTP};
 
 /// 默认要写的字段（`ScrapeApplyRequest.fields` 的默认值）。
@@ -192,7 +192,7 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
 /// `POST /api/scrape/batch`：批量刮削（后台任务，逐首搜索，可按分数阈值自动写入）。
 pub async fn batch(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = parse_body(&body)?;
-    let ids = super::body_ids(&payload, "ids")?;
+    let ids = super::unique_ids(super::body_ids(&payload, "ids")?);
     if ids.is_empty() {
         return Err(ApiError::bad_request("至少选择一首"));
     }
@@ -262,10 +262,14 @@ async fn run_batch(state: AppState, store: JobStore, job_id: String, params: Bat
     let mut details: Vec<Value> = Vec::new();
 
     for track_id in &params.ids {
-        let track = repo::get_track(&state.db, *track_id).await.ok().flatten();
-        let Some(track) = track else {
-            progress.step(1, None).await;
-            continue;
+        let track = match selection_lookup(*track_id, repo::get_track(&state.db, *track_id).await) {
+            Ok(track) => track,
+            Err(detail) => {
+                failed += 1;
+                details.push(detail);
+                progress.step(1, Some(track_id.to_string())).await;
+                continue;
+            }
         };
         let outcome = async {
             let keyword = if track.title.trim().is_empty() {

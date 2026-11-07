@@ -185,9 +185,60 @@ function coverSvg(id) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160"><rect width="160" height="160" fill="${bg}"/><circle cx="110" cy="45" r="39" fill="${fg}" opacity=".7"/><path d="M0 126L50 58l40 46 37-51 33 71v36H0z" fill="${fg}" opacity=".45"/><path d="M0 139l58-31 44 29 58-24v47H0z" fill="${bg}"/><path d="M16 22h37M16 27h23" stroke="${fg}" stroke-width="2"/><text x="16" y="146" fill="${fg}" font-family="sans-serif" font-size="7" letter-spacing="3">ARCHIVE · ${String(id).padStart(2, '0')}</text></svg>`;
 }
 
-function preview(payload) {
+function fixtureError(message, status = 422) {
+  return Object.assign(new Error(message), { status });
+}
+
+function integerBody(value, fallback) {
+  if (value == null && fallback !== undefined) return BigInt(fallback);
+  if (typeof value !== 'number' && typeof value !== 'string' || typeof value === 'number' && !Number.isInteger(value)
+      || typeof value === 'string' && !/^[+-]?\d+$/.test(value.trim())) throw fixtureError('参数须为整数');
+  const number = BigInt(typeof value === 'string' ? value.trim() : value);
+  if (number < -(2n ** 63n) || number > 2n ** 63n - 1n) throw fixtureError('整数超出范围');
+  return number;
+}
+
+function selectionIds(payload) {
+  if (payload.ids == null) return [];
+  if (!Array.isArray(payload.ids)) throw fixtureError('ids 须为整数数组');
+  const ids = new Map();
+  for (const value of payload.ids) {
+    const id = integerBody(value);
+    if (!ids.has(String(id))) ids.set(String(id), Number(id));
+  }
+  return [...ids.values()];
+}
+
+function selectionPage(payload) {
+  const ids = selectionIds(payload);
+  const size = integerBody(payload.page_size, 100);
+  const requested = integerBody(payload.page, 1);
+  if (size < 1n || size > 200n) throw fixtureError('每页已选曲目数须为 1–200');
+  const pageSize = Number(size);
+  const pages = Math.ceil(ids.length / pageSize);
+  const page = requested < 1n ? 1 : requested > BigInt(pages || 1) ? pages || 1 : Number(requested);
+  const indexed = new Map(tracks.filter(track => track.id > 0).map(track => [track.id, track]));
+  const found = ids.filter(id => indexed.has(id)).length;
+  const lightKeys = ['id', 'path', 'dir', 'filename', 'ext', 'title', 'artist', 'album', 'albumartist', 'genre', 'year', 'track', 'disc',
+    'language', 'albumtype', 'has_cover', 'has_lyrics', 'duration', 'indexed_at', 'edited_at', 'scraped_at', 'mtime', 'size', 'tags_loaded', 'path_derived'];
+  const items = ids.slice((page - 1) * pageSize, page * pageSize).map(id => {
+    const track = indexed.get(id);
+    return { id, status: track ? 'found' : 'missing', track: track ? Object.fromEntries(lightKeys.map(key => [key, track[key]])) : null };
+  });
+  return { total: ids.length, selected_total: ids.length, found_total: found, missing_total: ids.length - found, page, page_size: pageSize, pages, items };
+}
+
+function preview(payload, limit = 500, allowEmptyFields = false) {
   const fields = payload.fields || {};
-  const items = tracks.filter(t => (payload.ids || []).includes(t.id)).map(t => {
+  const ids = selectionIds(payload);
+  if (!ids.length) throw fixtureError('至少选择一首', 400);
+  if (!allowEmptyFields && !Object.keys(fields).length) throw fixtureError('没有可编辑的字段', 400);
+  const indexed = new Map(tracks.filter(track => track.id > 0).map(track => [track.id, track]));
+  const indexMissing = ids.filter(id => !indexed.has(id));
+  const items = ids.slice(0, limit).map(id => {
+    const t = indexed.get(id);
+    if (!t || t.file_exists === false) return { track_id: id, path: t?.path || '', filename: t?.filename || '',
+      current: { error: t ? '读取标签失败：测试音乐文件不可访问' : '索引里没有这条曲目' }, file_exists: false, changes: {}, count: 0, effective_fields: {}, skipped: [] };
     const effective_fields = {};
     const skipped = [];
     for (const [field, value] of Object.entries(fields)) {
@@ -200,12 +251,13 @@ function preview(payload) {
     const changes = Object.fromEntries(Object.entries(effective_fields).map(([key, value]) => [key, { old: t[key] || '', new: value }]));
     return { track_id: t.id, path: t.path, filename: t.filename, current: t, file_exists: true, changes, count: Object.keys(changes).length, effective_fields, skipped };
   });
-  return { fields, items, changed_fields: items.reduce((n, item) => n + item.count, 0), truncated: false };
+  return { fields, items, changed_fields: items.reduce((n, item) => n + item.count, 0), truncated: ids.length > limit,
+    selected_total: ids.length, previewed_total: items.length, index_missing_total: indexMissing.length, index_missing_ids: indexMissing };
 }
 
-function makeJob(kind, result) {
+function makeJob(kind, result, total = tracks.length) {
   const timestamp = Date.now() / 1000;
-  const job = { id: `fixture-${kind}-${jobs.length + 1}`, kind, state: 'done', done: tracks.length, total: tracks.length, created_at: timestamp, updated_at: timestamp, message: '测试操作完成（仅内存模拟）', error: '', result: JSON.stringify(result) };
+  const job = { id: `fixture-${kind}-${jobs.length + 1}`, kind, state: 'done', done: total, total, created_at: timestamp, updated_at: timestamp, message: '测试操作完成（仅内存模拟）', error: '', result: JSON.stringify(result) };
   jobs.unshift(job);
   return { job_id: job.id };
 }
@@ -341,24 +393,28 @@ async function handleApi(req, res, url) {
     }
     return json(res, track);
   }
+  if (route === '/api/tracks/selection') return json(res, selectionPage(payload));
   if (route === '/api/tracks/preview') return json(res, preview(payload));
   if (route === '/api/tracks/apply') {
-    const selected = tracks.filter(t => (payload.ids || []).includes(t.id));
+    const ids = selectionIds(payload);
+    const selected = ids.map(id => tracks.find(track => track.id === id && id > 0)).filter(Boolean);
     // Full row payloads are fixture setup/restore operations used by browser
     // tests, including empty tags and index-only flags; no real API calls use it.
     if (payload.fields?.id !== undefined) {
       selected.forEach(t => Object.assign(t, payload.fields));
       return json(res, { written: selected.length, failed: [], fields: Object.keys(payload.fields), skipped: 0 });
     }
-    const plan = preview(payload);
-    const items = plan.items.map(item => {
+    const plan = preview(payload, Infinity);
+    const failed = plan.items.filter(item => item.current.error).map(item => ({ track_id: item.track_id, error: item.current.error,
+      stage: selected.some(track => track.id === item.track_id) ? 'read' : 'lookup', file_changed: false }));
+    const items = plan.items.filter(item => !item.current.error).map(item => {
       const track = selected.find(t => t.id === item.track_id);
       Object.assign(track, item.effective_fields);
       const lyrics = Object.hasOwn(item.effective_fields, 'lyrics');
       if (lyrics) track.has_lyrics = 1;
       return { track_id: item.track_id, written: Object.keys(item.effective_fields), skipped: item.skipped, file_changed: item.count > 0, cover: false, lyrics };
     });
-    return json(res, { written: items.filter(item => item.file_changed).length, skipped: items.filter(item => !item.file_changed).length, failed: [], items, fields: [...new Set(items.flatMap(item => item.written))].sort() });
+    return json(res, { written: items.filter(item => item.file_changed).length, skipped: items.filter(item => !item.file_changed).length, failed, items, fields: [...new Set(items.flatMap(item => item.written))].sort() });
   }
   if (route.startsWith('/api/aliases/')) {
     const kind = route.split('/').at(-1);
@@ -397,7 +453,7 @@ async function handleApi(req, res, url) {
     const track = tracks.find(t => t.id === payload.track_id);
     if (!track) return json(res, { detail: '没有这条测试曲目' }, 404);
     const fields = Object.fromEntries((payload.fields || []).filter(field => payload.candidate?.[field] !== undefined && payload.candidate[field] !== '').map(field => [field, payload.candidate[field]]));
-    const plan = preview({ ids: [track.id], fields, overwrite: payload.overwrite }).items[0];
+    const plan = preview({ ids: [track.id], fields, overwrite: payload.overwrite }, 500, true).items[0];
     const changes = plan.changes;
     Object.assign(track, plan.effective_fields);
     const cover = Boolean(payload.write_cover && payload.candidate?.cover && (payload.overwrite !== false || !track.has_cover));
@@ -406,14 +462,26 @@ async function handleApi(req, res, url) {
     if (lyrics) { track.has_lyrics = 1; track.lyrics = payload.candidate.lyrics; }
     return json(res, { written: Object.keys(plan.effective_fields), changes, cover, lyrics, file_changed: plan.count > 0 || cover || lyrics, skipped: plan.skipped });
   }
-  if (route === '/api/scrape/batch') return json(res, makeJob('scrape', { applied: 0, skipped: (payload.ids || []).length, failed: 0, details: [], details_total: 0, details_truncated: false }));
+  if (route === '/api/scrape/batch') {
+    const ids = selectionIds(payload);
+    if (!ids.length) throw fixtureError('至少选择一首', 400);
+    const missing = ids.filter(id => !tracks.some(track => track.id === id && id > 0));
+    const details = ids.map(id => missing.includes(id)
+      ? { track_id: id, status: '失败', stage: 'lookup', error: '索引里没有这条曲目', file_changed: false }
+      : { track_id: id, status: '无候选' });
+    return json(res, makeJob('scrape', { applied: 0, skipped: ids.length - missing.length, failed: missing.length,
+      search_only: Number(payload.auto_apply_min_score ?? 0) <= 0, details: details.slice(0, 500), details_total: details.length, details_truncated: details.length > 500 }, ids.length));
+  }
   if (route === '/api/template/test') {
     const track = tracks.find(t => t.id === Number(url.searchParams.get('track_id'))) || tracks[0];
     if (!track) return json(res, { detail: '测试曲库为空' }, 400);
     return json(res, { track, source: track.path, target: `/fixture-music/${track.language}/${track.artist}/${track.album}/${track.filename}`, warnings: [] });
   }
   if (route === '/api/move/preview') {
-    const matched = payload.ids ? [...new Set(payload.ids)].map(id => tracks.find(t => t.id === id)).filter(Boolean) : tracks;
+    const ids = selectionIds(payload);
+    const matched = ids.length ? ids.map(id => tracks.find(t => t.id === id && id > 0)).filter(Boolean) : tracks;
+    if (ids.length !== matched.length && ids.length) throw fixtureError('已选曲目中存在索引缺失项', 400);
+    if (!matched.length) throw fixtureError('没有匹配到曲目', 400);
     const selected = matched.slice(0, payload.limit || tracks.length);
     const token = `fixture-plan-${plans.size + 1}`;
     const plan = { token, total: matched.length, planned: selected.length, counts: { move: selected.length }, conflict_policy: payload.conflict_policy || values.conflict_policy,
@@ -480,7 +548,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(bytes);
   } catch (error) {
-    json(res, { detail: error.code === 'ENOENT' ? 'Fixture resource not found' : error.message }, error.code === 'ENOENT' ? 404 : 500);
+    json(res, { detail: error.code === 'ENOENT' ? 'Fixture resource not found' : error.message }, error.code === 'ENOENT' ? 404 : error.status || 500);
   }
 });
 server.listen(port, '127.0.0.1', () => {

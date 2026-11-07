@@ -362,6 +362,9 @@ node tests/ui-library-tools.mjs
 node tests/ui-albums.mjs
 node tests/ui-scrape-scope.mjs
 node tests/ui-review-queue.mjs
+node tests/ui-move-review.mjs
+node tests/ui-jobs-history.mjs
+node tests/ui-selection-review.mjs
 ```
 
 脚本自动启动并关闭隔离测试服务，覆盖导航、搜索筛选、编辑预览、主题、手机布局、命令面板及登录门禁。
@@ -482,6 +485,29 @@ CI 会用固定版本 Playwright 在 Chromium 中运行这些浏览器验收，�
 新增 `GET /api/jobs/history?q=&kind=&state=&page=1&page_size=20`（每页最多 100 条），以及
 `GET /api/jobs/{job_id}/report?format=json`。报告声明范围为 `saved_result`，不补造未保存的记录。
 这些接口沿用登录保护；升级会自动为任务历史和完成游标添加查询索引，不删除已有任务。
+
+### 跨页已选曲目审阅（0.20.0）
+
+- 曲库多选工具栏、批量刮削区和命令面板新增**审阅已选**。按勾选顺序展示本次选择快照，
+  支持标题、艺术家、专辑、文件名和路径搜索，每页 50 首；同时显示全部已选与当前匹配数量。
+  搜索只改变审阅列表，编辑、批量刮削和整理入口始终明确交接**全部已选曲目**。
+- 可以逐首移除，或确认后移除当前搜索匹配的全部曲目，包含其他审阅页；只改变勾选范围。
+  待确认期间选择成员变化，会取消旧确认。选择保存在当前网页内存中，刷新网页会清空。
+- **核对全部已选索引**会分批检查完整选择，显示索引存在与缺失数量，并可确认移除缺失项。
+  核对只读 PostgreSQL，不读取音频、不检查磁盘文件；文件离线但索引仍在时显示“索引中存在”。
+  核对可取消，失败、关闭面板、会话失效或选择范围变化时丢弃未完成结果，不使用部分成功的数据。
+  多页请求分别读取当时的索引，核对期间发现计数变化会要求重试；结果是核对时的记录，不是文件锁。
+- 从审阅进入编辑后仍需预览确认；进入刮削后仍需手动选择模式并开始，仅搜索审阅队列保留 200 首上限。
+  进入整理会选择“已勾选”、清除条数上限并等待手动预览。清空勾选后仍保持该范围，不自动改为全库。
+- 标签预览继续展示前 500 首差异，同时核对全部请求 ID，报告展示范围之外的索引缺失项。
+  预览、标签写入和批量刮削按首次出现顺序去重；缺失记录或查询失败逐项计入失败，避免静默漏项。
+  自动刮削的最低分必须为正数；后端仍保留阈值 `0` 表示仅搜索的兼容行为。
+
+新增 `POST /api/tracks/selection`，请求为 `{ "ids": [...], "page": 1, "page_size": 100 }`，
+每页最多 200 首。返回完整选择的 `selected_total`、`found_total`、`missing_total`、分页信息及
+`items: [{ "id": 1, "status": "found|missing", "track": {...}|null }]`；缺失项保留选择中的位置。
+空选择返回零项，接口沿用登录保护。`POST /api/tracks/preview` 新增 `selected_total`、
+`previewed_total`、完整的 `index_missing_ids` 和 `index_missing_total`，不扩大逐曲文件差异的预览范围。
 
 ---
 

@@ -137,6 +137,18 @@ export function onStatus(status) {
   nodes.sample.title = `音乐目录：${status.music_dir || "—"}`;
 }
 
+/** Navigate from selection review; planning still requires an explicit click. */
+export function selectSelectedScope() {
+  if (!sessionUsable || !selectionCount() || operation) return false;
+  state.move.scope = "selected";
+  state.move.limit = 0;
+  nodes.limit.value = "0";
+  document.querySelector('input[name="move-scope"][value="selected"]').checked = true;
+  renderScope(); configurationChanged();
+  nodes.scopeHint.textContent = `范围为全部已选 ${selectionCount()} 首，条数上限已清除。请先预览计划。`;
+  return true;
+}
+
 function renderTokens() {
   ui.clear(nodes.tokens);
   state.placeholders.forEach((placeholder) => {
@@ -222,14 +234,9 @@ function renderScope() {
   ui.setText(nodes.scopeSelectedLabel, `曲库已勾选（${count} 首）`);
   const radio = document.querySelector("input[name=move-scope][value=selected]");
   if (radio) radio.disabled = count === 0;
-  if (!count && state.move.scope === "selected") {
-    state.move.scope = "all";
-    const all = document.querySelector("input[name=move-scope][value=all]");
-    if (all) all.checked = true;
-  }
   ui.setText(
     nodes.scopeHint,
-    state.move.scope === "selected" ? `将只整理已勾选的 ${count} 首` : "将按当前模板整理库里全部曲目（可用条数上限先小批量试）",
+    state.move.scope === "selected" ? count ? `将只整理已勾选的 ${count} 首` : "已选范围为空，请重新勾选曲目。范围仍为已选曲目。" : "将按当前模板整理库里全部曲目（可用条数上限先小批量试）",
   );
 }
 

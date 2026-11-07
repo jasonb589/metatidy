@@ -366,6 +366,13 @@ pub fn body_ids(body: &Map<String, Value>, key: &str) -> Result<Vec<i64>, ApiErr
     Ok(out)
 }
 
+/// Explicit selections are sets with a user-visible order. Preserve the first
+/// occurrence so preview, execution counts and result rows use the same scope.
+pub(super) fn unique_ids(ids: Vec<i64>) -> Vec<i64> {
+    let mut seen = HashSet::new();
+    ids.into_iter().filter(|id| seen.insert(*id)).collect()
+}
+
 /// 取字符串数组（`null` / 缺省 → 默认值；元素转成文本）。
 pub fn body_str_list(body: &Map<String, Value>, key: &str) -> Result<Vec<String>, ApiError> {
     let Some(value) = body.get(key) else {
@@ -793,6 +800,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/sources", get(status::api_sources))
         .route("/api/tracks", get(tracks::list_tracks))
+        .route("/api/tracks/selection", post(tracks::selection))
         .route("/api/albums", get(albums::list_albums))
         .route("/api/tracks/preview", post(tracks::preview))
         .route("/api/tracks/apply", post(tracks::apply))
@@ -836,6 +844,17 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_ids_deduplicate_in_first_selection_order_without_dropping_missing_values() {
+        assert_eq!(
+            unique_ids(vec![9, 3, 9, 0, -2, 3, i64::MAX, -2]),
+            vec![9, 3, 0, -2, i64::MAX]
+        );
+        let repeated = (1..=1005).chain(1..=1005).collect();
+        assert_eq!(unique_ids(repeated), (1..=1005).collect::<Vec<i64>>());
+        assert!(unique_ids(Vec::new()).is_empty());
+    }
 
     #[test]
     fn defaults_cover_all_python_keys() {

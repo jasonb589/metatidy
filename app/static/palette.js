@@ -63,6 +63,12 @@ const STATIC_COMMANDS = [
     run: () => document.getElementById("btn-theme")?.click(),
   },
   {
+    title: "审阅跨页已选曲目",
+    hint: "选择",
+    ico: "music",
+    run: () => emit("library:review-selection"),
+  },
+  {
     title: "打开任务面板",
     hint: "任务",
     ico: "jobs",
