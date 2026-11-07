@@ -37,6 +37,7 @@ from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: 
 from tests.albums_acceptance import check_albums  # noqa: E402
 from tests.write_acceptance import check_writes  # noqa: E402
 from tests.move_acceptance import check_moves  # noqa: E402
+from tests.jobs_acceptance import check_jobs  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -418,6 +419,9 @@ def main() -> int:
             check("未登录不能读取或导出移动计划（401）",
                   all(requests.get(f"{auth_base}/api/move/plan/unknown/{suffix}", timeout=20).status_code == 401
                       for suffix in ("items", "export")))
+            check("未登录不能查询任务历史或下载任务报告（401）",
+                  requests.get(f"{auth_base}/api/jobs/history", timeout=20).status_code == 401
+                  and requests.get(f"{auth_base}/api/jobs/unknown/report", timeout=20).status_code == 401)
             check("未登录不能浏览专辑（401）",
                   requests.get(f"{auth_base}/api/albums", timeout=20).status_code == 401)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
@@ -481,6 +485,8 @@ def main() -> int:
         check_writes(BASE, music, check, wait_job)
         print("\n=== 12. 完整整理计划审阅与一次执行 ===")
         check_moves(BASE, music, check, wait_job)
+        print("\n=== 13. 任务历史、结果报告与状态一致性 ===")
+        check_jobs(BASE, check)
     finally:
         proc.terminate()
         try:

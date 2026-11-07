@@ -114,8 +114,9 @@ export const api = {
   applyTracks: (payload) => request(`${API}/tracks/apply`, { method: "POST", body: payload, timeout: 300000 }),
 
   scan: (body) => request(`${API}/scan`, { method: "POST", body }),
-  job: (jobId) => request(`${API}/jobs/${jobId}`),
+  job: (jobId, options = {}) => request(`${API}/jobs/${encodeURIComponent(jobId)}`, options),
   jobs: () => request(`${API}/jobs`),
+  jobsHistory: (params, options = {}) => request(`${API}/jobs/history?${qs(params)}`, options),
 
   search: (payload) => request(`${API}/search`, { method: "POST", body: payload, timeout: 120000 }),
   scrapeApply: (payload) => request(`${API}/scrape/apply`, { method: "POST", body: payload, timeout: 180000 }),
@@ -138,6 +139,10 @@ export const api = {
 /** Downloads contain a plan snapshot, never a record of actual final paths. */
 export function movePlanExportUrl(token, params) {
   return `${API}/move/plan/${encodeURIComponent(token)}/export?${qs(params)}`;
+}
+
+export function jobReportUrl(jobId) {
+  return `${API}/jobs/${encodeURIComponent(jobId)}/report?format=json`;
 }
 
 /** 列表统一复用 128px 缩略图；视觉尺寸由调用处独立决定。 */

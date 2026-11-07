@@ -1,0 +1,53 @@
+.jobs-pop { width: min(660px,calc(100vw - 30px)); }
+.jobs-summary { border-bottom: 0; padding-bottom: 10px; }
+.jobs-global-stats { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; padding: 0 18px 13px; }
+.jobs-stat { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); }
+.jobs-stat strong { display: block; font-size: 18px; font-weight: 600; color: var(--fg); font-variant-numeric: tabular-nums; }
+.jobs-stat span { font-size: 9px; color: var(--fg-3); }
+.jobs-stat:first-child { background: var(--accent-soft); border-color: var(--accent-line); }
+.jobs-center-tabs { display: flex; gap: 6px; padding: 0 18px 12px; border-bottom: 1px solid var(--line); }
+.jobs-center-tabs button { flex: 1; padding: 9px; background: transparent; border: 1px solid transparent; border-radius: 7px; color: var(--fg-3); font-size: 11px; cursor: pointer; }
+.jobs-center-tabs button[aria-selected="true"] { color: var(--accent-2); border-color: var(--accent-line); background: var(--accent-soft); }
+.jobs-center-pane { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.jobs-pop > :not(.jobs-center-pane),.jobs-center-pane > :not(#jobs-list):not(.jobs-history-list) { flex-shrink: 0; }
+.jobs-center-pane[hidden] { display: none; }
+.jobs-pop #jobs-list,.jobs-history-list { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; overscroll-behavior: contain; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 10px; }
+.jobs-history-list > * { flex: none; }
+.jobs-history-controls { padding: 13px 16px 10px; border-bottom: 1px solid var(--line); }
+.jobs-history-controls > input { width: 100%; }
+.jobs-history-selects { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
+.jobs-history-selects > label { flex: 1; min-width: 0; }
+.jobs-history-selects select { min-width: 0; width: 100%; font-size: 11px; }
+.jobs-history-controls > .hint { font-size: 9px; line-height: 1.7; margin-top: 8px; }
+.jobs-history-pager { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; align-items: center; border-top: 1px solid var(--line); color: var(--fg-3); font-size: 10px; }
+.jobs-history-pager .btn { font-size: 10px; height: 30px; padding-inline: 8px; }
+.jobs-history-update,.jobs-active-hint { display: flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 10px; background: var(--accent-soft); color: var(--accent-2); }
+.jobs-history-update > span { flex: 1; }
+.jobs-history-update .btn,.jobs-active-hint .btn { height: 28px; font-size: 10px; }
+#jobs-history-status { padding: 10px 16px; font-size: 11px; color: var(--fg-3); }
+#jobs-history-status:empty { display: none; }
+.job-result-status { font-size: 10px; color: var(--fg-3); line-height: 1.8; }
+.job-result-status:empty { display: none; }
+.job-report-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; border-top: 1px solid var(--line); padding-top: 11px; }
+.job-report-actions .hint { flex: 1 1 160px; font-size: 9px; }
+.job-report-actions .btn { font-size: 10px; }
+.job-card[data-partial="true"] .job-summary > .badge { color: var(--warn-fg); background: var(--warn-soft); border-color: var(--warn-line); }
+@media (max-width: 700px) {
+  .jobs-pop { width: calc(100vw - 16px); }
+  .jobs-global-stats { padding-inline: 12px; gap: 6px; }
+  .jobs-stat { padding: 8px; }
+  .jobs-stat strong { font-size: 16px; }
+  .jobs-stat span { font-size: 8px; }
+  .jobs-center-tabs { padding-inline: 12px; }
+  .jobs-history-controls { padding: 10px 12px; }
+  .jobs-history-selects { gap: 7px; }
+  .jobs-history-selects .lbl { display: none; }
+  .jobs-history-selects select { font-size: 10px; }
+  .jobs-history-list { padding: 9px; }
+  .jobs-history-pager { gap: 6px; padding: 10px 12px; }
+  #jobs-history-total { flex-basis: 100%; }
+  .jobs-history-pager .spacer { display: none; }
+  .jobs-history-pager button { flex: 1; }
+  .jobs-pop > .card-head { flex: none; }
+}
+@media (prefers-reduced-motion: reduce) { .job-progress-bar i { transition: none; } }

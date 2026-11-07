@@ -13,6 +13,7 @@
 //! - 进度除了节流写 Postgres，还**每次都写 Redis**（键 `metatidy:job:{id}`，TTL 7 天），
 //!   `/api/jobs/{id}` 会优先用 Redis 里更新鲜的进度；Redis 不可用则只读 Postgres
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -20,7 +21,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlJson;
 use sqlx::PgPool;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 /// 同时最多跑几个重任务（与 Python 的 `MAX_CONCURRENT_JOBS` 一致）。
@@ -97,6 +98,158 @@ impl JobRow {
         }
         out
     }
+
+    /// PostgreSQL owns lifecycle and saved results. Redis only improves the
+    /// progress of a still-running row; stale keys cannot revive terminal jobs.
+    fn overlay_progress(&mut self, live: &HashMap<String, String>) {
+        if self.state != "running" || live.get("state").is_some_and(|state| state != "running") {
+            return;
+        }
+        if let Some(value) = live
+            .get("total")
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            self.total = value.max(0);
+        }
+        if let Some(value) = live.get("done").and_then(|value| value.parse::<i64>().ok()) {
+            self.done = value.max(0);
+        }
+        if let Some(value) = live.get("message") {
+            self.message = value.clone();
+        }
+    }
+
+    pub fn report(&self) -> Value {
+        let parsed: Option<Value> = serde_json::from_str(&self.result).ok();
+        let result = parsed.as_ref().unwrap_or(&Value::Null);
+        let array_len = |key: &str| result.get(key).and_then(Value::as_array).map(Vec::len);
+        let mut notes =
+            vec!["报告仅包含已保存的任务汇总和明细，不保证包含每个文件的完整处理记录。"];
+        if self.state == "running" {
+            notes.push("任务仍在进行中，当前内容不是最终结果。");
+        }
+        if parsed.is_none() {
+            notes.push("尚无可解析的已保存结果；任务原始 result 字符串仍保留在报告中。");
+        }
+        match self.kind.as_str() {
+            "scrape" if result.get("details_truncated").and_then(Value::as_bool) == Some(true) => {
+                notes.push(
+                    "处理明细已截断；完整数量见 details_total，报告仅含 details_saved 条已存明细。",
+                );
+            }
+            "scrape"
+                if result
+                    .get("details_truncated")
+                    .and_then(Value::as_bool)
+                    .is_none() =>
+            {
+                notes.push("旧版批量刮削最多保存前 500 条明细，未记录截断标记，不能据此推断其余曲目的处理结果。");
+            }
+            "scan" => {
+                notes.push("扫描错误信息最多保存前 20 条；失败总数以已保存的 failed 汇总为准。")
+            }
+            "move" => notes.push("移动结果保存汇总和失败记录，不包含全部成功文件的最终目标路径。"),
+            _ => {}
+        }
+        json!({
+            "report_type": "job_result",
+            "report_scope": "saved_result",
+            "generated_at": epoch(chrono::Utc::now()),
+            "job": self.json(true),
+            "parsed_result": parsed,
+            "completeness": {
+                "scope": "saved_result",
+                "details_saved": array_len("details"),
+                "details_total": result.get("details_total").and_then(Value::as_u64),
+                "details_truncated": result.get("details_truncated").and_then(Value::as_bool),
+                "errors_saved": array_len("errors"),
+                "failures_saved": array_len("failures"),
+                "note": notes.join(" "),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct JobHistoryQuery {
+    pub q: String,
+    pub kind: String,
+    pub state: String,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+impl JobHistoryQuery {
+    fn pattern(&self) -> String {
+        format!(
+            "%{}%",
+            self.q
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_")
+        )
+    }
+}
+
+const HISTORY_WHERE: &str = "WHERE ($1 = '' OR kind = $1) AND ($2 = '' OR state = $2) AND (\
+    left(replace(id::text, '-', ''), 12) ILIKE $3 ESCAPE '!' OR \
+    kind ILIKE $3 ESCAPE '!' OR message ILIKE $3 ESCAPE '!' OR error ILIKE $3 ESCAPE '!')";
+
+// Project only a bounded page before looking into JSONB results. Large arrays
+// remain in PostgreSQL; history never transfers the full result to the browser.
+const SUMMARY_COLUMNS: &str = "id, kind, state, total, done, message, error, created_at, updated_at, \
+    (result IS NOT NULL AND result <> 'null'::jsonb) AS has_result, \
+    (error <> '' OR \
+        CASE WHEN jsonb_typeof(result->'failed') = 'number' THEN (result->>'failed')::numeric > 0 ELSE FALSE END OR \
+        CASE WHEN jsonb_typeof(result->'errors') = 'array' THEN jsonb_array_length(result->'errors') > 0 ELSE FALSE END OR \
+        CASE WHEN jsonb_typeof(result->'failures') = 'array' THEN jsonb_array_length(result->'failures') > 0 ELSE FALSE END OR \
+        EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(result->'details') = 'array' \
+            THEN result->'details' ELSE '[]'::jsonb END) AS detail(item) \
+            WHERE jsonb_typeof(detail.item->'error') = 'string' AND detail.item->>'error' <> '') \
+    ) AS has_errors, \
+    COALESCE((SELECT jsonb_object_agg(field.key, field.value) \
+        FROM jsonb_each(CASE WHEN jsonb_typeof(result) = 'object' THEN result ELSE '{}'::jsonb END) AS field \
+        WHERE field.key IN ('added','updated','skipped','removed','failed','scanned','parsed', \
+            'total_seconds','seconds','trigger','root','fast_mode','applied','search_only','moved','renamed', \
+            'details_total','details_truncated') \
+        AND jsonb_typeof(field.value) IN ('string','number','boolean')), '{}'::jsonb) AS summary";
+
+#[derive(sqlx::FromRow)]
+struct JobSummaryRow {
+    id: Uuid,
+    kind: String,
+    state: String,
+    total: i64,
+    done: i64,
+    message: String,
+    error: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    has_result: bool,
+    has_errors: bool,
+    summary: SqlJson<Value>,
+}
+
+impl JobSummaryRow {
+    fn json(self) -> Value {
+        json!({
+            "id": job_id_of(&self.id), "kind": self.kind, "state": self.state,
+            "total": self.total, "done": self.done, "message": self.message, "error": self.error,
+            "created_at": epoch(self.created_at), "updated_at": epoch(self.updated_at),
+            "percent": percent(self.done, self.total), "has_result": self.has_result,
+            "has_errors": self.has_errors, "summary": self.summary.0,
+        })
+    }
+}
+
+fn history_page(total: i64, requested: i64, size: i64) -> (i64, i64, i64) {
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / size + 1
+    };
+    let page = requested.clamp(1, pages.max(1));
+    (page, pages, (page - 1) * size)
 }
 
 /// `round(done / total * 100, 1)`；`total = 0` 时是 `0.0`。
@@ -178,22 +331,9 @@ impl JobStore {
             created_at: epoch(created_at),
             updated_at: epoch(updated_at),
         };
-        // Redis 里的进度比 Postgres 新（Postgres 是节流写的）
-        if let Some(live) = self.read_progress(&job.id).await {
-            if let Some(v) = live.get("state") {
-                job.state = v.clone();
-            }
-            if let Some(v) = live.get("total").and_then(|v| v.parse::<i64>().ok()) {
-                job.total = v;
-            }
-            if let Some(v) = live.get("done").and_then(|v| v.parse::<i64>().ok()) {
-                job.done = v;
-            }
-            if let Some(v) = live.get("message") {
-                job.message = v.clone();
-            }
-            if let Some(v) = live.get("error") {
-                job.error = v.clone();
+        if job.state == "running" {
+            if let Some(live) = self.read_progress(&job.id).await {
+                job.overlay_progress(&live);
             }
         }
         Ok(Some(job))
@@ -204,7 +344,7 @@ impl JobStore {
         let rows: Vec<(Uuid, String, String, i64, i64, String, String, Option<SqlJson<Value>>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
             sqlx::query_as(
                 "SELECT id, kind, state, total, done, message, error, result, created_at, updated_at
-                 FROM jobs ORDER BY created_at DESC LIMIT $1",
+                 FROM jobs ORDER BY created_at DESC, id DESC LIMIT $1",
             )
             .bind(limit)
             .fetch_all(&self.pool)
@@ -227,6 +367,80 @@ impl JobStore {
                 updated_at: epoch(updated_at),
             })
             .collect())
+    }
+
+    /// Global activity is independent of the history query. The bounded active
+    /// preview shows the oldest running/queued work even after newer jobs finish.
+    pub async fn overview(&self) -> anyhow::Result<Value> {
+        const ACTIVE_LIMIT: i64 = 10;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let (total, running, done, error): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE state = 'running'), \
+                count(*) FILTER (WHERE state = 'done'), count(*) FILTER (WHERE state = 'error') FROM jobs",
+        ).fetch_one(&mut *transaction).await?;
+        let active: Vec<JobSummaryRow> = sqlx::query_as(&format!(
+            "WITH page_rows AS MATERIALIZED (SELECT * FROM jobs WHERE state = 'running' \
+                ORDER BY created_at ASC, id ASC LIMIT $1) \
+             SELECT {SUMMARY_COLUMNS} FROM page_rows ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(ACTIVE_LIMIT)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let latest: Option<(Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT id, updated_at FROM jobs WHERE kind = 'scan' AND state = 'done' \
+                AND result->>'trigger' = 'watch' ORDER BY updated_at DESC, id DESC LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        let latest = latest.map(|(id, updated_at)| {
+            json!({
+                "id": job_id_of(&id), "updated_at": epoch(updated_at),
+                "cursor": format!("{}:{}", updated_at.timestamp_micros(), id.simple()),
+            })
+        });
+        Ok(json!({
+            "counts": {"total": total, "running": running, "done": done, "error": error},
+            "active": active.into_iter().map(JobSummaryRow::json).collect::<Vec<_>>(),
+            "active_total": running, "active_limit": ACTIVE_LIMIT,
+            "latest_completed_watch": latest,
+        }))
+    }
+
+    pub async fn history(&self, query: &JobHistoryQuery) -> anyhow::Result<Value> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let pattern = query.pattern();
+        let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM jobs {HISTORY_WHERE}"))
+            .bind(&query.kind)
+            .bind(&query.state)
+            .bind(&pattern)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let (page, pages, offset) = history_page(total, query.page, query.page_size);
+        let rows: Vec<JobSummaryRow> = sqlx::query_as(&format!(
+            "WITH page_rows AS MATERIALIZED (SELECT * FROM jobs {HISTORY_WHERE} \
+                ORDER BY created_at DESC, id DESC LIMIT $4 OFFSET $5) \
+             SELECT {SUMMARY_COLUMNS} FROM page_rows ORDER BY created_at DESC, id DESC"
+        ))
+        .bind(&query.kind)
+        .bind(&query.state)
+        .bind(&pattern)
+        .bind(query.page_size)
+        .bind(offset)
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(json!({
+            "items": rows.into_iter().map(JobSummaryRow::json).collect::<Vec<_>>(),
+            "total": total, "page": page, "page_size": query.page_size, "pages": pages,
+            "q": query.q, "kind": query.kind, "state": query.state,
+        }))
     }
 
     pub async fn update(&self, job_id: &str, patch: &JobPatch) -> anyhow::Result<()> {
@@ -339,13 +553,18 @@ impl JobStore {
         Some(out)
     }
 
-    /// 抢并发额度；超时返回 false（调用方写 `state=error`）。
-    pub async fn acquire_slot() -> bool {
-        tokio::time::timeout(WAIT_TIMEOUT, SEMAPHORE.acquire())
-            .await
-            .map(|r| r.is_ok())
-            .unwrap_or(false)
+    /// The caller retains the permit through work and result persistence. A
+    /// bool would drop it on return and silently remove the concurrency bound.
+    pub async fn acquire_slot() -> Option<SemaphorePermit<'static>> {
+        acquire_slot_from(&SEMAPHORE, WAIT_TIMEOUT).await
     }
+}
+
+async fn acquire_slot_from(semaphore: &Semaphore, wait: Duration) -> Option<SemaphorePermit<'_>> {
+    tokio::time::timeout(wait, semaphore.acquire())
+        .await
+        .ok()?
+        .ok()
 }
 
 enum Bind {
@@ -510,6 +729,136 @@ pub fn progress_channel() -> (UnboundedSender<ProgressEvent>, UnboundedReceiver<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(state: &str) -> JobRow {
+        JobRow {
+            id: "9a1c4d2f7b30".into(),
+            kind: "scrape".into(),
+            state: state.into(),
+            total: 10,
+            done: 4,
+            message: "数据库消息".into(),
+            error: String::new(),
+            result: String::new(),
+            created_at: 1.0,
+            updated_at: 2.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn held_job_permits_limit_work_until_completion_or_early_return() {
+        let semaphore = Semaphore::new(2);
+        let first = acquire_slot_from(&semaphore, Duration::from_millis(50))
+            .await
+            .unwrap();
+        let second = acquire_slot_from(&semaphore, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+        assert!(acquire_slot_from(&semaphore, Duration::from_millis(10))
+            .await
+            .is_none());
+        drop(first);
+        let failed: Result<(), ()> = async {
+            let _guard = acquire_slot_from(&semaphore, Duration::from_millis(50))
+                .await
+                .unwrap();
+            assert_eq!(semaphore.available_permits(), 0);
+            Err(())
+        }
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(semaphore.available_permits(), 1);
+        let replacement = acquire_slot_from(&semaphore, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(semaphore.available_permits(), 0);
+        drop((replacement, second));
+        assert_eq!(semaphore.available_permits(), 2);
+    }
+
+    #[test]
+    fn postgres_terminal_state_and_results_survive_stale_redis() {
+        let live = HashMap::from([
+            ("state".into(), "running".into()),
+            ("total".into(), "999".into()),
+            ("done".into(), "998".into()),
+            ("message".into(), "过期消息".into()),
+            ("error".into(), String::new()),
+        ]);
+        for state in ["error", "done"] {
+            let mut row = job(state);
+            row.error = "容器重启导致任务中断".into();
+            row.result = json!({"failed": 2}).to_string();
+            let before = row.json(true);
+            row.overlay_progress(&live);
+            assert_eq!(row.json(true), before);
+        }
+        let mut running = job("running");
+        running.overlay_progress(&live);
+        assert_eq!(running.state, "running");
+        assert_eq!((running.total, running.done), (999, 998));
+        assert_eq!(running.updated_at, 2.0);
+        assert!(running.result.is_empty());
+        let before = running.json(true);
+        let terminal_cache = HashMap::from([
+            ("state".into(), "done".into()),
+            ("done".into(), "1234".into()),
+        ]);
+        running.overlay_progress(&terminal_cache);
+        assert_eq!(running.json(true), before);
+    }
+
+    #[test]
+    fn saved_reports_preserve_raw_values_and_expose_known_truncation() {
+        let mut row = job("done");
+        row.result = json!({"failed": 1, "details": [{"track_id": 1, "error": "无法写入"}],
+            "details_total": 700, "details_truncated": true})
+        .to_string();
+        let report = row.report();
+        assert_eq!(report["job"]["result"], row.result);
+        assert_eq!(report["report_scope"], "saved_result");
+        assert_eq!(report["completeness"]["details_saved"], 1);
+        assert_eq!(report["completeness"]["details_total"], 700);
+        assert_eq!(report["completeness"]["details_truncated"], true);
+        row.result = json!({"details": vec![json!({"status": "仅搜索"}); 500]}).to_string();
+        let legacy = row.report();
+        assert_eq!(legacy["completeness"]["details_saved"], 500);
+        assert!(legacy["completeness"]["details_total"].is_null());
+        assert!(legacy["completeness"]["details_truncated"].is_null());
+        row.result = "unparseable old result".into();
+        let invalid = row.report();
+        assert_eq!(invalid["job"]["result"], row.result);
+        assert!(invalid["parsed_result"].is_null());
+        row.result = "[1,2,3]".into();
+        assert_eq!(row.report()["parsed_result"], json!([1, 2, 3]));
+        row.kind = "move".into();
+        row.result = json!({"moved": 5, "failures": []}).to_string();
+        let moved = row.report();
+        assert!(moved["completeness"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("不包含全部成功文件"));
+        assert!(moved["parsed_result"].get("moved_paths").is_none());
+    }
+
+    #[test]
+    fn history_bounds_and_literal_patterns_are_safe() {
+        assert_eq!(history_page(41, i64::MAX, 20), (3, 3, 40));
+        assert_eq!(history_page(0, -1, 20), (1, 0, 0));
+        assert_eq!(
+            history_page(i64::MAX, i64::MAX, 100),
+            (92233720368547759, 92233720368547759, 9223372036854775800)
+        );
+        let query = JobHistoryQuery {
+            q: "100%_Mix!'".into(),
+            kind: String::new(),
+            state: String::new(),
+            page: 1,
+            page_size: 20,
+        };
+        assert_eq!(query.pattern(), "%100!%!_Mix!!'%");
+    }
 
     #[test]
     fn job_id_is_12_hex_and_round_trips() {

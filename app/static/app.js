@@ -15,6 +15,7 @@ import * as theme from "./theme.js";
 import * as auth from "./auth.js";
 import * as palette from "./palette.js";
 import { renderJobs, parseResult } from "./jobs-panel.js";
+import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOverview } from "./jobs-history.js";
 import { initKeyboardHelp } from "./keyboard-help.js";
 
 const TABS = ["tracks", "albums", "scrape", "move", "settings"];
@@ -35,6 +36,8 @@ let closeSidebar = () => {};
 let closeJobs = () => {};
 let jobsRequest = null;
 let watchJobsReady = false;
+let watchCursorReady = false;
+let lastWatchCursor = null;
 const completedWatchJobs = new Set();
 let pendingLibraryRefresh = false;
 let libraryRefreshRunning = false;
@@ -610,6 +613,7 @@ async function loadSources() {
 function wireJobs() {
   const pop = ui.byId("jobs-pop");
   const button = ui.byId("btn-jobs");
+  initJobsHistory({ onRefreshGlobal: () => refreshJobs().catch(() => {}) });
   function setOpen(open, { restoreFocus = false } = {}) {
     if (open && !canUseWorkspace()) return;
     const wasOpen = pop.dataset.open === "true";
@@ -620,6 +624,7 @@ function wireJobs() {
     pop.inert = !open;
     window.clearInterval(jobsTimer);
     if (open) {
+      onJobsCenterOpen();
       refreshJobs().catch(() => {});
       jobsTimer = window.setInterval(() => {
         if (pop.dataset.open === "true") refreshJobs().catch(() => {});
@@ -644,12 +649,19 @@ function wireJobs() {
     event.preventDefault();
     setOpen(false, { restoreFocus: true });
   }, true);
-  pop.addEventListener("focusout", () => {
+  pop.addEventListener("focusout", (event) => {
+    // Disabling a paging control or hiding a completed retry can move focus to
+    // the document briefly. Only a deliberate focus move leaves this panel.
+    if (!event.relatedTarget || pop.contains(event.relatedTarget) || event.relatedTarget === button) return;
     requestAnimationFrame(() => {
       if (pop.dataset.open === "true" && !pop.contains(document.activeElement) && document.activeElement !== button) setOpen(false);
     });
   });
-  ui.byId("jobs-refresh").addEventListener("click", () => refreshJobs().catch(() => {}));
+  ui.byId("jobs-refresh").addEventListener("click", refreshVisibleJobs);
+  window.addEventListener("metatidy:unauthorized", () => {
+    const badge = ui.byId("jobs-running"); badge.hidden = true; badge.style.display = "none"; badge.textContent = "0";
+    completedWatchJobs.clear(); watchJobsReady = false; watchCursorReady = false; lastWatchCursor = null;
+  });
   setOpen(false);
 }
 
@@ -685,7 +697,7 @@ function refreshJobs() {
 }
 
 function isAutomaticScan(job) {
-  return job.kind === "scan" && (parseResult(job).trigger === "watch" || state.status?.auto_scan?.last_job_id === job.id);
+  return job.kind === "scan" && (job.summary?.trigger === "watch" || parseResult(job).trigger === "watch" || state.status?.auto_scan?.last_job_id === job.id);
 }
 
 async function loadJobs() {
@@ -693,6 +705,17 @@ async function loadJobs() {
   const data = await api.jobs();
   if (!canUseWorkspace()) return;
   const list = data.jobs || [];
+  // The cursor also detects completed watcher jobs outside the recent window.
+  // Legacy rows remain a fallback for deployments during a rolling update.
+  if (Object.hasOwn(data, "latest_completed_watch")) {
+    const cursor = data.latest_completed_watch?.cursor || null;
+    if (watchCursorReady && cursor && cursor !== lastWatchCursor) {
+      pendingLibraryRefresh = true;
+      invalidateAlbums();
+    }
+    lastWatchCursor = cursor;
+    watchCursorReady = true;
+  }
   for (const job of list) {
     if (job.state !== "done" || !isAutomaticScan(job)) continue;
     if (watchJobsReady && !completedWatchJobs.has(job.id)) {
@@ -705,14 +728,17 @@ async function loadJobs() {
   // 任务接口只返回最近记录，保留足够的去重窗口即可。
   while (completedWatchJobs.size > 256) completedWatchJobs.delete(completedWatchJobs.values().next().value);
   scheduleLibraryRefresh();
-  const running = list.filter((job) => job.state === "running").length;
+  const running = Number(data.counts?.running ?? list.filter((job) => job.state === "running").length) || 0;
   const badge = ui.byId("jobs-running");
   // 同时设内联样式：反代可能缓存着没有 [hidden] 规则的旧 CSS，否则「任务 0」会一直挂着
   badge.hidden = running === 0;
   badge.style.display = running === 0 ? "none" : "";
   if (badge.textContent !== String(running)) badge.textContent = String(running);
 
-  renderJobs(list, isAutomaticScan);
+  const recentById = new Map(list.map((job) => [String(job.id), job]));
+  const overview = [...(data.active || []).map((job) => recentById.get(String(job.id)) || job), ...list];
+  renderJobs(overview, isAutomaticScan);
+  updateJobsOverview(data);
 }
 
 document.addEventListener("DOMContentLoaded", boot);

@@ -74,7 +74,7 @@ const placeholders = [
 const aliases = { artist: [{ from: 'Jay Chou', to: '周杰伦' }], album: [] };
 const jobs = empty ? [] : [{
   id: 'fixture-scan-001', kind: 'scan', state: 'done', total: tracks.length, done: tracks.length,
-  message: '测试样本已就绪 · 未扫描真实文件', error: '', created_at: now - 3600,
+  message: '测试样本已就绪 · 未扫描真实文件', error: '', created_at: now - 3600, updated_at: now - 3600,
   result: JSON.stringify({ scanned: tracks.length, added: tracks.length, updated: 0, skipped: 0, removed: 0 }),
 }];
 const plans = new Map();
@@ -204,9 +204,75 @@ function preview(payload) {
 }
 
 function makeJob(kind, result) {
-  const job = { id: `fixture-${kind}-${jobs.length + 1}`, kind, state: 'done', done: tracks.length, total: tracks.length, created_at: now, message: '测试操作完成（仅内存模拟）', error: '', result: JSON.stringify(result) };
+  const timestamp = Date.now() / 1000;
+  const job = { id: `fixture-${kind}-${jobs.length + 1}`, kind, state: 'done', done: tracks.length, total: tracks.length, created_at: timestamp, updated_at: timestamp, message: '测试操作完成（仅内存模拟）', error: '', result: JSON.stringify(result) };
   jobs.unshift(job);
   return { job_id: job.id };
+}
+
+const jobSummaryKeys = ['added', 'updated', 'skipped', 'removed', 'failed', 'scanned', 'parsed', 'total_seconds', 'seconds',
+  'trigger', 'root', 'fast_mode', 'applied', 'search_only', 'moved', 'renamed', 'details_total', 'details_truncated'];
+const jobNewestFirst = (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id);
+const jobPercent = job => job.total ? Math.round(job.done / job.total * 1000) / 10 : 0;
+
+function jobResult(job) {
+  try { return JSON.parse(job.result || 'null'); } catch { return null; }
+}
+
+function jobSummary(job) {
+  const parsed = jobResult(job);
+  const result = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  const summary = Object.fromEntries(jobSummaryKeys.filter(key => ['string', 'number', 'boolean'].includes(typeof result[key])).map(key => [key, result[key]]));
+  const { result: saved, ...row } = job;
+  const hasErrors = Boolean(job.error) || typeof result.failed === 'number' && result.failed > 0
+    || ['errors', 'failures'].some(key => Array.isArray(result[key]) && result[key].length > 0)
+    || Array.isArray(result.details) && result.details.some(item => item && typeof item.error === 'string' && item.error.length > 0);
+  return { ...row, percent: jobPercent(job), has_result: Boolean(saved && saved !== 'null'), has_errors: Boolean(hasErrors), summary };
+}
+
+function recentJobs() {
+  const ordered = [...jobs].sort(jobNewestFirst);
+  const active = ordered.filter(job => job.state === 'running').reverse();
+  const watch = ordered.filter(job => job.kind === 'scan' && job.state === 'done' && jobResult(job)?.trigger === 'watch')
+    .sort((a, b) => b.updated_at - a.updated_at || b.id.localeCompare(a.id))[0];
+  return { jobs: ordered.slice(0, 20),
+    counts: { total: jobs.length, ...Object.fromEntries(['running', 'done', 'error'].map(state => [state, jobs.filter(job => job.state === state).length])) },
+    active: active.slice(0, 10).map(jobSummary), active_total: active.length, active_limit: 10,
+    latest_completed_watch: watch ? { id: watch.id, updated_at: watch.updated_at, cursor: `fixture-watch:${watch.updated_at}:${watch.id}` } : null };
+}
+
+function historyPage(params) {
+  const q = (params.get('q') || '').trim();
+  const kind = (params.get('kind') || '').trim();
+  const state = (params.get('state') || '').trim();
+  const integer = (key, fallback) => {
+    if (!params.has(key)) return BigInt(fallback);
+    const value = params.get(key).trim();
+    if (!/^[+-]?\d+$/.test(value)) return null;
+    const parsed = BigInt(value);
+    return parsed < -(2n ** 63n) || parsed > 2n ** 63n - 1n ? null : parsed;
+  };
+  const requestedPage = integer('page', 1);
+  const requestedSize = integer('page_size', 20);
+  if ([...q].length > 500 || kind && !['scan', 'scrape', 'move'].includes(kind) || state && !['running', 'done', 'error'].includes(state)
+      || requestedPage === null || requestedSize === null || requestedSize < 1n || requestedSize > 100n) return null;
+  const matching = [...jobs].filter(job => (!kind || job.kind === kind) && (!state || job.state === state)
+    && (!q || ['id', 'kind', 'message', 'error'].some(key => String(job[key] || '').toLowerCase().includes(q.toLowerCase())))).sort(jobNewestFirst);
+  const pageSize = Number(requestedSize);
+  const pages = Math.ceil(matching.length / pageSize);
+  const page = requestedPage < 1n ? 1 : requestedPage > BigInt(pages || 1) ? pages || 1 : Number(requestedPage);
+  return { items: matching.slice((page - 1) * pageSize, page * pageSize).map(jobSummary), total: matching.length, page, page_size: pageSize, pages, q, kind, state };
+}
+
+function jobReport(job) {
+  const parsed = jobResult(job);
+  const result = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  const count = key => Array.isArray(result[key]) ? result[key].length : null;
+  return { report_type: 'job_result', report_scope: 'saved_result', generated_at: Date.now() / 1000,
+    job: { ...job, percent: jobPercent(job) }, parsed_result: parsed,
+    completeness: { scope: 'saved_result', details_saved: count('details'), details_total: Number.isSafeInteger(result.details_total) && result.details_total >= 0 ? result.details_total : null,
+      details_truncated: typeof result.details_truncated === 'boolean' ? result.details_truncated : null,
+      errors_saved: count('errors'), failures_saved: count('failures'), note: '只包含任务已保存的结果；未保存的逐项明细不能从报告恢复。' } };
 }
 
 async function handleApi(req, res, url) {
@@ -300,8 +366,20 @@ async function handleApi(req, res, url) {
     if (method === 'PUT') { aliases[kind] = payload.items || []; return json(res, { saved: aliases[kind].length }); }
     return json(res, { items: aliases[kind] });
   }
-  if (route === '/api/jobs') return json(res, { jobs });
-  if (route.startsWith('/api/jobs/')) return json(res, jobs.find(job => job.id === route.split('/').at(-1)) || { detail: '未知测试任务' });
+  if (route === '/api/jobs') return json(res, recentJobs());
+  if (route === '/api/jobs/history') {
+    const page = historyPage(url.searchParams);
+    return page ? json(res, page) : json(res, { detail: '任务历史筛选参数无效' }, 422);
+  }
+  const jobRoute = route.match(/^\/api\/jobs\/([^/]+)(?:\/(report))?$/);
+  if (jobRoute) {
+    const job = jobs.find(item => item.id === decodeURIComponent(jobRoute[1]));
+    if (!job) return json(res, { detail: '未知测试任务' }, 404);
+    if (!jobRoute[2]) return json(res, { ...job, percent: jobPercent(job) });
+    if ((url.searchParams.get('format') || 'json') !== 'json') return json(res, { detail: '报告格式无效' }, 422);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="metatidy-job-${job.id}.json"`, 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify(jobReport(job), null, 2));
+  }
   if (route === '/api/scan') return json(res, makeJob('scan', { scanned: tracks.length, added: 0, updated: 0, skipped: tracks.length, removed: 0 }));
   if (route === '/api/search') {
     const track = tracks.find(t => t.id === payload.track_id) || tracks[0];
@@ -328,7 +406,7 @@ async function handleApi(req, res, url) {
     if (lyrics) { track.has_lyrics = 1; track.lyrics = payload.candidate.lyrics; }
     return json(res, { written: Object.keys(plan.effective_fields), changes, cover, lyrics, file_changed: plan.count > 0 || cover || lyrics, skipped: plan.skipped });
   }
-  if (route === '/api/scrape/batch') return json(res, makeJob('scrape', { applied: 0, skipped: (payload.ids || []).length, failed: 0, details: [] }));
+  if (route === '/api/scrape/batch') return json(res, makeJob('scrape', { applied: 0, skipped: (payload.ids || []).length, failed: 0, details: [], details_total: 0, details_truncated: false }));
   if (route === '/api/template/test') {
     const track = tracks.find(t => t.id === Number(url.searchParams.get('track_id'))) || tracks[0];
     if (!track) return json(res, { detail: '测试曲库为空' }, 400);

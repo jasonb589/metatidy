@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 use sqlx::types::Json as SqlJson;
-use crate::jobs::{JobPatch, JobStore, Progress, ProgressEvent};
+use crate::jobs::{JobHistoryQuery, JobStore, Progress, ProgressEvent};
 use crate::mover::{self, MovePlan, PlanOptions};
 use crate::repo::{self, TrackQuery};
 use crate::templates;
@@ -293,19 +293,10 @@ async fn run_move(
     plan: MovePlan,
 ) {
     let mut progress = Progress::new(store.clone(), job_id.clone());
-    if !JobStore::acquire_slot().await {
-        let _ = store
-            .update(
-                &job_id,
-                &JobPatch {
-                    state: Some("error".to_string()),
-                    error: Some("等待其它任务超时".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await;
+    let Some(_slot) = JobStore::acquire_slot().await else {
+        progress.fail("TimeoutError", "等待其它任务超时").await;
         return;
-    }
+    };
     progress.note("等待扫描或整理任务完成…").await;
     // Hold through filesystem moves AND the final path updates. Otherwise a
     // watcher could index a destination first and make set_track_path collide.
@@ -364,12 +355,119 @@ pub async fn get_job(
     }
 }
 
-/// `/api/jobs`（最近 20 条，不带 percent）
+/// Keep the recent 20 records for existing clients; global activity and watch
+/// completion are independent of whichever history page the user is viewing.
 pub async fn list_jobs(State(state): State<AppState>) -> ApiResult {
     let store = JobStore::new(state.db.clone(), state.redis.clone());
     let rows = store.list(20).await?;
     let jobs: Vec<Value> = rows.iter().map(|row| row.json(false)).collect();
-    Ok(Json(json!({ "jobs": jobs })))
+    let mut result = store.overview().await?;
+    result["jobs"] = json!(jobs);
+    Ok(Json(result))
+}
+
+pub async fn job_history(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let query = parse_job_history_query(&RawQuery(params))?;
+    let store = JobStore::new(state.db.clone(), state.redis.clone());
+    Ok(Json(store.history(&query).await?))
+}
+
+pub async fn job_report(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let query = RawQuery(params);
+    let format = query.str("format", "json");
+    if format != "json" {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "format"],
+            "任务结果报告格式须为 json",
+            json!(format),
+            None,
+        ));
+    }
+    let store = JobStore::new(state.db.clone(), state.redis.clone());
+    let job = store
+        .get(&job_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("任务不存在"))?;
+    let content = serde_json::to_vec_pretty(&job.report()).map_err(anyhow::Error::from)?;
+    let disposition = HeaderValue::from_str(&format!(
+        "attachment; filename=\"metatidy-job-{}.json\"",
+        job.id,
+    ))
+    .map_err(anyhow::Error::from)?;
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            ),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        content,
+    )
+        .into_response())
+}
+
+fn parse_job_history_query(query: &RawQuery) -> Result<JobHistoryQuery, ApiError> {
+    let q = query.str("q", "").trim().to_string();
+    if q.chars().count() > 500 {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "q"],
+            "任务搜索最多 500 字",
+            json!(q),
+            Some(json!({"max_length": 500})),
+        ));
+    }
+    let kind = query.str("kind", "").trim().to_string();
+    if !matches!(kind.as_str(), "" | "scan" | "scrape" | "move") {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "kind"],
+            "未知的任务类型",
+            json!(kind),
+            None,
+        ));
+    }
+    let state = query.str("state", "").trim().to_string();
+    if !matches!(state.as_str(), "" | "running" | "done" | "error") {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "state"],
+            "未知的任务状态",
+            json!(state),
+            None,
+        ));
+    }
+    let page_size = query.i64("page_size", 20)?;
+    if !(1..=100).contains(&page_size) {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "page_size"],
+            "每页任务数须为 1–100",
+            json!(page_size),
+            Some(json!({"ge": 1, "le": 100})),
+        ));
+    }
+    Ok(JobHistoryQuery {
+        q,
+        kind,
+        state,
+        page: query.i64("page", 1)?,
+        page_size,
+    })
 }
 
 /// `POST /api/scan`（请求体可整体缺省）
@@ -940,6 +1038,36 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn job_history_filters_validate_without_turning_search_into_a_query() {
+        let defaults = parse_job_history_query(&query(&[])).unwrap();
+        assert_eq!((defaults.page, defaults.page_size), (1, 20));
+        assert!(defaults.q.is_empty() && defaults.kind.is_empty() && defaults.state.is_empty());
+        let parsed = parse_job_history_query(&query(&[
+            ("q", " 100%_!' "),
+            ("kind", " scan "),
+            ("state", " running "),
+            ("page", "-1"),
+        ]))
+        .unwrap();
+        assert_eq!(parsed.q, "100%_!'");
+        assert_eq!(parsed.kind, "scan");
+        assert_eq!(parsed.state, "running");
+        assert_eq!(parsed.page, -1);
+        for pairs in [
+            vec![("kind", "unknown")],
+            vec![("state", "queued")],
+            vec![("page_size", "0")],
+            vec![("page_size", "101")],
+            vec![("page", "abc")],
+            vec![("page", "9223372036854775808")],
+        ] {
+            assert!(parse_job_history_query(&query(&pairs)).is_err());
+        }
+        assert!(parse_job_history_query(&query(&[("q", &"字".repeat(500))])).is_ok());
+        assert!(parse_job_history_query(&query(&[("q", &"字".repeat(501))])).is_err());
     }
 
     #[test]

@@ -1,10 +1,11 @@
 /** Keyed task cards: polling updates text, never replaces disclosure controls. */
 import * as ui from "./ui.js";
+import { api, jobReportUrl } from "./api.js";
 
-const cards = new Map();
+const collections = new Map();
+let sessionRevision = 0;
 const KIND_ICONS = { scan: "scan", scrape: "search", move: "move" };
 const STATE_COPY = { running: ["运行中", "badge-info"], done: ["已完成", "badge-ok"], error: ["失败", "badge-err"] };
-let emptyNode;
 
 export function parseResult(job) {
   if (job.result && typeof job.result === "object" && !Array.isArray(job.result)) return job.result;
@@ -18,6 +19,26 @@ function setText(node, value) {
   if (!node) return;
   const text = value == null ? "" : String(value);
   if (node.textContent !== text) node.textContent = text;
+}
+
+function jobVersion(job) {
+  return JSON.stringify([job.state, job.updated_at, job.done, job.total, job.message, job.error]);
+}
+
+function latestJob(current, incoming) {
+  if (!current) return incoming;
+  const known = Number(current.updated_at) || 0;
+  const next = Number(incoming.updated_at) || 0;
+  if (known > next || known === next && current.state !== "running" && incoming.state === "running") return current;
+  if (known === next && current.state === "running" && incoming.state === "running" && Number(current.done) > Number(incoming.done)) return current;
+  return incoming;
+}
+
+function cancelDetails(card) {
+  card.request += 1;
+  card.controller?.abort();
+  card.controller = null;
+  card.loading = false;
 }
 
 function describeError(value) {
@@ -62,7 +83,7 @@ function contextRows(job, result, automatic) {
   return rows;
 }
 
-function createCard(id) {
+function createCard(id, cards, isAutomatic) {
   const title = ui.el("span", { class: "job-title" });
   const time = ui.el("time", { class: "job-time" });
   const message = ui.el("span", { class: "job-message" });
@@ -89,10 +110,17 @@ function createCard(id) {
   const details = ui.el("section", { class: "job-detail-section", hidden: true }, [
     ui.el("h3", { text: "处理明细" }), detailRows, detailNote,
   ]);
-  const body = ui.el("div", { class: "job-body" }, [progress, metrics, context, errors, details]);
+  const resultStatus = ui.el("p", { class: "job-result-status", role: "status" });
+  const retry = ui.el("button", { type: "button", class: "btn btn-sm job-detail-retry", text: "重新读取结果", hidden: true });
+  const report = ui.el("a", { class: "btn btn-sm job-report-download", href: jobReportUrl(id), download: "", text: "下载已存结果 JSON" });
+  const reportNote = ui.el("span", { class: "hint", text: "下载服务器已保存的汇总与明细。" });
+  const body = ui.el("div", { class: "job-body" }, [progress, metrics, context, resultStatus, retry, errors, details, ui.el("div", { class: "job-report-actions" }, [reportNote, report])]);
   const node = ui.el("details", { class: "job-card", dataset: { jobId: id } }, [summary, body]);
   const card = { node, title, time, message, icon, state, metrics, context, progress, progressText, progressBar, progressFill,
-    errors, errorTitle, errorText, copy, copyFeedback, details, detailRows, detailNote, fingerprint: "", errorReport: "", hasErrors: false };
+    errors, errorTitle, errorText, copy, copyFeedback, details, detailRows, detailNote, resultStatus, retry, report, reportNote,
+    fingerprint: "", errorReport: "", hasErrors: false, job: null, detail: null, loading: false, request: 0, controller: null, sourceVersion: "", isAutomatic };
+  retry.addEventListener("click", () => void loadDetails(card, cards));
+  node.addEventListener("toggle", () => { if (node.open && card.job && card.job.result === undefined && !card.detail && !card.loading) void loadDetails(card, cards); });
   copy.addEventListener("click", async () => {
     const text = card.errorReport;
     try {
@@ -115,7 +143,32 @@ function createCard(id) {
   return card;
 }
 
+async function loadDetails(card, cards) {
+  const id = card.node.dataset.jobId;
+  const request = ++card.request;
+  const session = sessionRevision;
+  const sourceVersion = card.sourceVersion;
+  const controller = new AbortController(); card.controller = controller;
+  card.loading = true; card.retry.hidden = true;
+  setText(card.resultStatus, "正在读取服务器保存的任务结果…");
+  try {
+    const job = await api.job(id, { signal: controller.signal });
+    if (session !== sessionRevision || cards.get(id) !== card || request !== card.request || sourceVersion !== card.sourceVersion) return;
+    if (String(job.id) !== id || job.result === undefined) throw new Error("任务详情响应不完整。");
+    if (Number(job.updated_at) < Number(card.job.updated_at) || card.job.state !== "running" && job.state === "running") throw new Error("任务状态已更新，请重新读取最新结果。");
+    const restoreRetryFocus = document.activeElement === card.retry;
+    card.detail = job; card.fingerprint = "";
+    updateCard(card, job, card.isAutomatic(job));
+    if (restoreRetryFocus && card.node.open) card.report.focus({ preventScroll: true });
+  } catch (error) {
+    if (session !== sessionRevision || cards.get(id) !== card || request !== card.request) return;
+    setText(card.resultStatus, `结果读取失败：${error.message}`); card.retry.hidden = false;
+  } finally { if (request === card.request) { card.loading = false; card.controller = null; } }
+}
+
 function updateCard(card, job, automatic) {
+  card.job = job;
+  const hasResult = job.result !== undefined;
   const fingerprint = JSON.stringify([job, automatic]);
   if (card.fingerprint === fingerprint) {
     card.errors.hidden = !card.hasErrors && !card.errors.contains(document.activeElement);
@@ -123,11 +176,13 @@ function updateCard(card, job, automatic) {
   }
   const previousState = card.node.dataset.jobState;
   card.fingerprint = fingerprint;
-  const result = parseResult(job);
+  const result = hasResult ? parseResult(job) : job.summary || {};
   const state = STATE_COPY[job.state] || [job.state || "未知", "badge-mute"];
+  const partial = job.state === "done" && (job.has_errors || Number(result.failed) > 0 || errorsFor(job, result).length > 0);
+  card.node.dataset.partial = String(Boolean(partial));
   card.node.dataset.jobState = job.state;
   setText(card.title, automatic ? "自动增量扫描" : ui.jobKindLabel(job.kind));
-  setText(card.state, state[0]);
+  setText(card.state, partial ? "已完成 · 部分失败" : state[0]);
   card.state.className = `badge ${state[1]}`;
   if (card.icon.dataset.kind !== job.kind) {
     card.icon.dataset.kind = job.kind;
@@ -153,6 +208,16 @@ function updateCard(card, job, automatic) {
   else card.progressBar.removeAttribute("aria-valuenow");
   card.progressBar.dataset.indeterminate = String(!total);
   card.progressFill.style.width = total ? `${percent}%` : "24%";
+  if (!card.loading || hasResult) {
+    let status = !hasResult ? "展开后读取完整的已保存结果。" : !job.result ? job.state === "running" ? "任务仍在进行，尚未保存最终结果。" : "这个任务没有保存结果正文。" : "";
+    if (hasResult && job.result) {
+      try { JSON.parse(typeof job.result === "string" ? job.result : JSON.stringify(job.result)); }
+      catch { status = "已保存结果无法解析，可下载原始记录查看。"; }
+    }
+    setText(card.resultStatus, status);
+    if (hasResult) card.retry.hidden = true;
+  }
+  setText(card.reportNote, job.state === "running" ? "下载进行中的快照，结果尚未最终完成。" : job.kind === "scrape" && result.details_truncated !== false ? "已存明细可能截断；报告不会补造缺失记录。" : job.kind === "move" ? "结果不包含全部成功文件的最终路径。" : "下载服务器已保存的汇总与明细。");
 
   card.metrics.hidden = !metrics.length;
   card.metrics.replaceChildren(...metrics.map(([key, label]) => ui.el("div", { class: "job-metric", dataset: { metric: key } }, [
@@ -175,47 +240,72 @@ function updateCard(card, job, automatic) {
   card.errors.hidden = !card.hasErrors && !card.errors.contains(document.activeElement);
   setText(card.errorTitle, `错误详情${errorLines.length ? ` · ${errorLines.length}` : ""}`);
 
-  const rows = Array.isArray(result.details) ? result.details.filter(item => item && !item.error) : [];
-  card.details.hidden = !rows.length;
+  const storedRows = Array.isArray(result.details) ? result.details : [];
+  const rows = storedRows.filter(item => item && !item.error);
+  card.details.hidden = !storedRows.length && result.details_truncated !== true;
   card.detailRows.replaceChildren(...rows.slice(0, 30).map(item => {
     const candidate = item.candidate || {};
     const who = [candidate.title || item.title || (item.track_id != null ? `曲目 #${item.track_id}` : "曲目"), candidate.artist].filter(Boolean).join(" · ");
     const what = [item.status, candidate.source, item.score != null ? `匹配分 ${item.score}` : ""].filter(Boolean).join(" · ");
     return ui.el("div", { class: "job-detail-row" }, [ui.el("span", { text: who }), ui.el("span", { text: what })]);
   }));
-  setText(card.detailNote, rows.length > 30 ? `显示前 30 条，共 ${ui.fmtNum(rows.length)} 条结果。` : "");
-  card.detailNote.hidden = rows.length <= 30;
+  const truncated = result.details_truncated === true;
+  const notes = [];
+  if (rows.length > 30) notes.push("非错误明细显示前 30 条。");
+  if (storedRows.length) notes.push(`已保存 ${ui.fmtNum(storedRows.length)} 条明细（含错误）。`);
+  if (truncated) notes.push(`保存内容已截断${result.details_total != null ? `，原明细总数 ${ui.fmtNum(result.details_total)}` : ""}。`);
+  else if (job.kind === "scrape" && hasResult && storedRows.length && result.details_truncated == null) notes.push("旧记录未注明是否截断。");
+  setText(card.detailNote, notes.join(""));
+  card.detailNote.hidden = !notes.length;
   if (previousState && previousState !== job.state && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
     card.state.animate([{ opacity: .3, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "ease-out" });
   }
 }
 
-export function renderJobs(list, isAutomatic) {
-  const host = ui.byId("jobs-list");
+export function renderJobs(list, isAutomatic, { hostId = "jobs-list", retainOpen = true } = {}) {
+  const host = ui.byId(hostId);
   if (!host) return;
+  let collection = collections.get(hostId);
+  if (!collection) { collection = { cards: new Map(), empty: null }; collections.set(hostId, collection); }
+  const { cards } = collection;
   const focus = host.contains(document.activeElement) ? document.activeElement : null;
   const scrollTop = host.scrollTop;
   const current = new Set();
   const ordered = [];
-  for (const job of list) {
-    const id = String(job.id);
+  for (const incoming of list) {
+    const id = String(incoming.id);
     if (current.has(id)) continue;
     current.add(id);
-    const card = cards.get(id) || createCard(id);
-    updateCard(card, job, isAutomatic(job));
+    const card = cards.get(id) || createCard(id, cards, isAutomatic);
+    const job = latestJob(card.job, incoming);
+    const version = jobVersion(job);
+    const changed = card.sourceVersion && card.sourceVersion !== version;
+    if (changed) { cancelDetails(card); card.detail = null; }
+    else if (job.result !== undefined && card.loading) cancelDetails(card);
+    card.sourceVersion = version;
+    let shown = job;
+    if (job.result === undefined && card.detail) {
+      if (Number(job.updated_at) <= Number(card.detail.updated_at) && job.state === card.detail.state) shown = { ...job, ...card.detail };
+      else card.detail = null;
+    }
+    updateCard(card, shown, isAutomatic(shown));
+    if (changed && card.node.open && job.result === undefined && !card.detail && !card.loading) void loadDetails(card, cards);
     ordered.push(card.node);
   }
   for (const [id, card] of cards) {
     if (current.has(id)) continue;
     // A task may fall outside the server's recent-job window while being read.
-    if (card.node.open || card.node.contains(focus)) ordered.push(card.node);
-    else { card.node.remove(); cards.delete(id); }
+    if (retainOpen && (card.node.open || card.node.contains(focus))) {
+      ordered.push(card.node);
+      if (card.job?.state === "running" && !card.loading) void loadDetails(card, cards);
+    }
+    else { cancelDetails(card); card.node.remove(); cards.delete(id); }
   }
-  if (ordered.length) emptyNode?.remove();
+  if (ordered.length) collection.empty?.remove();
   else {
-    emptyNode ||= ui.el("div", { class: "jobs-empty" }, [ui.icon("jobs", { size: 30 }),
+    collection.empty ||= ui.el("div", { class: "jobs-empty" }, [ui.icon("jobs", { size: 30 }),
       ui.el("strong", { text: "音乐正在好好收藏" }), ui.el("p", { text: "扫描、刮削和归档任务会显示在这里。" })]);
-    host.append(emptyNode);
+    host.append(collection.empty);
   }
   ordered.forEach((node, index) => {
     const at = host.children[index] || null;
@@ -226,6 +316,13 @@ export function renderJobs(list, isAutomatic) {
   });
   if (focus?.isConnected && document.activeElement !== focus) focus.focus({ preventScroll: true });
   host.scrollTop = scrollTop;
-  const running = list.filter(job => job.state === "running").length;
-  setText(ui.byId("jobs-summary"), running ? `${running} 项正在进行 · 最近 ${list.length} 项任务` : list.length ? `最近 ${list.length} 项任务 · 点击查看结果` : "工作记录，随时可查");
 }
+
+export function clearJobs(hostId) {
+  const collection = collections.get(hostId);
+  if (!collection) return;
+  for (const card of collection.cards.values()) cancelDetails(card);
+  collection.cards.clear(); collections.delete(hostId); ui.byId(hostId)?.replaceChildren();
+}
+
+window.addEventListener("metatidy:unauthorized", () => { sessionRevision += 1; [...collections.keys()].forEach(clearJobs); });

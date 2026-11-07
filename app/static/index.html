@@ -15,6 +15,7 @@
 <link rel="stylesheet" href="./albums.css">
 <link rel="stylesheet" href="./review-queue.css">
 <link rel="stylesheet" href="./move-review.css">
+<link rel="stylesheet" href="./jobs-center.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -91,22 +92,35 @@
     <button class="btn btn-ghost btn-palette" id="btn-palette" title="命令面板（Ctrl/⌘ + K）"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>搜索或跳转</span><kbd>Ctrl K</kbd></button>
     <span class="header-divider"></span>
     <button class="btn btn-ghost btn-sm" id="btn-theme" title="切换日夜主题">切换主题</button>
-    <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-expanded="false" aria-controls="jobs-pop"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v14h16V6a2 2 0 0 0-2-2h-2"/><rect x="8" y="2" width="8" height="4" rx="1.5"/><path d="m8 13 3 3 5-6"/></svg>
-      <span>任务中心</span><span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
+    <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-label="任务中心" aria-expanded="false" aria-controls="jobs-pop"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v14h16V6a2 2 0 0 0-2-2h-2"/><rect x="8" y="2" width="8" height="4" rx="1.5"/><path d="m8 13 3 3 5-6"/></svg>
+      <span>任务</span><span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
     </button>
   </div>
 </header>
 
-<div class="jobs-pop" id="jobs-pop" data-open="false" role="region" aria-label="最近任务">
+<div class="jobs-pop" id="jobs-pop" data-open="false" role="region" aria-label="任务中心">
   <div class="card-head">
-    <div class="jobs-heading"><p class="eyebrow">WORKSPACE ACTIVITY</p><h2>最近任务</h2></div>
+    <div class="jobs-heading"><p class="eyebrow">WORKSPACE ACTIVITY</p><h2>任务中心</h2></div>
     <div class="grow">
       <button class="btn btn-sm btn-ghost" id="jobs-refresh" title="刷新任务">刷新</button>
       <button class="btn btn-sm btn-ghost" id="jobs-close" aria-label="关闭任务面板">关闭</button>
     </div>
   </div>
   <p class="jobs-summary" id="jobs-summary" role="status">工作记录，随时可查</p>
-  <div class="card-body" id="jobs-list"></div>
+  <div class="jobs-global-stats" id="jobs-global-stats" aria-label="全局任务统计"></div>
+  <div class="jobs-center-tabs" role="tablist" aria-label="任务视图"><button type="button" id="jobs-overview-tab" role="tab" aria-selected="true" aria-controls="jobs-overview">近期与进行中</button><button type="button" id="jobs-history-tab" role="tab" aria-selected="false" aria-controls="jobs-history" tabindex="-1">历史记录</button></div>
+  <section id="jobs-overview" class="jobs-center-pane" role="tabpanel" aria-labelledby="jobs-overview-tab"><div class="jobs-active-hint" id="jobs-active-hint" hidden></div><div class="card-body" id="jobs-list"></div></section>
+  <section id="jobs-history" class="jobs-center-pane" role="tabpanel" aria-labelledby="jobs-history-tab" hidden>
+    <div class="jobs-history-controls">
+      <input id="jobs-history-q" type="search" autocomplete="off" maxlength="500" placeholder="搜索任务编号、消息或错误…" aria-label="搜索任务历史">
+      <div class="jobs-history-selects"><label class="row-inline"><span class="lbl">类型</span><select id="jobs-history-kind"><option value="">全部类型</option><option value="scan">扫描</option><option value="scrape">刮削</option><option value="move">整理移动</option></select></label><label class="row-inline"><span class="lbl">状态</span><select id="jobs-history-state"><option value="">全部状态</option><option value="running">进行中（含排队）</option><option value="done">已完成</option><option value="error">任务失败</option></select></label><button id="jobs-history-reset" type="button" class="btn btn-sm btn-ghost">清空</button></div>
+      <p class="hint">“任务失败”指任务未正常完成；完成后的部分文件失败会在结果中标注。</p>
+    </div>
+    <div id="jobs-history-update" class="jobs-history-update" hidden><span>有新任务或状态更新，列表顺序保持不变</span><button id="jobs-history-load-new" type="button" class="btn btn-sm">刷新当前查询</button></div>
+    <div id="jobs-history-status" role="status" aria-live="polite"></div>
+    <div id="jobs-history-list" class="jobs-history-list"></div>
+    <nav id="jobs-history-pager" class="jobs-history-pager" aria-label="任务历史分页"><span id="jobs-history-total">尚未查询</span><div class="spacer"></div><button id="jobs-history-prev" type="button" class="btn btn-sm">上一页</button><span id="jobs-history-page">1 / 1</span><button id="jobs-history-next" type="button" class="btn btn-sm">下一页</button></nav>
+  </section>
 </div>
 
 <main id="main" tabindex="-1">

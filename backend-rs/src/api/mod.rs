@@ -811,6 +811,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/move/plan/:token/export", get(moves::move_plan_export))
         .route("/api/move/execute", post(moves::move_execute))
         .route("/api/jobs", get(moves::list_jobs))
+        .route("/api/jobs/history", get(moves::job_history))
+        .route("/api/jobs/:job_id/report", get(moves::job_report))
         .route("/api/jobs/:job_id", get(moves::get_job))
         .route("/api/scan", post(moves::scan))
         .route(

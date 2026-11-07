@@ -16,7 +16,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
-use crate::jobs::{JobPatch, JobStore, Progress};
+use crate::jobs::{JobStore, Progress};
 use crate::models::Track;
 use crate::repo;
 use crate::scrapers::{self, ScrapeQuery};
@@ -245,19 +245,10 @@ struct BatchParams {
 /// 批量刮削的任务体（与 Python `_run_batch_scrape` 逐条对齐）。
 async fn run_batch(state: AppState, store: JobStore, job_id: String, params: BatchParams) {
     let mut progress = Progress::new(store.clone(), job_id.clone());
-    if !JobStore::acquire_slot().await {
-        let _ = store
-            .update(
-                &job_id,
-                &JobPatch {
-                    state: Some("error".to_string()),
-                    error: Some("等待其它任务超时".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await;
+    let Some(_slot) = JobStore::acquire_slot().await else {
+        progress.fail("TimeoutError", "等待其它任务超时").await;
         return;
-    }
+    };
     progress.note("开始").await;
     progress.set_total(params.ids.len() as i64).await;
 
@@ -375,6 +366,8 @@ async fn run_batch(state: AppState, store: JobStore, job_id: String, params: Bat
             .await;
     }
 
+    let details_total = details.len();
+    let details_truncated = details_total > super::PREVIEW_DISPLAY_LIMIT;
     let details: Vec<Value> = details.into_iter().take(super::PREVIEW_DISPLAY_LIMIT).collect();
     progress
         .finish(Some(json!({
@@ -383,6 +376,8 @@ async fn run_batch(state: AppState, store: JobStore, job_id: String, params: Bat
             "failed": failed,
             "search_only": search_only,
             "details": details,
+            "details_total": details_total,
+            "details_truncated": details_truncated,
         })))
         .await;
 }
