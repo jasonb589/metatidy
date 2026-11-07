@@ -239,7 +239,18 @@ try {
     assert.equal(await page.locator('.job-card').count(), 0); assert.equal(await page.locator('.job-report-download').count(), 0);
   }));
   await check('Task tabs support roving keyboard focus and refresh keeps the current view', () => withPage(async ({ page }) => {
-    await page.locator('#btn-jobs').click(); await page.locator('#jobs-overview-tab').focus(); await page.keyboard.press('ArrowRight');
+    // Hold the opening animation-frame focus until a user has already moved
+    // into the tabs. Initial focus must not undo that deliberate interaction.
+    await page.evaluate(() => {
+      const raf = window.requestAnimationFrame, pending = [];
+      window.requestAnimationFrame = callback => { pending.push(callback); return 0; };
+      try { document.querySelector('#btn-jobs').click(); document.querySelector('#jobs-overview-tab').focus(); }
+      finally { window.requestAnimationFrame = raf; }
+      window.releaseJobsOpeningFocus = () => Promise.all(pending.map(callback => new Promise(resolve => raf(time => { callback(time); resolve(); }))));
+    });
+    await page.keyboard.press('ArrowRight');
+    await page.evaluate(() => window.releaseJobsOpeningFocus());
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'jobs-history-tab', 'opening focus must not steal focus from a tab');
     await page.waitForFunction(() => document.querySelector('#jobs-history-total').textContent.startsWith('匹配'));
     assert.equal(await page.evaluate(() => document.activeElement.id), 'jobs-history-tab'); assert.equal(await page.locator('#jobs-overview-tab').getAttribute('tabindex'), '-1');
     await page.keyboard.press('Home'); assert.equal(await page.evaluate(() => document.activeElement.id), 'jobs-overview-tab'); assert.equal(await page.locator('#jobs-overview').isVisible(), true);

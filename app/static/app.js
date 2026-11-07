@@ -656,7 +656,9 @@ function wireJobs() {
         if (pop.dataset.open === "true") refreshJobs().catch(() => {});
       }, 3000);
       if (!wasOpen) requestAnimationFrame(() => {
-        if (pop.dataset.open === "true") ui.byId("jobs-close")?.focus();
+          // A user may already have entered the panel before this frame runs.
+          // Initial focus must not take over an intentional keyboard action.
+          if (pop.dataset.open === "true" && (document.activeElement === button || document.activeElement === document.body)) ui.byId("jobs-close")?.focus();
       });
     }
   }
