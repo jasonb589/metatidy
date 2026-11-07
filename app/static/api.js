@@ -127,12 +127,18 @@ export const api = {
 
   movePreview: (payload) => request(`${API}/move/preview`, { method: "POST", body: payload, timeout: 120000 }),
   movePlan: (token) => request(`${API}/move/plan/${token}`),
+  movePlanItems: (token, params, options = {}) => request(`${API}/move/plan/${encodeURIComponent(token)}/items?${qs(params)}`, options),
   moveExecute: (payload) => request(`${API}/move/execute`, { method: "POST", body: payload, timeout: 120000 }),
 
   templateTest: (params) => request(`${API}/template/test?${qs(params)}`),
   aliases: (kind) => request(`${API}/aliases/${kind}`),
   saveAliases: (kind, items) => request(`${API}/aliases/${kind}`, { method: "PUT", body: { items } }),
 };
+
+/** Downloads contain a plan snapshot, never a record of actual final paths. */
+export function movePlanExportUrl(token, params) {
+  return `${API}/move/plan/${encodeURIComponent(token)}/export?${qs(params)}`;
+}
 
 /** 列表统一复用 128px 缩略图；视觉尺寸由调用处独立决定。 */
 export function coverUrl(trackId, size = 128) {

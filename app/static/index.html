@@ -14,6 +14,7 @@
 <link rel="stylesheet" href="./library-tools.css">
 <link rel="stylesheet" href="./albums.css">
 <link rel="stylesheet" href="./review-queue.css">
+<link rel="stylesheet" href="./move-review.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -468,33 +469,46 @@
             <span class="hint">0 = 不限</span>
           </label>
           <button class="btn btn-primary" id="btn-move-preview">预览计划</button>
-          <button class="btn" id="btn-move-dry" disabled>仅演练</button>
-          <button class="btn btn-danger" id="btn-move-exec" disabled>确认执行</button>
         </div>
-        <p class="hint">「仅演练」只走执行流程、绝不移动文件；「确认执行」会弹二次确认，写明将移动多少文件、且无法自动撤销。</p>
+        <p class="hint">「仅演练」按已保存计划统计，不重新检查文件现状，也不移动文件；「确认执行」会列出整份计划的执行范围，确认后才移动。</p>
         <div id="move-progress" hidden></div>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card move-review-card" id="move-review-card">
       <div class="card-head">
-        <h2>移动计划</h2>
+        <h2>计划审阅</h2>
         <span class="badge count-chip" id="move-planned">—</span>
-        <div class="grow" id="move-counts"></div>
+        <span id="move-plan-badge" class="badge badge-mute">等待预览</span>
       </div>
-      <div class="card-body tight">
-        <div class="row" id="move-filters" role="group" aria-label="按动作筛选计划"></div>
+      <div id="move-review-overview" class="move-review-overview" hidden>
+        <p class="move-plan-meta" id="move-plan-meta"></p>
+        <div id="move-counts" class="move-counts" role="group" aria-label="整份计划的动作计数"></div>
+        <div class="move-execution-bar">
+          <p id="move-execution-scope">筛选只改变查看范围；演练和执行始终处理整份计划。</p>
+          <button class="btn" id="btn-move-dry" disabled>仅演练</button>
+          <button class="btn btn-danger" id="btn-move-exec" disabled>确认执行</button>
+        </div>
+      </div>
+      <div class="move-review-toolbar" id="move-filters" hidden>
+        <label class="search-field move-plan-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><input id="move-plan-q" type="search" maxlength="500" autocomplete="off" placeholder="搜索路径、曲目或原因…" aria-label="搜索完整移动计划"></label>
+        <label class="row-inline"><span class="lbl">动作</span><select id="move-plan-action" aria-label="筛选计划动作"><option value="">全部动作</option><option value="move">移动</option><option value="conflict_rename">改名避让</option><option value="conflict_overwrite">覆盖目标</option><option value="conflict_skip">跳过冲突</option><option value="in_place">已在目标位置</option><option value="invalid">无效项</option></select></label>
+        <button id="move-plan-reset" class="btn btn-sm btn-ghost" type="button">清空筛选</button>
+        <details class="move-export"><summary class="btn btn-sm">导出计划</summary><div class="move-export-menu"><p>计划目标可能在执行时调整，不代表最终文件位置。</p><label class="field"><span class="lbl">导出范围</span><select id="move-export-scope"><option value="all">整份计划</option><option value="filtered">当前筛选结果</option></select></label><div class="row"><a class="btn btn-sm" id="move-export-csv" download>CSV 表格</a><a class="btn btn-sm" id="move-export-json" download>JSON</a></div><span class="hint" id="move-export-note"></span></div></details>
+      </div>
+      <div class="move-plan-notices">
         <div id="move-plan-state"></div>
+        <div id="move-list-status" role="status" aria-live="polite"></div>
       </div>
       <div class="table-wrap scroll" id="move-table-wrap" hidden>
         <table class="data" id="move-table">
           <caption class="sr-only">移动计划明细</caption>
           <colgroup>
-            <col style="width:64px"><col style="width:36%"><col style="width:36%"><col style="width:96px"><col style="width:22%">
+            <col style="width:65px"><col style="width:32%"><col style="width:32%"><col style="width:110px"><col>
           </colgroup>
           <thead>
             <tr>
-              <th scope="col" class="num">#ID</th>
+              <th scope="col" class="num">序号</th>
               <th scope="col">源路径</th>
               <th scope="col">目标路径</th>
               <th scope="col">动作</th>
@@ -504,6 +518,8 @@
           <tbody id="move-tbody"></tbody>
         </table>
       </div>
+      <div id="move-plan-cards" class="move-plan-cards" hidden></div>
+      <nav id="move-plan-pager" class="move-plan-pager" aria-label="计划分页" hidden><span id="move-plan-range"></span><div class="spacer"></div><button id="move-plan-prev" class="btn btn-sm" type="button">上一页</button><span id="move-plan-page"></span><button id="move-plan-next" class="btn btn-sm" type="button">下一页</button></nav>
       <div class="card-body tight" id="move-summary"></div>
     </div>
   </div>

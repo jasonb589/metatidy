@@ -6,11 +6,13 @@
 //!   再次非 dry_run 提交 → **409**（e2e 断言的那条）
 //! - 任务进度：Postgres 落行 + Redis 存实时值；完成时强制 `done == total`（percent=100.0）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{header, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 use sqlx::types::Json as SqlJson;
@@ -36,8 +38,7 @@ pub async fn move_preview(State(state): State<AppState>, body: Bytes) -> ApiResu
 
     let mut rows: Vec<crate::models::Track> = if !ids.is_empty() {
         // 给了 ids 就忽略 filters（Python：`payload.ids or None` 优先）
-        let map = fetch_by_ids(&state, &ids).await?;
-        ids.iter().filter_map(|id| map.get(id).cloned()).collect()
+        fetch_selected(&state, &ids).await?
     } else {
         let filter_ids = match filters.get("ids") {
             Some(Value::Array(items)) => items
@@ -165,6 +166,87 @@ pub async fn move_plan(
     }
 }
 
+/// Filter the stored complete plan, not the first 500 preview rows. No audio
+/// files are accessed by browsing or exporting a plan snapshot.
+pub async fn move_plan_items(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let query = RawQuery(params);
+    let filter = PlanFilter::parse(&query)?;
+    let page_size = query.i64("page_size", 100)?;
+    if !(1..=200).contains(&page_size) {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "page_size"],
+            "每页计划条数须为 1–200",
+            json!(page_size),
+            Some(json!({"ge": 1, "le": 200})),
+        ));
+    }
+    let requested_page = query.i64("page", 1)?;
+    let report = query_plan(&state, &token, &filter, Some((requested_page, page_size))).await?;
+    Ok(Json(report))
+}
+
+/// Download a plan snapshot only. The file makes no claim about actual moves.
+pub async fn move_plan_export(
+    State(state): State<AppState>,
+    AxumPath(token): AxumPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let query = RawQuery(params);
+    let filter = PlanFilter::parse(&query)?;
+    let format = query.str("format", "csv");
+    if !matches!(format.as_str(), "csv" | "json") {
+        return Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "format"],
+            "报告格式须为 csv 或 json",
+            json!(format),
+            None,
+        ));
+    }
+    let mut report = query_plan(&state, &token, &filter, None).await?;
+    report["report_type"] = json!("move_plan");
+    report["report_scope"] = json!(if filter.q.is_empty() && filter.action.is_empty() {
+        "complete"
+    } else {
+        "filtered"
+    });
+    let (mime, content) = if format == "csv" {
+        ("text/csv; charset=utf-8", plan_csv(&report).into_bytes())
+    } else {
+        (
+            "application/json; charset=utf-8",
+            serde_json::to_vec_pretty(&report).map_err(anyhow::Error::from)?,
+        )
+    };
+    let safe_token: String = token
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(64)
+        .collect();
+    let disposition = HeaderValue::from_str(&format!(
+        "attachment; filename=\"metatidy-move-plan-{safe_token}.{format}\""
+    ))
+    .map_err(anyhow::Error::from)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
+            (header::CONTENT_DISPOSITION, disposition),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        content,
+    )
+        .into_response())
+}
+
 /// `POST /api/move/execute`
 pub async fn move_execute(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = parse_body(&body)?;
@@ -180,38 +262,35 @@ pub async fn move_execute(State(state): State<AppState>, body: Bytes) -> ApiResu
     let token = body_str(&payload, "token", "");
     let dry_run = body_bool(&payload, "dry_run", false)?;
 
-    let Some((payload, executed)) = load_plan(&state, &token).await? else {
-        return Err(ApiError::not_found("计划不存在，请重新预览"));
-    };
-    if executed && !dry_run {
-        return Err(ApiError::conflict("这个计划已经执行过了，请重新预览"));
-    }
-
-    let plan = plan_from_json(&payload);
     if dry_run {
+        let Some((payload, _)) = load_plan(&state, &token).await? else {
+            return Err(ApiError::not_found("计划不存在，请重新预览"));
+        };
+        let plan = plan_from_json(&payload);
         let summary = mover::execute_plan(&plan, true, |_, _, _| {});
         return Ok(Json(summary_json(&summary)));
     }
 
+    // Claim and job creation either both commit or both roll back. Concurrent
+    // requests cannot start a second worker while the first one is queued.
+    let (payload, job_id) = claim_plan_and_create_job(&state, &token).await?;
+    let plan = plan_from_json(&payload);
     let store = JobStore::new(state.db.clone(), state.redis.clone());
-    let job_id = store.create("move").await?;
     let job_state = state.clone();
     let job_store = store.clone();
     let job_id_for_task = job_id.clone();
-    let token_for_task = token.clone();
     tokio::spawn(async move {
-        run_move(job_state, job_store, job_id_for_task, plan, token_for_task).await;
+        run_move(job_state, job_store, job_id_for_task, plan).await;
     });
     Ok(Json(json!({ "job_id": job_id })))
 }
 
-/// 移动任务体：执行 → 同步索引 → 标记计划已执行 → 写结果。
+/// 移动任务体：执行 → 同步索引 → 写结果。计划已在创建任务时原子领取。
 async fn run_move(
     state: AppState,
     store: JobStore,
     job_id: String,
     plan: MovePlan,
-    token: String,
 ) {
     let mut progress = Progress::new(store.clone(), job_id.clone());
     if !JobStore::acquire_slot().await {
@@ -264,13 +343,6 @@ async fn run_move(
                 if let Err(err) = repo::set_track_path(&state.db, *track_id, new_path).await {
                     tracing::warn!("移动后同步索引失败：{err}");
                 }
-            }
-            if let Err(err) = sqlx::query("UPDATE move_plans SET executed = TRUE WHERE token = $1")
-                .bind(&token)
-                .execute(&state.db)
-                .await
-            {
-                tracing::warn!("标记计划已执行失败：{err}");
             }
             progress.finish(Some(summary_json(&summary))).await;
         }
@@ -467,6 +539,251 @@ pub async fn template_test(
 
 // --------------------------------------------------------------------------- 内部工具
 
+const PLAN_ACTIONS: [&str; 6] = [
+    "move",
+    "in_place",
+    "conflict_rename",
+    "conflict_skip",
+    "conflict_overwrite",
+    "invalid",
+];
+
+struct PlanFilter {
+    q: String,
+    action: String,
+}
+
+impl PlanFilter {
+    fn parse(query: &RawQuery) -> Result<Self, ApiError> {
+        let q = query.str("q", "").trim().to_string();
+        if q.chars().count() > 500 {
+            return Err(ApiError::unprocessable(
+                "value_error",
+                vec!["query", "q"],
+                "计划搜索最多 500 字",
+                json!(q),
+                Some(json!({"max_length": 500})),
+            ));
+        }
+        let action = query.str("action", "").trim().to_string();
+        if !action.is_empty() && !PLAN_ACTIONS.contains(&action.as_str()) {
+            return Err(ApiError::unprocessable(
+                "value_error",
+                vec!["query", "action"],
+                "未知的计划动作筛选",
+                json!(action),
+                None,
+            ));
+        }
+        Ok(Self { q, action })
+    }
+
+    fn pattern(&self) -> String {
+        format!(
+            "%{}%",
+            self.q
+                .replace('!', "!!")
+                .replace('%', "!%")
+                .replace('_', "!_")
+        )
+    }
+}
+
+// $1=token, $2=literal search pattern, $3=action. Every searchable field is
+// evaluated on the complete JSONB array before LIMIT, preserving its ordinal.
+const PLAN_ROWS_SQL: &str = "FROM move_plans AS plan \
+    CROSS JOIN LATERAL jsonb_array_elements(COALESCE(plan.payload->'items', '[]'::jsonb)) \
+        WITH ORDINALITY AS plan_item(item, ordinal) \
+    WHERE plan.token = $1 AND ($3 = '' OR plan_item.item->>'action' = $3) AND (\
+        COALESCE(plan_item.item->>'source', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'target', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'filename', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'title', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'artist', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'reason', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'warning', '') ILIKE $2 ESCAPE '!' OR \
+        COALESCE(plan_item.item->>'track_id', '') ILIKE $2 ESCAPE '!')";
+
+fn plan_page(total: i64, requested: i64, page_size: i64) -> (i64, i64, i64) {
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / page_size + 1
+    };
+    let page = requested.clamp(1, pages.max(1));
+    (page, pages, (page - 1) * page_size)
+}
+
+async fn query_plan(
+    state: &AppState,
+    token: &str,
+    filter: &PlanFilter,
+    pagination: Option<(i64, i64)>,
+) -> Result<Value, ApiError> {
+    let mut transaction = state.db.begin().await.map_err(anyhow::Error::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let header: Option<(SqlJson<Value>, bool)> =
+        sqlx::query_as("SELECT payload - 'items', executed FROM move_plans WHERE token = $1")
+            .bind(token)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(anyhow::Error::from)?;
+    let Some((SqlJson(mut result), executed)) = header else {
+        return Err(ApiError::not_found("计划不存在，请重新预览"));
+    };
+    let pattern = filter.pattern();
+    let count_sql = format!("SELECT count(*) {PLAN_ROWS_SQL}");
+    let filtered_total: i64 = sqlx::query_scalar(&count_sql)
+        .bind(token)
+        .bind(&pattern)
+        .bind(&filter.action)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let base = format!(
+        "SELECT plan_item.item || jsonb_build_object('ordinal', plan_item.ordinal) \
+        {PLAN_ROWS_SQL} ORDER BY plan_item.ordinal"
+    );
+    let items: Vec<SqlJson<Value>> = if let Some((requested, page_size)) = pagination {
+        let (page, pages, offset) = plan_page(filtered_total, requested, page_size);
+        result["page"] = json!(page);
+        result["page_size"] = json!(page_size);
+        result["pages"] = json!(pages);
+        sqlx::query_scalar(&format!("{base} LIMIT $4 OFFSET $5"))
+            .bind(token)
+            .bind(&pattern)
+            .bind(&filter.action)
+            .bind(page_size)
+            .bind(offset)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(anyhow::Error::from)?
+    } else {
+        sqlx::query_scalar(&base)
+            .bind(token)
+            .bind(&pattern)
+            .bind(&filter.action)
+            .fetch_all(&mut *transaction)
+            .await
+            .map_err(anyhow::Error::from)?
+    };
+    transaction.commit().await.map_err(anyhow::Error::from)?;
+    result["token"] = json!(token);
+    result["executed"] = json!(executed);
+    result["q"] = json!(filter.q);
+    result["action"] = json!(filter.action);
+    result["filtered_total"] = json!(filtered_total);
+    result["items"] = Value::Array(items.into_iter().map(|item| item.0).collect());
+    Ok(result)
+}
+
+/// Quote all cells and neutralize formula prefixes, including leading spaces
+/// and control characters. The JSON report keeps exact original tag values.
+fn csv_cell(value: &str) -> String {
+    let trimmed = value
+        .trim_start_matches(|ch: char| ch.is_whitespace() || ch.is_control() || ch == '\u{feff}');
+    let dangerous = trimmed.starts_with(['=', '+', '-', '@'])
+        || value
+            .chars()
+            .take_while(|ch| ch.is_whitespace() || ch.is_control() || *ch == '\u{feff}')
+            .any(|ch| matches!(ch, '\t' | '\r' | '\n'));
+    let safe = if dangerous {
+        format!("'{value}")
+    } else {
+        value.to_string()
+    };
+    format!("\"{}\"", safe.replace('"', "\"\""))
+}
+
+fn plan_csv(report: &Value) -> String {
+    const FIELDS: [&str; 10] = [
+        "ordinal", "track_id", "source", "target", "action", "reason", "filename", "artist",
+        "title", "warning",
+    ];
+    let mut output = String::from("\u{feff}report_type,plan_token,ordinal,track_id,source,target,action,reason,filename,artist,title,warning\r\n");
+    if let Some(items) = report["items"].as_array() {
+        for item in items {
+            let mut cells = vec![csv_cell("move_plan"), csv_cell(&text_of(report, "token"))];
+            cells.extend(FIELDS.iter().map(|field| csv_cell(&text_of(item, field))));
+            output.push_str(&cells.join(","));
+            output.push_str("\r\n");
+        }
+    }
+    output
+}
+
+async fn claim_plan_and_create_job(
+    state: &AppState,
+    token: &str,
+) -> Result<(Value, String), ApiError> {
+    let mut transaction = state.db.begin().await.map_err(anyhow::Error::from)?;
+    let payload: Option<SqlJson<Value>> = sqlx::query_scalar(
+        "UPDATE move_plans SET executed = TRUE WHERE token = $1 AND executed = FALSE RETURNING payload",
+    ).bind(token).fetch_optional(&mut *transaction).await.map_err(anyhow::Error::from)?;
+    let Some(SqlJson(payload)) = payload else {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM move_plans WHERE token = $1)")
+                .bind(token)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(anyhow::Error::from)?;
+        return Err(if exists {
+            ApiError::conflict("这个计划已提交执行，请重新预览")
+        } else {
+            ApiError::not_found("计划不存在，请重新预览")
+        });
+    };
+    let job_id = crate::jobs::new_job_id();
+    let uuid = crate::jobs::job_uuid(&job_id).expect("新任务编号应有效");
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, state, total, done, message, error, result) \
+        VALUES ($1, 'move', 'running', 0, 0, '整理已排队', '', NULL)",
+    )
+    .bind(uuid)
+    .execute(&mut *transaction)
+    .await
+    .map_err(anyhow::Error::from)?;
+    transaction.commit().await.map_err(anyhow::Error::from)?;
+    tracing::info!("任务开始：kind=move id={job_id}");
+    Ok((payload, job_id))
+}
+
+/// Track list pages cap at 1000. Chunk explicit selections instead of silently
+/// returning only the first page, and preserve their original selection order.
+async fn fetch_selected(
+    state: &AppState,
+    ids: &[i64],
+) -> Result<Vec<crate::models::Track>, ApiError> {
+    let mut seen = HashSet::new();
+    let ids: Vec<_> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
+    let mut rows = Vec::with_capacity(ids.len());
+    let mut missing = Vec::new();
+    for chunk in ids.chunks(1000) {
+        let map = fetch_by_ids(state, chunk).await?;
+        for id in chunk {
+            if *id <= 0 {
+                missing.push(*id);
+                continue;
+            }
+            match map.get(id) {
+                Some(track) => rows.push(track.clone()),
+                None => missing.push(*id),
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "所选曲目中有 {} 条已不存在或编号无效（例如 {:?}），请刷新选择后重新预览",
+            missing.len(),
+            missing.iter().take(10).collect::<Vec<_>>(),
+        )));
+    }
+    Ok(rows)
+}
+
 /// 分页取回全部匹配曲目（`list_tracks` 单页上限 1000，这里翻页拼完）。
 async fn fetch_all(state: &AppState, query: &TrackQuery) -> Result<Vec<crate::models::Track>, ApiError> {
     let mut all: Vec<crate::models::Track> = Vec::new();
@@ -612,3 +929,71 @@ async fn load_plan(state: &AppState, token: &str) -> anyhow::Result<Option<(Valu
     Ok(row.map(|(payload, executed)| (payload.0, executed)))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(values: &[(&str, &str)]) -> RawQuery {
+        RawQuery(
+            values
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn plan_filters_validate_actions_and_escape_literal_searches() {
+        let filter =
+            PlanFilter::parse(&query(&[("q", "  100%_Mix!  "), ("action", "invalid")])).unwrap();
+        assert_eq!(filter.q, "100%_Mix!");
+        assert_eq!(filter.pattern(), "%100!%!_Mix!!%");
+        assert_eq!(filter.action, "invalid");
+        assert!(PlanFilter::parse(&query(&[("action", "move; DROP TABLE tracks")])).is_err());
+        let oversized = "中".repeat(501);
+        assert!(PlanFilter::parse(&query(&[("q", &oversized)])).is_err());
+        assert!(PlanFilter::parse(&query(&[("q", &"中".repeat(500))])).is_ok());
+    }
+
+    #[test]
+    fn plan_pages_clamp_without_overflow_and_preserve_empty_results() {
+        assert_eq!(plan_page(1005, 1, 200), (1, 6, 0));
+        assert_eq!(plan_page(1005, i64::MAX, 200), (6, 6, 1000));
+        assert_eq!(plan_page(1005, -7, 200), (1, 6, 0));
+        assert_eq!(plan_page(0, 999, 200), (1, 0, 0));
+    }
+
+    #[test]
+    fn csv_quotes_multiline_values_and_blocks_formula_prefixes() {
+        for raw in [
+            "=1+1",
+            " +SUM(A1)",
+            "-1",
+            "@foo",
+            "\tcmd",
+            " \tcmd",
+            "\rvalue",
+            "\u{feff}=1",
+            "\u{feff}\tcmd",
+        ] {
+            assert_eq!(csv_cell(raw), format!("\"'{raw}\""));
+        }
+        assert_eq!(csv_cell("普通标题"), "\"普通标题\"");
+        assert_eq!(csv_cell("a,\"b\"\r\nc"), "\"a,\"\"b\"\"\r\nc\"");
+    }
+
+    #[test]
+    fn csv_report_is_a_plan_and_keeps_original_ordinals() {
+        let report = json!({"token": "abc123", "items": [{
+            "ordinal": 701, "track_id": 9001, "source": "/music/a.flac", "target": "/music/b.flac",
+            "action": "conflict_skip", "reason": "目标存在", "filename": "a.flac",
+            "artist": "测试歌手", "title": "=1+1", "warning": "一行\n二行"
+        }]});
+        let csv = plan_csv(&report);
+        assert!(csv.starts_with("\u{feff}report_type,plan_token,ordinal,track_id,"));
+        assert!(csv.contains("\"move_plan\",\"abc123\",\"701\",\"9001\""));
+        assert!(csv.contains("\"'=1+1\""));
+        assert!(csv.ends_with("\"一行\n二行\"\r\n"));
+        assert!(!csv.contains("moved"));
+    }
+}

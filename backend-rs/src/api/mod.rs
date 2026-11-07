@@ -807,6 +807,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/lyrics/preview", post(scrape::lyrics_preview))
         .route("/api/move/preview", post(moves::move_preview))
         .route("/api/move/plan/:token", get(moves::move_plan))
+        .route("/api/move/plan/:token/items", get(moves::move_plan_items))
+        .route("/api/move/plan/:token/export", get(moves::move_plan_export))
         .route("/api/move/execute", post(moves::move_execute))
         .route("/api/jobs", get(moves::list_jobs))
         .route("/api/jobs/:job_id", get(moves::get_job))

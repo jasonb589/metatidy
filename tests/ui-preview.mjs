@@ -335,15 +335,58 @@ async function handleApi(req, res, url) {
     return json(res, { track, source: track.path, target: `/fixture-music/${track.language}/${track.artist}/${track.album}/${track.filename}`, warnings: [] });
   }
   if (route === '/api/move/preview') {
-    const selected = (payload.ids ? tracks.filter(t => payload.ids.includes(t.id)) : tracks).slice(0, payload.limit || tracks.length);
+    const matched = payload.ids ? [...new Set(payload.ids)].map(id => tracks.find(t => t.id === id)).filter(Boolean) : tracks;
+    const selected = matched.slice(0, payload.limit || tracks.length);
     const token = `fixture-plan-${plans.size + 1}`;
-    const plan = { token, total: selected.length, planned: selected.length, counts: { move: selected.length }, conflict_policy: payload.conflict_policy, template_warnings: [], display_truncated: false,
-      items: selected.map(t => ({ track_id: t.id, source: t.path, target: `/fixture-music/整理预览/${t.filename}`, action: 'move', reason: '', warning: '' })) };
+    const plan = { token, total: matched.length, planned: selected.length, counts: { move: selected.length }, conflict_policy: payload.conflict_policy || values.conflict_policy,
+      library_root: '/fixture-music', dir_template: payload.dir_template || values.dir_template, filename_template: payload.filename_template || values.filename_template,
+      truncated: selected.length < matched.length, template_warnings: [], display_truncated: selected.length > 500, executed: false,
+      items: selected.map(t => ({ track_id: t.id, filename: t.filename, artist: t.artist, title: t.title, source: t.path, target: `/fixture-music/整理预览/${t.filename}`, action: 'move', reason: '', warning: '' })) };
     plans.set(token, plan);
-    return json(res, plan);
+    return json(res, { ...plan, items: plan.items.slice(0, 500) });
   }
-  if (route.startsWith('/api/move/plan/')) return json(res, plans.get(route.split('/').at(-1)) || { detail: '未知测试计划' });
-  if (route === '/api/move/execute') return json(res, makeJob('move', { moved: 0, skipped: tracks.length, failed: 0, dry_run: true, details: [] }));
+  const planRoute = route.match(/^\/api\/move\/plan\/([^/]+)(?:\/(items|export))?$/);
+  if (planRoute) {
+    const plan = plans.get(planRoute[1]);
+    if (!plan) return json(res, { detail: '未知测试计划' }, 404);
+    if (!planRoute[2]) return json(res, { ...plan, _executed: plan.executed, _token: plan.token });
+    const q = (url.searchParams.get('q') || '').trim();
+    const action = (url.searchParams.get('action') || '').trim();
+    const pageSize = Number(url.searchParams.get('page_size') || 100);
+    if (q.length > 500 || action && !['move', 'in_place', 'conflict_rename', 'conflict_skip', 'conflict_overwrite', 'invalid'].includes(action)
+        || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 200) return json(res, { detail: '计划筛选参数无效' }, 422);
+    const items = plan.items.map((item, index) => ({ ...item, ordinal: index + 1 })).filter(item => (!action || item.action === action)
+      && (!q || ['source', 'target', 'filename', 'title', 'artist', 'reason', 'warning', 'track_id'].some(key => String(item[key] || '').toLowerCase().includes(q.toLowerCase()))));
+    const report = { ...plan, q, action, filtered_total: items.length, items };
+    if (planRoute[2] === 'items') {
+      const pages = Math.ceil(items.length / pageSize);
+      const page = Math.max(1, Math.min(pages || 1, Number(url.searchParams.get('page')) || 1));
+      return json(res, { ...report, page, pages, page_size: pageSize, items: items.slice((page - 1) * pageSize, page * pageSize) });
+    }
+    const format = url.searchParams.get('format') || 'csv';
+    if (!['csv', 'json'].includes(format)) return json(res, { detail: '报告格式无效' }, 422);
+    report.report_type = 'move_plan'; report.report_scope = q || action ? 'filtered' : 'complete';
+    let content = JSON.stringify(report, null, 2);
+    if (format === 'csv') {
+      const fields = ['ordinal', 'track_id', 'source', 'target', 'action', 'reason', 'filename', 'artist', 'title', 'warning'];
+      const cell = value => {
+        const text = String(value ?? '');
+        return `"${(/^[\s\uFEFF]*[=+@-]/.test(text) || /^[\s]*[\t\r\n]/.test(text) ? "'" : '') + text.replaceAll('"', '""')}"`;
+      };
+      content = '\uFEFF' + ['report_type,plan_token,' + fields.join(','), ...items.map(item => ['move_plan', plan.token, ...fields.map(key => item[key])].map(cell).join(','))].join('\r\n');
+    }
+    res.writeHead(200, { 'Content-Type': format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="metatidy-move-plan-${plan.token}.${format}"`, 'Cache-Control': 'no-store' });
+    return res.end(content);
+  }
+  if (route === '/api/move/execute') {
+    const plan = plans.get(payload.token);
+    if (!plan) return json(res, { detail: '未知测试计划' }, 404);
+    const summary = { moved: 0, skipped: plan.planned, failed: 0, renamed: 0, failures: [] };
+    if (payload.dry_run) return json(res, summary);
+    if (plan.executed) return json(res, { detail: '计划已提交' }, 409);
+    plan.executed = true;
+    return json(res, makeJob('move', summary));
+  }
   return json(res, { detail: `UI fixture does not implement ${method} ${route}` }, 404);
 }
 
