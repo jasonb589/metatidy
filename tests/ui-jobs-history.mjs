@@ -61,10 +61,13 @@ async function withPage(action, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light', reducedMotion: 'reduce', ...options });
   const page = await context.newPage(); page.setDefaultTimeout(10000);
   const jobs = makeJobs(), calls = [], errors = [];
-  const control = { cursor: null, delayHistory: null, delayDetail: null, historyError: null, detailError: null, detailResponse: null };
+  const control = { cursor: null, delayHistory: null, delayDetail: null, delayStatus: null, historyError: null, detailError: null, detailResponse: null };
   const json = (route, value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url()); calls.push({ path: url.pathname, query: Object.fromEntries(url.searchParams) });
+    if (url.pathname === '/api/status' && control.delayStatus) {
+      const delay = control.delayStatus; control.delayStatus = null; delay.entered.resolve(); await delay.release.promise;
+    }
     if (url.pathname === '/api/jobs') return json(route, overview(jobs, control.cursor));
     if (url.pathname === '/api/jobs/history') {
       if (control.historyError) { const error = control.historyError; control.historyError = null; return json(route, { detail: error.text }, error.status); }
@@ -209,8 +212,16 @@ try {
   }));
   await check('Watcher cursor refreshes the library once while history is filtered', () => withPage(async ({ page, calls, control, poll }) => {
     await openHistory(page); await search(page, idFor(2)); const before = calls.filter(call => call.path === '/api/tracks').length, histories = historyCalls(calls).length;
+    // The watcher refresh awaits a real status HTTP request before requesting
+    // tracks; an idle table is also true before that request has even started.
+    const refreshedTracks = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tracks');
+    const status = gate(); control.delayStatus = status;
     control.cursor = { id: 'outside-recent-watch', updated_at: 999999, cursor: 'watch-completed-outside-window' }; await poll();
-    await page.waitForFunction(() => !document.querySelector('#tracks-table-wrap')?.getAttribute('aria-busy') || document.querySelector('#tracks-table-wrap').getAttribute('aria-busy') === 'false');
+    await status.entered.promise;
+    assert.equal(calls.filter(call => call.path === '/api/tracks').length, before, 'tracks must wait for the status response');
+    status.release.resolve();
+    await (await refreshedTracks).finished(); await flush(page);
+    await page.waitForFunction(async () => !(await import('/store.js')).state.tracks.loading);
     assert.equal(calls.filter(call => call.path === '/api/tracks').length, before + 1); await poll();
     assert.equal(calls.filter(call => call.path === '/api/tracks').length, before + 1); assert.equal(historyCalls(calls).length, histories);
     assert.equal(await cardFor(page, idFor(2)).count(), 1);
