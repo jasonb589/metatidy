@@ -4,7 +4,7 @@
 //! - `/api/tracks/preview`：只读文件算差异（`tagio::preview_update`），绝不落盘
 //! - `/api/tracks/apply`：真写标签 + 同步索引（写失败进 `failed[]`，不中断整批）
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 
 use axum::body::Bytes;
@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::models::{FieldChange, Track};
+use crate::models::Track;
 use crate::repo::{self, TrackQuery};
 use crate::tagio;
 use crate::AppState;
@@ -140,6 +140,22 @@ fn image_response(bytes: Vec<u8>, mime: &str) -> Response {
         .into_response()
 }
 
+/// Normalize supported values while retaining unsupported keys for diagnostics.
+pub(super) fn prepare_update_fields(
+    fields: &HashMap<String, String>,
+    normalize_artist: bool,
+) -> HashMap<String, String> {
+    let mut prepared = prepare_fields(fields, normalize_artist);
+    // Preserve unsupported keys for an explicit skipped reason. The writer is
+    // still the authority on the editable-field allowlist.
+    for (key, value) in fields {
+        if key != "lyrics" {
+            prepared.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    prepared
+}
+
 /// `POST /api/tracks/preview`：差异预览（只读文件）。
 pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = super::parse_body(&body)?;
@@ -148,13 +164,11 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
         return Err(ApiError::bad_request("至少选择一首"));
     }
     let normalize_artist = super::body_bool(&payload, "normalize_artist", true)?;
+    let overwrite = super::body_bool(&payload, "overwrite", true)?;
     let raw_fields = body_field_map(&payload, "fields")?;
-    let mut fields = prepare_fields(&raw_fields, normalize_artist);
+    let mut fields = prepare_update_fields(&raw_fields, normalize_artist);
     // 歌词走独立通道：它不是普通文本字段（不在 EDITABLE_FIELDS 里），填了才写、留空 = 不动
-    let lyrics = raw_fields
-        .get("lyrics")
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty());
+    let lyrics = raw_fields.get("lyrics").map(|text| text.trim().to_string());
     if fields.is_empty() && lyrics.is_none() {
         return Err(ApiError::bad_request("没有可编辑的字段"));
     }
@@ -170,34 +184,36 @@ pub async fn preview(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let mut changed_total = 0usize;
     for track_id in &selected {
         let Some(track) = tracks.get(track_id) else {
-            continue; // 索引里查不到的 id 静默跳过
+            items.push(json!({"track_id": track_id, "path": "", "filename": "",
+                "changes": {}, "effective_fields": {}, "skipped": [], "count": 0,
+                "current": {"error": "索引里没有这条曲目"}, "file_exists": false}));
+            continue;
         };
         let path = std::path::Path::new(&track.path);
-        let mut changes = tagio::preview_update(path, &fields);
-        // 歌词的差异只报「行数 + 首行」：整篇塞进差异表没法看
-        if let Some(new_lyrics) = &lyrics {
-            let old_lyrics = tagio::read_lyrics(path);
-            if old_lyrics.trim() != new_lyrics.trim() {
-                changes.insert(
-                    "lyrics".to_string(),
-                    FieldChange {
-                        old: lyrics_summary(&old_lyrics),
-                        new: lyrics_summary(new_lyrics),
-                    },
-                );
+        match tagio::preview_update(path, &fields, overwrite, lyrics.as_deref()) {
+            Ok(mut plan) => {
+                if let Some(change) = plan.changes.get_mut("lyrics") {
+                    change.old = lyrics_summary(&change.old);
+                    change.new = lyrics_summary(&change.new);
+                }
+                let mut effective = fields_json(&plan.effective_fields);
+                if let Some(text) = &plan.lyrics {
+                    effective["lyrics"] = json!(lyrics_summary(text));
+                }
+                changed_total += plan.changes.len();
+                items.push(json!({
+                    "path": track.path, "changes": changes_json(&plan.changes),
+                    "effective_fields": effective, "skipped": plan.skipped,
+                    "count": plan.changes.len(), "current": raw_tags_json(&plan.current),
+                    "track_id": track.id, "filename": track.filename, "file_exists": true,
+                }));
             }
+            Err(err) => items.push(json!({
+                "path": track.path, "changes": {}, "effective_fields": {}, "skipped": [],
+                "count": 0, "current": {"error": err.message}, "track_id": track.id,
+                "filename": track.filename, "file_exists": path.exists(),
+            })),
         }
-        let current = raw_tags_json(&tagio::read_tags(path));
-        changed_total += changes.len();
-        items.push(json!({
-            "path": track.path,
-            "changes": changes_json(&changes),
-            "count": changes.len(),
-            "current": current,
-            "track_id": track.id,
-            "filename": track.filename,
-            "file_exists": path.exists(),
-        }));
     }
 
     // 回显里也带上歌词：否则界面上那句「将写入字段：」在只改歌词时是空的
@@ -225,12 +241,9 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let normalize_artist = super::body_bool(&payload, "normalize_artist", true)?;
     let overwrite = super::body_bool(&payload, "overwrite", true)?;
     let raw_fields = body_field_map(&payload, "fields")?;
-    let mut fields = prepare_fields(&raw_fields, normalize_artist);
+    let mut fields = prepare_update_fields(&raw_fields, normalize_artist);
     // 歌词走独立通道：它不是普通文本字段（不在 EDITABLE_FIELDS 里），填了才写、留空 = 不动
-    let lyrics = raw_fields
-        .get("lyrics")
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty());
+    let lyrics = raw_fields.get("lyrics").map(|text| text.trim().to_string());
     if fields.is_empty() && lyrics.is_none() {
         return Err(ApiError::bad_request("没有可编辑的字段"));
     }
@@ -239,44 +252,95 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     fields = apply_aliases(&fields, &artist_alias, &album_alias);
 
     let mut written = 0i64;
+    let mut skipped = 0i64;
     let mut failed: Vec<Value> = Vec::new();
+    let mut items: Vec<Value> = Vec::new();
+    let mut applied_fields = BTreeSet::new();
     for track_id in &ids {
         let Some(track) = repo::get_track(&state.db, *track_id).await? else {
-            failed.push(json!({ "track_id": track_id, "error": "索引里没有这条曲目" }));
+            failed.push(json!({ "track_id": track_id, "error": "索引里没有这条曲目", "stage": "lookup", "file_changed": false }));
             continue;
         };
         let path = std::path::Path::new(&track.path);
         match tagio::apply_update(path, &fields, overwrite, None, lyrics.as_deref()) {
-            Ok(_) => {
-                let (mtime, size) = file_meta(path);
-                repo::sync_after_write(
-                    &state.db,
-                    track.id,
-                    &fields,
-                    Some(mtime),
-                    Some(size),
-                    false,
-                    None,
-                    lyrics.as_ref().map(|_| true),
-                    true,
-                )
-                .await?;
-                written += 1;
+            Ok(outcome) => {
+                if let Err(err) = sync_update_outcome(&state, &track, &outcome, false).await {
+                    failed.push(json!({"track_id": track_id, "path": track.path,
+                        "error": err.to_string(), "stage": "index", "file_changed": outcome.file_changed}));
+                    continue;
+                }
+                let mut fields = outcome.written.clone();
+                if outcome.lyrics_written {
+                    fields.push("lyrics".to_string());
+                }
+                fields.sort();
+                applied_fields.extend(fields.iter().cloned());
+                if outcome.file_changed {
+                    written += 1;
+                } else {
+                    skipped += 1;
+                }
+                items.push(json!({"track_id": track_id, "written": fields,
+                    "skipped": outcome.skipped, "file_changed": outcome.file_changed,
+                    "cover": outcome.cover_written, "lyrics": outcome.lyrics_written}));
             }
             Err(err) => failed.push(json!({
                 "track_id": track_id,
                 "path": track.path,
                 "error": format!("TagError: {err}"),
+                "stage": err.stage,
+                "file_changed": err.file_changed,
             })),
         }
     }
 
-    let mut sorted: Vec<String> = fields.keys().cloned().collect();
-    if lyrics.is_some() {
-        sorted.push("lyrics".to_string());
-    }
-    sorted.sort();
-    Ok(Json(json!({ "written": written, "failed": failed, "fields": sorted })))
+    Ok(Json(
+        json!({ "written": written, "skipped": skipped, "failed": failed,
+        "fields": applied_fields, "items": items }),
+    ))
+}
+
+pub(super) async fn sync_update_outcome(
+    state: &AppState,
+    track: &Track,
+    outcome: &tagio::UpdateOutcome,
+    scraped: bool,
+) -> anyhow::Result<()> {
+    // A no-op may have seen external edits to unrequested fields. Preserve the
+    // old mtime/size so the next incremental scan still detects those changes.
+    let (mtime, size) = if outcome.file_changed {
+        let meta = fs::metadata(&track.path)
+            .map_err(|err| anyhow::anyhow!("标签已保存，但读取文件状态失败；请重新扫描：{err}",))?;
+        let modified = meta
+            .modified()
+            .and_then(|modified| {
+                modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)
+            })
+            .map_err(|err| anyhow::anyhow!("标签已保存，但读取修改时间失败；请重新扫描：{err}",))?;
+        (Some(modified.as_secs_f64()), Some(meta.len() as i64))
+    } else {
+        (None, None)
+    };
+    repo::sync_after_write(
+        &state.db,
+        track.id,
+        &outcome.readback_fields,
+        mtime,
+        size,
+        scraped && outcome.file_changed,
+        Some(outcome.has_cover),
+        Some(outcome.has_lyrics),
+        !scraped && outcome.file_changed,
+    )
+    .await
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "标签处理后同步索引失败（文件是否已改变：{}）；请重新扫描：{err}",
+            outcome.file_changed,
+        )
+    })
 }
 
 /// `GET /api/tracks/{track_id}/lyrics`：读文件里现有的歌词（编辑面板打开时载入用）。
@@ -299,7 +363,7 @@ pub async fn lyrics(State(state): State<AppState>, Path(raw_id): Path<String>) -
 }
 
 /// 歌词差异的紧凑表示：整篇歌词塞进差异表没法看，只给「行数 + 首行」。
-fn lyrics_summary(text: &str) -> String {
+pub(super) fn lyrics_summary(text: &str) -> String {
     if text.trim().is_empty() {
         return "（无歌词）".to_string();
     }
@@ -381,22 +445,4 @@ pub async fn fetch_by_ids(
     let page = repo::list_tracks(&state.db, &query).await?;
     Ok(page.items.into_iter().map(|t| (t.id, t)).collect())
 }
-
-/// 文件元数据（失败时给 0，和 Python 的 `_safe_mtime/_safe_size` 一样吞掉错误）。
-pub fn file_meta(path: &std::path::Path) -> (f64, i64) {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            (mtime, meta.len() as i64)
-        }
-        Err(_) => (0.0, 0),
-    }
-}
-
-
 

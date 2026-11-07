@@ -25,6 +25,7 @@ import {
   selectionCount,
   removeFromSelection,
   setCurrentTrack,
+  updateTrackSnapshot,
 } from "./store.js";
 
 const EDIT_FIELDS = [
@@ -706,6 +707,8 @@ export async function refresh({ background = false, canApply = () => true } = {}
     if (background && !canApply()) return false;
     state.tracks.error = "";
     state.tracks.items = data.items || [];
+    const current = state.tracks.items.find((row) => Number(row.id) === state.currentTrackId);
+    if (current) updateTrackSnapshot(current, { partial: true });
     state.tracks.total = data.total || 0;
     state.tracks.page = data.page || 1;
     state.tracks.pages = data.pages || 1;
@@ -1355,35 +1358,47 @@ async function runPreview() {
   ui.clear(nodes.drawerResult);
   nodes.drawerResult.append(ui.loadingLine("正在读取文件内的现值…（只读，不改动文件）"));
   try {
-    const preview = await api.previewTracks({ ids, fields, normalize_artist: normalize });
+    const preview = await api.previewTracks({ ids, fields, normalize_artist: normalize, overwrite });
     if (!isCurrentEdit(revision)) return;
     ui.clear(nodes.drawerResult);
+    const previewItems = Array.isArray(preview.items) ? preview.items : [];
+    if (!previewItems.length) throw new Error("所选曲目无法读取，请刷新曲库后重试。");
+    if (previewItems.some((item) => !ids.includes(Number(item.track_id))) || (!preview.truncated && new Set(previewItems.map((item) => Number(item.track_id))).size !== ids.length)) {
+      throw new Error("预览中的曲目与选择范围不一致，请刷新曲库后重试。");
+    }
+    const invalid = previewItems.find((item) => item.file_exists === false || item.current?.error);
+    if (invalid) throw new Error(`${invalid.filename || `#${invalid.track_id}`}：${invalid.current?.error || "音乐文件不存在"}。请检查文件后重试。`);
     const changed = preview.changed_fields || 0;
+    const noChanges = !changed && !preview.truncated;
     nodes.drawerResult.append(
       ui.notice(
-        changed ? "info" : "warn",
+        "info",
         changed
-          ? `预览完成：${preview.items.length} 首曲目、合计 ${changed} 处变更。尚未写入任何文件。`
-          : "预览完成：所选字段与文件里的现值完全一致，执行不会产生任何写入。",
+          ? `预览完成：${previewItems.length} 首曲目、合计 ${changed} 处变更。尚未写入任何文件。`
+          : preview.truncated ? "已预览的部分没有变更，其余曲目尚未展示。尚未写入任何文件。"
+          : "预览完成：按当前覆盖选项，没有需要写入的变更。已有值与跳过原因可在预览中查看。",
       ),
     );
-    const body = ui.diffView(preview.items || []);
+    const body = ui.diffView(previewItems);
+    if (preview.truncated) body.unshift(ui.notice("warn", `选择了 ${ids.length} 首，逐曲预览仅展示前 ${previewItems.length} 首；确认后会处理全部所选曲目。`));
     body.push(
       ui.el("div", { class: "hint" }, [
-        `将写入字段：${Object.keys(preview.fields || fields).map(ui.fieldLabel).join("、")}`,
+        `本次选择：${Object.keys(fields).map(ui.fieldLabel).join("、")}`,
         overwrite ? "；已勾选覆盖已有值" : "；未勾选覆盖，已有非空值的字段会被跳过",
+        fields.lyrics ? "。手动填写的歌词会替换原有歌词。" : "。",
       ]),
     );
     const answer = await ui.openDialog({
       title: `变更预览（${ids.length} 首）`,
       subtitle: "旧值红色、新值绿色；确认后才会写入音频标签",
       body,
-      actions: [
+      actions: noChanges ? [{ id: "close", label: "关闭预览", variant: "btn-primary" }] : [
         { id: "cancel", label: "取消" },
-        { id: changed ? "apply" : "apply", label: changed ? `确认写入 ${ids.length} 首` : `仍然执行（0 处变更）`, variant: "btn-primary" },
+        { id: "apply", label: `确认处理 ${ids.length} 首`, variant: "btn-primary" },
       ],
     });
     if (!isCurrentEdit(revision)) return;
+    if (noChanges) return;
     if (answer !== "apply") {
       nodes.drawerResult.append(ui.notice("info", "已取消，未写入任何文件。"));
       return;
@@ -1409,32 +1424,53 @@ async function applyChanges(ids, fields, normalize, overwrite, revision) {
   try {
     const result = await api.applyTracks({ ids, fields, normalize_artist: normalize, overwrite });
     const failed = result.failed || [];
+    const unchanged = Number(result.skipped) || 0;
     if (isCurrentEdit(revision)) {
       ui.clear(nodes.drawerResult);
       nodes.drawerResult.append(
         ui.el("div", { class: "lbl", text: "写入结果" }),
         ui.resultBlock({
           summary: [
-            { label: "成功", value: result.written ?? 0, variant: "chip" },
-            { label: "失败", value: failed.length, variant: failed.length ? "chip" : "chip" },
+            { label: "已写入", value: result.written ?? 0, variant: "chip" },
+            { label: "无需变更", value: unchanged },
+            { label: "失败", value: failed.length },
             { label: "字段", value: (result.fields || []).length },
           ],
           failures: failed.map((item) => ({
             who: item.path || `#${item.track_id}`,
-            why: item.error || "未知错误",
+            why: `${item.file_changed ? "文件已改动，后续处理未完成：" : ""}${item.error || "未知错误"}`,
           })),
-          failuresTitle: "失败明细（这些文件没有被改动）",
+          failuresTitle: "失败明细",
         }),
       );
+      const skippedItems = (Array.isArray(result.items) ? result.items : []).filter((item) => item.skipped?.length);
+      if (skippedItems.length) {
+        const details = ui.el("details", { class: "edit-skipped-results" }, [
+          ui.el("summary", { text: `查看 ${skippedItems.length} 首曲目的保留与跳过详情` }),
+        ]);
+        for (const item of skippedItems.slice(0, 100)) {
+          const row = state.edit.rows.find((row) => Number(row.id) === Number(item.track_id));
+          details.append(ui.el("div", { class: "edit-skipped-track" }, [
+            ui.el("p", { class: "lbl", text: row?.title || row?.filename || `#${item.track_id}` }),
+            ui.skippedFieldsView(item.skipped),
+          ]));
+        }
+        if (skippedItems.length > 100) details.append(ui.el("p", { class: "hint", text: "这里只展示前 100 首的详情，其余曲目已包含在结果统计中。" }));
+        nodes.drawerResult.append(details);
+      }
     }
     if (failed.length) {
       ui.toast("warn", `写入完成，但有 ${failed.length} 首失败`, isCurrentEdit(revision)
         ? "失败原因已列在编辑面板里。"
         : failed.map((item) => `${item.path || `#${item.track_id}`}：${item.error || "未知错误"}`).join("；"));
     } else {
-      ui.toast("ok", `已写入 ${result.written ?? 0} 首`, `字段：${(result.fields || []).map(ui.fieldLabel).join("、")}`);
+      ui.toast("ok", result.written ? `已写入 ${result.written} 首` : "没有需要写入的变更",
+        [unchanged ? `${unchanged} 首保留现值` : "", (result.fields || []).length ? `字段：${result.fields.map(ui.fieldLabel).join("、")}` : ""].filter(Boolean).join("；"));
     }
-    removeFromSelection(ids.filter((id) => !failed.some((item) => Number(item.track_id) === Number(id))));
+    const writtenIds = Array.isArray(result.items)
+      ? result.items.filter((item) => item.file_changed && !failed.some((failure) => Number(failure.track_id) === Number(item.track_id))).map((item) => Number(item.track_id))
+      : ids.filter((id) => !failed.some((item) => Number(item.track_id) === Number(id)));
+    removeFromSelection(writtenIds);
     emit("status:refresh");
     await refresh();
   } catch (err) {

@@ -36,6 +36,8 @@ export const state = {
   selection: new Map(),
   /** 刮削页的「当前曲目」 */
   currentTrackId: null,
+  /** Independent of selection and paginated lists; a queue may open an off-page track. */
+  currentTrackSnapshot: null,
 
   tracks: {
     items: [],
@@ -174,16 +176,40 @@ export function removeFromSelection(ids) {
 export function currentTrackRow() {
   const id = state.currentTrackId;
   if (!id) return null;
-  if (state.selection.has(id)) return state.selection.get(id);
+  if (Number(state.currentTrackSnapshot?.id) === id) return state.currentTrackSnapshot;
   const fromTracks = state.tracks.items.find((row) => Number(row.id) === Number(id));
   if (fromTracks) return fromTracks;
   const fromPick = state.scrape.pickItems.find((row) => Number(row.id) === Number(id));
-  return fromPick || null;
+  return fromPick || state.selection.get(id) || null;
 }
 
 export function setCurrentTrack(row) {
-  state.currentTrackId = row ? Number(row.id) : null;
-  emit("current:changed", row);
+  const id = Number(row?.id);
+  const valid = Number.isSafeInteger(id) && id > 0;
+  state.currentTrackId = valid ? id : null;
+  state.currentTrackSnapshot = valid ? { ...row, id } : null;
+  emit("current:changed", state.currentTrackSnapshot);
+}
+
+/** Apply a freshly read row without changing the selection or invalidating a search. */
+export function updateTrackSnapshot(row, { partial = false } = {}) {
+  const id = Number(row?.id);
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  if (state.currentTrackId === id) {
+    // Replace, including genuine empty fields; stale selection values must not win.
+    const next = partial ? { ...state.currentTrackSnapshot, ...row, id } : { ...row, id };
+    if (JSON.stringify(next) !== JSON.stringify(state.currentTrackSnapshot)) {
+      state.currentTrackSnapshot = next;
+      emit("current:updated", next);
+    }
+  }
+  if (state.selection.has(id)) {
+    const next = rowSnapshot(partial ? { ...state.selection.get(id), ...row, id } : row);
+    if (JSON.stringify(next) !== JSON.stringify(state.selection.get(id))) {
+      state.selection.set(id, next);
+      emit("selection:changed");
+    }
+  }
 }
 
 export function statusStats() {

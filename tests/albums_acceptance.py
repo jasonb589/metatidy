@@ -86,25 +86,15 @@ def check_albums(base: str, music: Path, check, wait_job) -> None:
             fast_file.write_bytes(b"not a playable audio file; fast scan must not open this")
             scan(root)
             scan(fast_root, fast=True)
-            # Real scans trim tags; legacy index rows and an immediate editor
-            # update can retain ASCII spaces. Preserve this fixture's existing
-            # blank tag through the actual write API to exercise that state.
+            # Modern scans normalize blank tags. The legacy space-only index
+            # case is seeded directly through repo::update_fields in selftest-index.
             blank_track = next(row for row in get("/api/tracks", q=root.name, page_size=100)["items"]
                                if row["title"] == "unknown-album")
-            stats_before = get("/api/status")["stats"]
-            write_blank = client.post(f"{base}/api/tracks/apply", json={
-                "ids": [blank_track["id"]], "fields": {"album": "   "},
-            }, timeout=30)
-            write_blank.raise_for_status()
-            stats_after = get("/api/status")["stats"]
             no_album = get("/api/tracks", q=root.name, no_album=1, page_size=100)
-            check("纯空格专辑在索引中真实存在，未标注筛选和库统计口径一致",
-                  write_blank.json()["written"] == 1 and not write_blank.json()["failed"]
-                  and get(f"/api/tracks/{blank_track['id']}")["album"] == "   "
+            check("真实空白专辑扫描后归入未标注筛选，源标签未改写",
+                  get(f"/api/tracks/{blank_track['id']}")["album"] == ""
                   and FLAC(root / "unknown-album.flac").get("album") == ["   "]
-                  and no_album["total"] == 1 and no_album["items"][0]["id"] == blank_track["id"]
-                  and stats_after["no_album"] == stats_before["no_album"]
-                  and stats_after["albums"] == stats_before["albums"])
+                  and no_album["total"] == 1 and no_album["items"][0]["id"] == blank_track["id"])
             listing = get("/api/albums", q=prefix, page_size=100)
             items = listing["items"]
             by_key = {(row["album"], row["album_artist"]): row for row in items}

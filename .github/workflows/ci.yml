@@ -36,6 +36,7 @@ jobs:
           node tests/ui-library-tools.mjs
           node tests/ui-albums.mjs
           node tests/ui-scrape-scope.mjs
+          node tests/ui-review-queue.mjs
       - name: 保存桌面与手机预览
         if: always()
         uses: actions/upload-artifact@v4

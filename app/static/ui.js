@@ -197,6 +197,30 @@ export function fieldLabel(key) {
   return FIELD_LABELS[key] || key;
 }
 
+export function skipReasonLabel(reason) {
+  return {
+    existing: "保留已有值",
+    unchanged: "与现值相同",
+    blank: "内容为空",
+    invalid: "格式无效",
+    unsupported: "不支持此字段",
+    unavailable: "未能获取内容",
+  }[reason] || "未写入";
+}
+
+/** Shared preview/result disclosure. All values remain text, including errors. */
+export function skippedFieldsView(skipped = []) {
+  const items = Array.isArray(skipped) ? skipped.filter((item) => item && typeof item.field === "string") : [];
+  if (!items.length) return null;
+  return el("details", { class: "diff-skipped" }, [
+    el("summary", {}, [icon("info", { size: 13 }), `保留或跳过 ${items.length} 项`, el("span", { class: "hint", text: "查看原因" })]),
+    el("ul", {}, items.map((item) => el("li", {}, [
+      el("span", { text: fieldLabel(item.field) }),
+      el("span", { text: skipReasonLabel(item.reason) }),
+    ]))),
+  ]);
+}
+
 export function truncatedPath(text) {
   // 只用于 title 属性：完整路径/文件名不截断，视觉截断交给 CSS
   return String(text === null || text === undefined ? "" : text);
@@ -490,8 +514,8 @@ export function diffView(items = []) {
           ]),
           el("tbody", {}, rows),
         ])
-      : el("div", { class: "hint", style: { padding: "6px 8px" } }, "这些字段与文件里的现值一致，不会产生写入。");
-    nodes.push(el("section", { class: "diff-track" }, [header, table]));
+      : el("div", { class: "hint", style: { padding: "10px 14px" } }, "按当前选项，没有需要写入的字段变更。");
+    nodes.push(el("section", { class: "diff-track" }, [header, table, skippedFieldsView(item.skipped)]));
   });
 
   return nodes;

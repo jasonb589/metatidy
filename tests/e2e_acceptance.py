@@ -35,6 +35,7 @@ from tests.cover_acceptance import check_covers, seed_cover_fixtures  # noqa: E4
 from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
 from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: E402
 from tests.albums_acceptance import check_albums  # noqa: E402
+from tests.write_acceptance import check_writes  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -472,6 +473,8 @@ def main() -> int:
         check_auto_scan(REPO, WORK, music, auto_argv, env, auto_port, check)
         print("\n=== 10. 专辑浏览与精确分组 ===")
         check_albums(BASE, music, check, wait_job)
+        print("\n=== 11. 写入预览与真实文件一致性 ===")
+        check_writes(BASE, music, check, wait_job)
     finally:
         proc.terminate()
         try:

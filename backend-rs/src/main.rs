@@ -536,7 +536,7 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
     let mut desired = HashMap::new();
     desired.insert("album".to_string(), "七里香".to_string());
     desired.insert("artist".to_string(), "周杰伦".to_string());
-    let diff = tagio::preview_update(&to_tidy, &desired);
+    let diff = tagio::preview_update(&to_tidy, &desired, true, None)?.changes;
     assert_eq!(diff.len(), 2, "预览应报 2 处变更，实际 {}", diff.len());
     let untouched = tagio::read_tags(&to_tidy);
     assert_eq!(untouched.album, "", "预览不能改动文件");
@@ -659,6 +659,60 @@ async fn run_index_selftest(db: &PgPool) -> anyhow::Result<()> {
         "快速扫描也要能从目录推断语言：{:?}",
         not_loaded.items.iter().map(|t| (t.path.clone(), t.language.clone())).collect::<Vec<_>>()
     );
+
+    // Legacy indexes can contain space-only album values even though modern
+    // scans trim tags. Seed this state through the repository, not the writer.
+    let legacy = not_loaded.items.first().expect("自检应有曲目");
+    let disk_before = std::fs::read(&legacy.path)?;
+    let blank = HashMap::from([("album".to_string(), String::new())]);
+    repo::update_fields(db, legacy.id, &blank, false).await?;
+    let empty_stats = repo::library_stats(db).await?;
+    let empty_albums = repo::list_albums(
+        db,
+        &repo::AlbumQuery {
+            q: String::new(),
+            page: 1,
+            page_size: 100,
+            sort: "album".to_string(),
+            incomplete: false,
+        },
+    )
+    .await?;
+    let spaces = HashMap::from([("album".to_string(), "   ".to_string())]);
+    repo::update_fields(db, legacy.id, &spaces, false).await?;
+    assert_eq!(repo::get_track(db, legacy.id).await?.unwrap().album, "   ");
+    let missing_album = repo::list_tracks(
+        db,
+        &TrackQuery {
+            ids: vec![legacy.id],
+            no_album: true,
+            page_size: 10,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let space_stats = repo::library_stats(db).await?;
+    let space_albums = repo::list_albums(
+        db,
+        &repo::AlbumQuery {
+            q: String::new(),
+            page: 1,
+            page_size: 100,
+            sort: "album".to_string(),
+            incomplete: false,
+        },
+    )
+    .await?;
+    assert_eq!(missing_album.total, 1, "纯空格专辑必须进入未标注筛选");
+    assert_eq!(space_stats.no_album, empty_stats.no_album);
+    assert_eq!(space_stats.albums, empty_stats.albums);
+    assert_eq!(space_albums.total, empty_albums.total);
+    assert_eq!(
+        std::fs::read(&legacy.path)?,
+        disk_before,
+        "legacy索引样本不能改文件"
+    );
+    println!("  [ok] legacy 空白专辑：筛选、统计与聚合一致，文件未改动");
 
     // 清理：只删自己目录下的索引
     let cleanup: Vec<String> = repo::all_paths(db)

@@ -24,7 +24,7 @@ use crate::tagio;
 use crate::AppState;
 
 use super::status::enabled_sources;
-use super::tracks::file_meta;
+use super::tracks::{prepare_update_fields, sync_update_outcome};
 use super::{apply_aliases, changes_json, parse_body, ApiError, ApiResult, HTTP};
 
 /// 默认要写的字段（`ScrapeApplyRequest.fields` 的默认值）。
@@ -184,6 +184,8 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
         "changes": result.changes,
         "cover": result.cover,
         "lyrics": result.lyrics,
+        "skipped": result.skipped,
+        "file_changed": result.file_changed,
     })))
 }
 
@@ -337,14 +339,16 @@ async fn run_batch(state: AppState, store: JobStore, job_id: String, params: Bat
                 true, // 批量路径取歌词时带上专辑名（Python 的批量分支参数是齐的）
             )
             .await?;
-            applied += 1;
+            if written.file_changed { applied += 1; } else { skipped += 1; }
             details.push(json!({
                 "track_id": track_id,
-                "status": "已写入",
+                "status": if written.file_changed { "已写入" } else { "无变化" },
                 "score": best.score,
                 "fields": written.written,
                 "cover": written.cover,
                 "lyrics": written.lyrics,
+                "skipped": written.skipped,
+                "file_changed": written.file_changed,
             }));
             Ok(())
         }
@@ -404,13 +408,11 @@ pub async fn apply_candidate(
 
     let mut raw: HashMap<String, String> = HashMap::new();
     for key in fields {
-        let Some(value) = candidate_map.get(key) else {
-            continue;
-        };
-        if is_blank(value) {
-            continue;
-        }
-        raw.insert(key.clone(), super::v_text(value));
+        let value = candidate_map
+            .get(key)
+            .map(super::v_text)
+            .unwrap_or_default();
+        raw.insert(key.clone(), value);
     }
     if fields.iter().any(|f| f == "albumtype") {
         if let Some(value) = candidate_map.get("album_type") {
@@ -423,19 +425,38 @@ pub async fn apply_candidate(
         return Err(ApiError::bad_request("没有选择要写入的内容"));
     }
 
-    let mut values = super::prepare_fields(&raw, normalize_artist);
+    let mut values = prepare_update_fields(&raw, normalize_artist);
     let artist_alias = repo::aliases(&state.db, "artist").await?;
     let album_alias = repo::aliases(&state.db, "album").await?;
     values = apply_aliases(&values, &artist_alias, &album_alias);
 
-    // 封面：只在勾选且候选带 URL 时才下载（失败不报错，只是没写上）
+    let path = Path::new(&track.path);
+    let before = tagio::preview_update(path, &values, overwrite, None).map_err(|err| {
+        ApiError::Status(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+        )
+    })?;
+    let mut skipped = Vec::new();
+
+    // Existing artwork needs no network request when replacement is disabled.
     let mut cover: Option<(Vec<u8>, String)> = None;
     if write_cover {
-        if let Some(url) = candidate_map.get("cover").map(super::v_text) {
+        if !overwrite && before.current.has_cover {
+            skipped.push(tagio::SkippedField::new("cover", "existing"));
+        } else {
+            let url = candidate_map
+                .get("cover")
+                .map(super::v_text)
+                .unwrap_or_default();
             if !url.trim().is_empty() {
-                if let Some((bytes, mime)) = scrapers::fetch_cover(&HTTP, url.trim()).await {
-                    cover = Some((bytes, mime));
-                }
+                cover = scrapers::fetch_cover(&HTTP, url.trim()).await;
+            }
+            if cover.is_none() {
+                skipped.push(tagio::SkippedField::unavailable(
+                    "cover",
+                    "候选没有可用封面，或下载失败",
+                ));
             }
         }
     }
@@ -448,20 +469,23 @@ pub async fn apply_candidate(
             .map(super::v_text)
             .unwrap_or_default();
         if lyrics.trim().is_empty() {
-            let title = values
+            let title = before
+                .effective_fields
                 .get("title")
                 .cloned()
-                .unwrap_or_else(|| track.title.clone());
-            let artist = values
+                .unwrap_or_else(|| before.current.title.clone());
+            let artist = before
+                .effective_fields
                 .get("artist")
                 .cloned()
-                .unwrap_or_else(|| track.artist.clone());
+                .unwrap_or_else(|| before.current.artist.clone());
             let album = if album_for_lyrics {
                 Some(
-                    values
+                    before
+                        .effective_fields
                         .get("album")
                         .cloned()
-                        .unwrap_or_else(|| track.album.clone()),
+                        .unwrap_or_else(|| before.current.album.clone()),
                 )
             } else {
                 None
@@ -482,47 +506,42 @@ pub async fn apply_candidate(
                 lyrics = text;
             }
         }
+        if lyrics.trim().is_empty() {
+            skipped.push(tagio::SkippedField::unavailable(
+                "lyrics",
+                "候选没有歌词，歌词源也未返回内容",
+            ));
+        }
     }
 
-    let path = Path::new(&track.path);
-    let changes = tagio::preview_update(path, &values);
-    let cover_for_write = cover.clone();
     let lyrics_for_write = if lyrics.trim().is_empty() {
         None
     } else {
-        Some(lyrics.clone())
+        Some(lyrics.as_str())
     };
-    if let Err(err) = tagio::apply_update(path, &values, overwrite, cover_for_write, lyrics_for_write.as_deref())
-    {
-        return Err(ApiError::Status(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("写入失败：{err}"),
-        ));
+    let mut outcome = tagio::apply_update(path, &values, overwrite, cover, lyrics_for_write)
+        .map_err(|err| {
+            ApiError::Status(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "标签处理失败（阶段：{}；文件是否已改变：{}）：{err}",
+                    err.stage, err.file_changed
+                ),
+            )
+        })?;
+    sync_update_outcome(state, track, &outcome, true).await?;
+    outcome.skipped.extend(skipped);
+    if let Some(change) = outcome.changes.get_mut("lyrics") {
+        change.old = super::tracks::lyrics_summary(&change.old);
+        change.new = super::tracks::lyrics_summary(&change.new);
     }
-
-    let (mtime, size) = file_meta(path);
-    let has_cover = if cover.is_some() { Some(true) } else { None };
-    let has_lyrics = if lyrics.trim().is_empty() { None } else { Some(true) };
-    repo::sync_after_write(
-        &state.db,
-        track.id,
-        &values,
-        Some(mtime),
-        Some(size),
-        true,
-        has_cover,
-        has_lyrics,
-        false,
-    )
-    .await?;
-
-    let mut written: Vec<String> = values.keys().cloned().collect();
-    written.sort();
     Ok(CandidateWrite {
-        written,
-        changes: changes_json(&changes),
-        cover: cover.is_some(),
-        lyrics: !lyrics.trim().is_empty(),
+        written: outcome.written,
+        changes: changes_json(&outcome.changes),
+        cover: outcome.cover_written,
+        lyrics: outcome.lyrics_written,
+        skipped: outcome.skipped,
+        file_changed: outcome.file_changed,
     })
 }
 
@@ -532,6 +551,8 @@ pub struct CandidateWrite {
     pub changes: Value,
     pub cover: bool,
     pub lyrics: bool,
+    pub skipped: Vec<tagio::SkippedField>,
+    pub file_changed: bool,
 }
 
 /// `POST /api/lyrics/preview`：**只抓歌词、不写文件**（界面上那个「试抓歌词」按钮）。

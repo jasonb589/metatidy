@@ -403,6 +403,15 @@ dialog.modal[open] { animation: modal-in var(--t-slow) var(--ease-spring) both; 
 .diff-table th { color: var(--fg-3); font-weight: 400; font-size: 10px; } .diff-table th:first-child { width: 105px; }
 .diff-table .fld { color: var(--fg-2); } .diff-old { color: var(--err-fg); text-decoration: line-through; text-decoration-color: var(--err-line); }
 .diff-new { color: var(--ok-fg); } .diff-empty { color: var(--fg-3); font-style: italic; }
+.diff-skipped { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); font-size: 11px; }
+.diff-track > .diff-skipped { margin: 0; border-width: 1px 0 0; border-radius: 0; }
+.diff-skipped > summary { display: flex; align-items: center; gap: 7px; padding: 10px 14px; cursor: pointer; color: var(--fg-2); }
+.diff-skipped > summary > .hint { margin-left: auto; font-size: 10px; }
+.diff-skipped > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 7px; }
+.diff-skipped ul { list-style: none; padding: 0 14px 10px; margin: 0; }
+.diff-skipped li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; overflow-wrap: anywhere; }
+.diff-skipped li > span { min-width: 0; }
+.diff-skipped li > span:last-child { color: var(--fg-3); text-align: right; }
 .toast-stack { position: fixed; z-index: 80; right: 24px; bottom: 24px; display: flex; flex-direction: column; gap: 10px; width: min(400px,calc(100vw - 32px)); pointer-events: none; }
 body:has(.drawer[data-open="true"]) .toast-stack { right: 495px; }
 .toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 10px; padding: 15px; border: 1px solid var(--line-2); border-left: 3px solid var(--info); border-radius: 10px; background: var(--glass); backdrop-filter: var(--blur); box-shadow: var(--e2); animation: toast-in var(--t-slow) var(--ease-out) both; }

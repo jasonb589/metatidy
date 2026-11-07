@@ -188,8 +188,17 @@ function coverSvg(id) {
 function preview(payload) {
   const fields = payload.fields || {};
   const items = tracks.filter(t => (payload.ids || []).includes(t.id)).map(t => {
-    const changes = Object.fromEntries(Object.entries(fields).filter(([key, value]) => t[key] !== value).map(([key, value]) => [key, { old: t[key] || '', new: value }]));
-    return { track_id: t.id, path: t.path, filename: t.filename, current: t, file_exists: true, changes, count: Object.keys(changes).length };
+    const effective_fields = {};
+    const skipped = [];
+    for (const [field, value] of Object.entries(fields)) {
+      const next = String(value ?? '').trim();
+      const current = String(t[field] ?? '').trim();
+      const reason = !next ? 'blank' : current === next ? 'unchanged' : payload.overwrite === false && current && field !== 'lyrics' ? 'existing' : null;
+      if (reason) skipped.push({ field, reason });
+      else effective_fields[field] = next;
+    }
+    const changes = Object.fromEntries(Object.entries(effective_fields).map(([key, value]) => [key, { old: t[key] || '', new: value }]));
+    return { track_id: t.id, path: t.path, filename: t.filename, current: t, file_exists: true, changes, count: Object.keys(changes).length, effective_fields, skipped };
   });
   return { fields, items, changed_fields: items.reduce((n, item) => n + item.count, 0), truncated: false };
 }
@@ -269,8 +278,21 @@ async function handleApi(req, res, url) {
   if (route === '/api/tracks/preview') return json(res, preview(payload));
   if (route === '/api/tracks/apply') {
     const selected = tracks.filter(t => (payload.ids || []).includes(t.id));
-    selected.forEach(t => Object.assign(t, payload.fields));
-    return json(res, { written: selected.length, failed: [], fields: Object.keys(payload.fields || {}) });
+    // Full row payloads are fixture setup/restore operations used by browser
+    // tests, including empty tags and index-only flags; no real API calls use it.
+    if (payload.fields?.id !== undefined) {
+      selected.forEach(t => Object.assign(t, payload.fields));
+      return json(res, { written: selected.length, failed: [], fields: Object.keys(payload.fields), skipped: 0 });
+    }
+    const plan = preview(payload);
+    const items = plan.items.map(item => {
+      const track = selected.find(t => t.id === item.track_id);
+      Object.assign(track, item.effective_fields);
+      const lyrics = Object.hasOwn(item.effective_fields, 'lyrics');
+      if (lyrics) track.has_lyrics = 1;
+      return { track_id: item.track_id, written: Object.keys(item.effective_fields), skipped: item.skipped, file_changed: item.count > 0, cover: false, lyrics };
+    });
+    return json(res, { written: items.filter(item => item.file_changed).length, skipped: items.filter(item => !item.file_changed).length, failed: [], items, fields: [...new Set(items.flatMap(item => item.written))].sort() });
   }
   if (route.startsWith('/api/aliases/')) {
     const kind = route.split('/').at(-1);
@@ -290,20 +312,21 @@ async function handleApi(req, res, url) {
       cover: track.has_cover ? `/api/tracks/${track.id}/cover` : '', lyrics: '',
       context: '本地测试候选 · 未请求外部数据源',
     })) : [];
-    return json(res, { candidates, source_status: chosenSources.map(source => ({ source, count: track ? 1 : 0 })) });
+    return json(res, { track: track || null, candidates, source_status: chosenSources.map(source => ({ source, count: track ? 1 : 0 })) });
   }
   if (route === '/api/lyrics/preview') return json(res, { lyrics: '[00:00.00] UI 测试歌词\n[00:03.00] 此内容仅用于排版验收。', source: 'fixture' });
   if (route === '/api/scrape/apply') {
     const track = tracks.find(t => t.id === payload.track_id);
     if (!track) return json(res, { detail: '没有这条测试曲目' }, 404);
     const fields = Object.fromEntries((payload.fields || []).filter(field => payload.candidate?.[field] !== undefined && payload.candidate[field] !== '').map(field => [field, payload.candidate[field]]));
-    const changes = Object.fromEntries(Object.entries(fields).filter(([field, value]) => track[field] !== value).map(([field, value]) => [field, { old: track[field] || '', new: value }]));
-    Object.assign(track, fields);
-    const cover = Boolean(payload.write_cover && payload.candidate?.cover);
-    const lyrics = Boolean(payload.write_lyrics && payload.candidate?.lyrics);
+    const plan = preview({ ids: [track.id], fields, overwrite: payload.overwrite }).items[0];
+    const changes = plan.changes;
+    Object.assign(track, plan.effective_fields);
+    const cover = Boolean(payload.write_cover && payload.candidate?.cover && (payload.overwrite !== false || !track.has_cover));
+    const lyrics = Boolean(payload.write_lyrics && payload.candidate?.lyrics && track.lyrics !== payload.candidate.lyrics);
     if (cover) track.has_cover = 1;
-    if (lyrics) track.has_lyrics = 1;
-    return json(res, { written: Object.keys(fields), changes, cover, lyrics });
+    if (lyrics) { track.has_lyrics = 1; track.lyrics = payload.candidate.lyrics; }
+    return json(res, { written: Object.keys(plan.effective_fields), changes, cover, lyrics, file_changed: plan.count > 0 || cover || lyrics, skipped: plan.skipped });
   }
   if (route === '/api/scrape/batch') return json(res, makeJob('scrape', { applied: 0, skipped: (payload.ids || []).length, failed: 0, details: [] }));
   if (route === '/api/template/test') {

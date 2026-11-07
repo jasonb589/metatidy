@@ -758,7 +758,8 @@ pub async fn sync_after_write(
     if numeric_binds & 8 != 0 {
         query = query.bind(has_lyrics.unwrap_or(false));
     }
-    query.bind(id).execute(pool).await?;
+    let updated = query.bind(id).execute(pool).await?;
+    anyhow::ensure!(updated.rows_affected() == 1, "写入后曲目索引已不存在，请重新扫描");
     Ok(())
 }
 

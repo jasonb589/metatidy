@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="./saved-filters.css">
 <link rel="stylesheet" href="./library-tools.css">
 <link rel="stylesheet" href="./albums.css">
+<link rel="stylesheet" href="./review-queue.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -260,13 +261,18 @@
       </div>
     </div>
 
-    <div class="workbench">
+    <div class="workbench" id="scrape-workbench">
       <div class="zone zone-pick">
         <div class="card">
           <div class="card-head">
             <h3><span class="step-number">01</span> 选择曲目</h3>
             <span class="badge count-chip" id="pick-total">—</span>
           </div>
+          <div class="scrape-picker-tabs" role="tablist" aria-label="曲目来源">
+            <button type="button" id="scrape-library-tab" role="tab" aria-selected="true" aria-controls="scrape-library-picker">曲库选曲</button>
+            <button type="button" id="scrape-review-tab" role="tab" aria-selected="false" aria-controls="review-queue-root" tabindex="-1">待审队列 <span id="review-count">0</span></button>
+          </div>
+          <div id="scrape-library-picker" role="tabpanel" aria-labelledby="scrape-library-tab">
           <div class="card-body tight">
             <label class="row-inline">
               <span class="lbl">搜索</span>
@@ -276,13 +282,16 @@
           </div>
           <div class="scroll-y pick-list" id="pick-list"></div>
           <div class="pager" id="pick-pager"></div>
+          </div>
+          <div id="review-queue-root" role="tabpanel" aria-labelledby="scrape-review-tab" hidden></div>
         </div>
       </div>
 
       <div class="zone zone-cand">
+        <div id="review-context" class="review-context" hidden></div>
         <div class="card">
           <div class="card-head">
-            <h3><span class="step-number">02</span> 匹配候选</h3>
+            <h3 id="scrape-candidates-heading" tabindex="-1"><span class="step-number">02</span> 匹配候选</h3>
             <span class="badge count-chip" id="cand-count">0</span>
             <div class="grow"><span class="hint" id="cand-hidden">按分数从高到低</span></div>
           </div>
@@ -312,7 +321,7 @@
       </div>
 
       <div class="zone zone-write">
-        <div class="card">
+        <div class="card" id="scrape-write-card">
           <div class="card-head">
             <h3><span class="step-number">03</span> 完善资料</h3>
             <span class="badge" id="write-target">未选候选</span>
@@ -337,20 +346,22 @@
             <label class="check"><input type="checkbox" id="write-cover"><span>写封面</span></label>
               <label class="check"><input type="checkbox" id="write-lyrics" checked><span>写歌词</span></label>
               <label class="check"><input type="checkbox" id="write-normalize" checked><span>多歌手归一为 &amp;</span></label>
-              <label class="check"><input type="checkbox" id="write-overwrite" checked><span>覆盖已有值</span></label>
+              <label class="check"><input type="checkbox" id="write-overwrite" checked><span>覆盖已有文本与封面</span></label>
             </div>
+            <p class="scrape-write-policy">关闭覆盖会保留已有文本和封面。勾选“写歌词”表示明确替换歌词，不受覆盖开关影响。</p>
             <div class="row">
               <button class="btn btn-primary" id="btn-scrape-apply" disabled>预览差异并写入</button>
               <button class="btn btn-sm" id="btn-write-all">全选字段</button>
               <button class="btn btn-sm" id="btn-write-none">清空字段</button>
             </div>
             <div id="scrape-result"></div>
+            <div id="review-navigation" class="review-navigation" hidden></div>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="scrape-batch-card">
       <div class="card-head">
         <h2>批量刮削</h2>
         <span class="badge count-chip" id="batch-count">未选择</span>
@@ -362,7 +373,7 @@
       <div class="card-body tight">
         <div class="row" role="radiogroup" aria-label="批量模式">
           <span class="lbl">模式</span>
-          <label class="check"><input type="radio" name="batch-mode" value="search" checked><span>仅搜索（不写文件）</span></label>
+          <label class="check"><input type="radio" name="batch-mode" value="search" checked><span>仅搜索并逐首审阅</span></label>
           <label class="check"><input type="radio" name="batch-mode" value="apply"><span>按最低分自动写入</span></label>
         </div>
         <div class="row">
@@ -376,7 +387,7 @@
           </label>
           <span class="hint" id="batch-threshold-hint">当前模式不写文件，最低分只在「自动写入」下生效。</span>
         </div>
-        <div>
+        <div id="batch-fields-wrap">
           <span class="lbl">批量写入字段</span>
           <div class="field-grid" id="batch-fields"></div>
         </div>
@@ -384,7 +395,7 @@
           <label class="check"><input type="checkbox" id="batch-cover"><span>写封面</span></label>
           <label class="check"><input type="checkbox" id="batch-lyrics"><span>写歌词</span></label>
           <button class="btn btn-primary" id="btn-batch-run">开始批量刮削</button>
-          <span class="hint">「自动写入」无法逐首预览差异，建议先用「仅搜索」看分数分布。</span>
+          <span class="hint">仅搜索每批最多 200 首，结果进入待审队列，逐首确认后才写入。「自动写入」按阈值直接执行。</span>
         </div>
         <div id="batch-progress" hidden></div>
         <div id="batch-result"></div>

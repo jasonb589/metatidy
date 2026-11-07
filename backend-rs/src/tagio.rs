@@ -5,11 +5,11 @@
 //!
 //! 对外接口与 Python 版语义一致：
 //! - `read_tags` 读回全部字段（失败也返回结构体，错误放在 `error` 里，不抛异常）
-//! - `preview_update` 只算不写，返回 `字段 -> (旧值, 新值)`
-//! - `apply_update` 真正落盘，`overwrite=false` 时跳过已有非空值
+//! - `preview_update` 只算不写，返回有效差异与逐字段跳过原因
+//! - `apply_update` 只保存有效变化，并读回确认实际结果
 
 use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem, TagType};
@@ -128,8 +128,15 @@ pub fn read_tags(path: &Path) -> RawTags {
         }
     };
 
-    out.duration = tagged.properties().duration().as_secs_f64();
-    out.format = format!("{:?}", tagged.file_type()).to_lowercase();
+    raw_from_file(&tagged)
+}
+
+fn raw_from_file(tagged: &TaggedFile) -> RawTags {
+    let mut out = RawTags {
+        duration: tagged.properties().duration().as_secs_f64(),
+        format: format!("{:?}", tagged.file_type()).to_lowercase(),
+        ..Default::default()
+    };
 
     if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
         out.present = true;
@@ -226,154 +233,381 @@ pub fn read_lyrics(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 只算不写：返回 `字段 -> (旧值, 新值)`，只包含真正会变化的字段。
-pub fn preview_update(path: &Path, desired: &HashMap<String, String>) -> HashMap<String, FieldChange> {
-    let current = read_tags(path);
-    let mut diff = HashMap::new();
-    for (key, value) in desired {
-        if !EDITABLE_FIELDS.contains(&key.as_str()) {
-            continue;
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkippedField {
+    pub field: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl SkippedField {
+    pub fn new(field: impl Into<String>, reason: &str) -> Self {
+        Self {
+            field: field.into(),
+            reason: reason.to_string(),
+            detail: None,
         }
-        let old = current.field(key).trim().to_string();
-        let new = value.trim().to_string();
-        if old == new {
-            continue;
-        }
-        diff.insert(key.clone(), FieldChange { old, new });
     }
-    diff
+
+    pub fn unavailable(field: &str, detail: &str) -> Self {
+        Self {
+            field: field.to_string(),
+            reason: "unavailable".to_string(),
+            detail: Some(detail.to_string()),
+        }
+    }
+}
+
+/// Per-file decisions shared by the preview and the actual writer. Lyrics are
+/// an explicit edit and intentionally do not depend on the overwrite switch.
+pub struct UpdatePlan {
+    pub current: RawTags,
+    pub effective_fields: HashMap<String, String>,
+    pub changes: HashMap<String, FieldChange>,
+    pub skipped: Vec<SkippedField>,
+    pub lyrics: Option<String>,
+    sync_keys: Vec<String>,
+}
+
+/// Confirmed disk values, never the unverified candidate/request values.
+pub struct UpdateOutcome {
+    pub written: Vec<String>,
+    pub skipped: Vec<SkippedField>,
+    pub changes: HashMap<String, FieldChange>,
+    pub readback_fields: HashMap<String, String>,
+    pub has_cover: bool,
+    pub has_lyrics: bool,
+    pub cover_written: bool,
+    pub lyrics_written: bool,
+    pub file_changed: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct UpdateError {
+    pub stage: &'static str,
+    /// True also means a save failed midway and may have changed the file.
+    pub file_changed: bool,
+    pub message: String,
+}
+
+fn update_error(
+    stage: &'static str,
+    file_changed: bool,
+    message: impl Into<String>,
+) -> UpdateError {
+    UpdateError {
+        stage,
+        file_changed,
+        message: message.into(),
+    }
+}
+
+fn open_for_update(path: &Path) -> Result<TaggedFile, UpdateError> {
+    Probe::open(path)
+        .and_then(|probe| probe.read())
+        .map_err(|err| update_error("read", false, format!("读取标签失败：{err}")))
+}
+
+fn canonical_field(key: &str, value: &str) -> Result<String, &'static str> {
+    if !EDITABLE_FIELDS.contains(&key) {
+        return Err("unsupported");
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("blank");
+    }
+    match key {
+        "track" | "disc" => {
+            if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid");
+            }
+            value
+                .parse::<u32>()
+                .map(|number| number.to_string())
+                .map_err(|_| "invalid")
+        }
+        "year" => {
+            let year = value.get(..4).ok_or("invalid")?;
+            if !year.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("invalid");
+            }
+            let number = year.parse::<u32>().map_err(|_| "invalid")?;
+            if number < 1000 {
+                return Err("invalid");
+            }
+            Ok(number.to_string())
+        }
+        _ => Ok(value.to_string()),
+    }
+}
+
+fn lyrics_in(tag: Option<&Tag>) -> String {
+    tag.and_then(|tag| tag.get_string(&ItemKey::Lyrics))
+        .unwrap_or("")
+        .to_string()
+}
+
+fn plan_update(
+    tagged: &TaggedFile,
+    path: &Path,
+    desired: &HashMap<String, String>,
+    overwrite: bool,
+    lyrics: Option<&str>,
+) -> UpdatePlan {
+    let current = raw_from_file(tagged);
+    let original = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let mut planned_tag = original
+        .cloned()
+        .unwrap_or_else(|| Tag::new(pick_tag_type(path)));
+    let mut plan = UpdatePlan {
+        current,
+        effective_fields: HashMap::new(),
+        changes: HashMap::new(),
+        skipped: Vec::new(),
+        lyrics: None,
+        sync_keys: Vec::new(),
+    };
+    let mut keys: Vec<_> = desired.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = match canonical_field(key, &desired[key]) {
+            Ok(value) => value,
+            Err(reason) => {
+                plan.skipped.push(SkippedField::new(key, reason));
+                continue;
+            }
+        };
+        let old = plan.current.field(key).trim().to_string();
+        // Keep valid requested fields in the readback set even when their disk
+        // value is retained: this repairs stale indexes without overwriting tags.
+        plan.sync_keys.push(key.clone());
+        if old == value {
+            plan.skipped.push(SkippedField::new(key, "unchanged"));
+        } else if !overwrite && !old.is_empty() {
+            plan.skipped.push(SkippedField::new(key, "existing"));
+        } else if set_one(&mut planned_tag, key, &value) {
+            plan.changes.insert(
+                key.clone(),
+                FieldChange {
+                    old,
+                    new: value.clone(),
+                },
+            );
+            plan.effective_fields.insert(key.clone(), value);
+        } else {
+            plan.sync_keys.pop();
+            plan.skipped.push(SkippedField::new(key, "unsupported"));
+        }
+    }
+    if let Some(text) = lyrics {
+        let new = text.trim();
+        let old = lyrics_in(original);
+        if new.is_empty() {
+            plan.skipped.push(SkippedField::new("lyrics", "blank"));
+        } else if old.trim() == new {
+            plan.skipped.push(SkippedField::new("lyrics", "unchanged"));
+        } else if planned_tag.insert_text(ItemKey::Lyrics, new.to_string()) {
+            plan.lyrics = Some(new.to_string());
+            plan.changes.insert(
+                "lyrics".to_string(),
+                FieldChange {
+                    old,
+                    new: new.to_string(),
+                },
+            );
+        } else {
+            plan.skipped
+                .push(SkippedField::new("lyrics", "unsupported"));
+        }
+    }
+    plan
+}
+
+pub fn preview_update(
+    path: &Path,
+    desired: &HashMap<String, String>,
+    overwrite: bool,
+    lyrics: Option<&str>,
+) -> Result<UpdatePlan, UpdateError> {
+    let tagged = open_for_update(path)?;
+    Ok(plan_update(&tagged, path, desired, overwrite, lyrics))
 }
 
 /// 把单个字段写进标签对象。
-fn set_one(tag: &mut Tag, key: &str, value: &str) {
-    match key {
-        "title" => tag.set_title(value.to_string()),
-        "artist" => tag.set_artist(value.to_string()),
-        "album" => tag.set_album(value.to_string()),
-        "genre" => tag.set_genre(value.to_string()),
-        "comment" => tag.set_comment(value.to_string()),
+fn set_one(tag: &mut Tag, key: &str, value: &str) -> bool {
+    let item_key = match key {
+        "title" => ItemKey::TrackTitle,
+        "artist" => ItemKey::TrackArtist,
+        "album" => ItemKey::AlbumTitle,
+        "genre" => ItemKey::Genre,
+        "comment" => ItemKey::Comment,
+        "track" => ItemKey::TrackNumber,
+        "disc" => ItemKey::DiscNumber,
+        "albumartist" => ItemKey::AlbumArtist,
+        "composer" => ItemKey::Composer,
+        "lyricist" => ItemKey::Lyricist,
+        "copyright" => ItemKey::CopyrightMessage,
+        "language" => ItemKey::Language,
+        "mb_artist_id" => ItemKey::MusicBrainzArtistId,
+        "release_group_id" => ItemKey::MusicBrainzReleaseGroupId,
         "year" => {
-            // 年份可能是 "2008" 或 "2008-11-01"：能解析成数字就用标准字段，否则写自由文本
-            match value.get(0..4).and_then(|y| y.parse::<u32>().ok()) {
-                Some(y) => tag.set_year(y),
-                None => {
-                    tag.insert_text(ItemKey::Year, value.to_string());
-                }
+            if let Ok(year) = value.parse::<u32>() {
+                tag.set_year(year);
+                return tag.year() == Some(year);
             }
-        }
-        "track" => {
-            if let Ok(n) = value.trim().parse::<u32>() {
-                tag.set_track(n);
-            }
-        }
-        "disc" => {
-            if let Ok(n) = value.trim().parse::<u32>() {
-                tag.set_disk(n);
-            }
-        }
-        "albumartist" => {
-            tag.insert_text(ItemKey::AlbumArtist, value.to_string());
-        }
-        "composer" => {
-            tag.insert_text(ItemKey::Composer, value.to_string());
-        }
-        "lyricist" => {
-            tag.insert_text(ItemKey::Lyricist, value.to_string());
-        }
-        "copyright" => {
-            tag.insert_text(ItemKey::CopyrightMessage, value.to_string());
-        }
-        "language" => {
-            tag.insert_text(ItemKey::Language, value.to_string());
-        }
-        "mb_artist_id" => {
-            tag.insert_text(ItemKey::MusicBrainzArtistId, value.to_string());
-        }
-        "release_group_id" => {
-            tag.insert_text(ItemKey::MusicBrainzReleaseGroupId, value.to_string());
+            return false;
         }
         "albumtype" => {
-            // 必须用 insert_unchecked：insert / insert_text 碰到自由键会静默丢弃。
             for key in album_type_keys(tag.tag_type()) {
                 tag.insert_unchecked(TagItem::new(
                     ItemKey::Unknown((*key).to_string()),
                     ItemValue::Text(value.to_string()),
                 ));
             }
+            return true;
         }
-        _ => {}
-    }
+        _ => return false,
+    };
+    tag.insert_text(item_key, value.to_string())
 }
 
-/// 真正把字段写进文件。
-///
-/// - `overwrite = false` 时跳过「文件里已有非空值」的字段
-/// - `cover` / `lyrics` 是可选附加内容
-/// - 返回实际写入的字段数
+/// Write only effective changes, then read back the actual values for the index.
+/// Lyrics are explicit replacements; existing artwork follows `overwrite`.
 pub fn apply_update(
     path: &Path,
     desired: &HashMap<String, String>,
     overwrite: bool,
     cover: Option<(Vec<u8>, String)>,
     lyrics: Option<&str>,
-) -> anyhow::Result<usize> {
-    let tagged = Probe::open(path)
-        .map_err(|e| anyhow::anyhow!("打开失败：{e}"))?
-        .read()
-        .map_err(|e| anyhow::anyhow!("解析标签失败：{e}"))?;
-
-    let tag_type = pick_tag_type(path);
-    let mut tag = match tagged.primary_tag().or_else(|| tagged.first_tag()) {
-        Some(existing) => existing.clone(),
-        None => Tag::new(tag_type),
-    };
-
-    let current = read_tags(path);
-    let mut written = 0usize;
-    for (key, value) in desired {
-        if !EDITABLE_FIELDS.contains(&key.as_str()) || value.trim().is_empty() {
-            continue;
+) -> Result<UpdateOutcome, UpdateError> {
+    let tagged = open_for_update(path)?;
+    let mut plan = plan_update(&tagged, path, desired, overwrite, lyrics);
+    let original = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let mut tag = original
+        .cloned()
+        .unwrap_or_else(|| Tag::new(pick_tag_type(path)));
+    for (key, value) in &plan.effective_fields {
+        if !set_one(&mut tag, key, value) {
+            return Err(update_error(
+                "plan",
+                false,
+                format!("标签格式不支持字段：{key}"),
+            ));
         }
-        if !overwrite && !current.field(key).trim().is_empty() {
-            continue;
-        }
-        set_one(&mut tag, key, value.trim());
-        written += 1;
     }
-
-    if let Some(text) = lyrics {
-        if !text.trim().is_empty() {
-            tag.insert_text(ItemKey::Lyrics, text.to_string());
-            written += 1;
+    if let Some(text) = &plan.lyrics {
+        if !tag.insert_text(ItemKey::Lyrics, text.clone()) {
+            return Err(update_error("plan", false, "标签格式不支持歌词"));
         }
     }
 
+    let mut cover_written = false;
+    let mut expected_cover = None;
     if let Some((data, mime)) = cover {
-        if !data.is_empty() {
-            // 封面是「替换」而不是「追加」：lofty 的 push_picture 只会再塞一张，文件里攒两张
-            // 之后 read_cover 仍取 pictures()[0]（旧的那张），看起来就像「写了封面没生效」。
-            // Python 参考实现对 mp3/flac/ogg/m4a 都是覆盖写，这里对齐；并遵守「覆盖已有值」开关
-            // （不勾且已有封面时不动它）。
-            if overwrite || tag.pictures().is_empty() {
-                let mime_type = if mime.to_lowercase().contains("png") {
-                    MimeType::Png
-                } else {
-                    MimeType::Jpeg
-                };
-                while !tag.pictures().is_empty() {
-                    let _ = tag.remove_picture(0);
-                }
-                let picture =
-                    Picture::new_unchecked(PictureType::CoverFront, Some(mime_type), None, data);
-                tag.push_picture(picture);
-                written += 1;
+        if data.is_empty() {
+            plan.skipped.push(SkippedField::new("cover", "blank"));
+        } else if !overwrite && !tag.pictures().is_empty() {
+            plan.skipped.push(SkippedField::new("cover", "existing"));
+        } else if tag
+            .pictures()
+            .first()
+            .map(|picture| picture.data() == data.as_slice())
+            .unwrap_or(false)
+        {
+            plan.skipped.push(SkippedField::new("cover", "unchanged"));
+        } else {
+            while !tag.pictures().is_empty() {
+                let _ = tag.remove_picture(0);
             }
+            expected_cover = Some(data.clone());
+            tag.push_picture(Picture::new_unchecked(
+                PictureType::CoverFront,
+                Some(MimeType::from_str(&mime)),
+                None,
+                data,
+            ));
+            cover_written = true;
         }
     }
-
-    tag.save_to_path(path, WriteOptions::default())
-        .map_err(|e| anyhow::anyhow!("写入标签失败：{e}"))?;
-    Ok(written)
+    let lyrics_written = plan.lyrics.is_some();
+    let file_changed = !plan.effective_fields.is_empty() || lyrics_written || cover_written;
+    let after = if file_changed {
+        tag.save_to_path(path, WriteOptions::default())
+            .map_err(|err| {
+                update_error(
+                    "write",
+                    true,
+                    format!("保存标签失败，文件可能已部分改变：{err}"),
+                )
+            })?;
+        open_for_update(path).map_err(|err| {
+            update_error(
+                "verify",
+                true,
+                format!("文件已保存，但读回验证失败；请重新扫描：{}", err.message),
+            )
+        })?
+    } else {
+        tagged
+    };
+    let readback = raw_from_file(&after);
+    let after_tag = after.primary_tag().or_else(|| after.first_tag());
+    for (key, expected) in &plan.effective_fields {
+        if readback.field(key).trim() != expected {
+            return Err(update_error(
+                "verify",
+                true,
+                format!("文件已保存，但字段 {key} 读回值与预期不符；请重新扫描并检查文件",),
+            ));
+        }
+    }
+    if let Some(expected) = &plan.lyrics {
+        if lyrics_in(after_tag).trim() != expected {
+            return Err(update_error(
+                "verify",
+                true,
+                "文件已保存，但歌词读回验证不一致；请重新扫描",
+            ));
+        }
+    }
+    if let Some(expected) = expected_cover {
+        if !after_tag
+            .and_then(|tag| tag.pictures().first())
+            .map(|picture| picture.data() == expected.as_slice())
+            .unwrap_or(false)
+        {
+            return Err(update_error(
+                "verify",
+                true,
+                "文件已保存，但封面读回验证不一致；请重新扫描",
+            ));
+        }
+    }
+    let mut written: Vec<String> = plan.effective_fields.keys().cloned().collect();
+    written.sort();
+    let readback_fields = plan
+        .sync_keys
+        .iter()
+        .map(|key| (key.clone(), readback.field(key).trim().to_string()))
+        .collect();
+    for key in &written {
+        if let Some(change) = plan.changes.get_mut(key) {
+            change.new = readback.field(key).trim().to_string();
+        }
+    }
+    Ok(UpdateOutcome {
+        written,
+        skipped: plan.skipped,
+        changes: plan.changes,
+        readback_fields,
+        has_cover: readback.has_cover,
+        has_lyrics: readback.has_lyrics,
+        cover_written,
+        lyrics_written,
+        file_changed,
+    })
 }
 
 #[cfg(test)]
@@ -486,7 +720,7 @@ mod tests {
         desired.insert("albumtype".to_string(), "专辑".to_string());
 
         let written = apply_update(&path, &desired, true, None, None).unwrap();
-        assert!(written >= 6, "至少写了 6 个字段，实际 {written}");
+        assert!(written.written.len() >= 6, "至少写了 6 个字段，实际 {:?}", written.written);
 
         let back = read_tags(&path);
         assert!(back.error.is_none(), "读回失败：{:?}", back.error);
@@ -509,7 +743,7 @@ mod tests {
 
         let mut desired = HashMap::new();
         desired.insert("title".to_string(), "新名字".to_string());
-        let diff = preview_update(&path, &desired);
+        let diff = preview_update(&path, &desired, true, None).unwrap().changes;
         assert_eq!(diff.len(), 1);
         assert_eq!(diff["title"].old, "");
         assert_eq!(diff["title"].new, "新名字");
@@ -535,6 +769,99 @@ mod tests {
         assert_eq!(read_tags(&path).album, "新专辑");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn plan_and_outcome_match_for_flac_and_mp3() {
+        for kind in ["flac", "mp3"] {
+            let Some(path) = require(kind) else { continue };
+            let first = HashMap::from([
+                ("title".to_string(), "保留原题".to_string()),
+                ("album".to_string(), "保留原专辑".to_string()),
+                ("comment".to_string(), "不能改变的注释".to_string()),
+            ]);
+            apply_update(&path, &first, true, None, Some("原歌词")).unwrap();
+            let desired = HashMap::from([
+                ("title".to_string(), "不应覆盖".to_string()),
+                ("album".to_string(), "   ".to_string()),
+                ("genre".to_string(), "  Ambient  ".to_string()),
+                ("track".to_string(), "003".to_string()),
+                ("disc".to_string(), "02".to_string()),
+                ("year".to_string(), "2004-11-01".to_string()),
+                ("unknown".to_string(), "不能写入".to_string()),
+            ]);
+            let before = std::fs::read(&path).unwrap();
+            let plan = preview_update(&path, &desired, false, Some("新歌词")).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                plan.effective_fields.get("track").map(String::as_str),
+                Some("3")
+            );
+            assert_eq!(
+                plan.effective_fields.get("year").map(String::as_str),
+                Some("2004")
+            );
+            assert!(plan
+                .skipped
+                .iter()
+                .any(|item| item.field == "title" && item.reason == "existing"));
+            assert!(plan
+                .skipped
+                .iter()
+                .any(|item| item.field == "album" && item.reason == "blank"));
+            let result = apply_update(&path, &desired, false, None, Some("新歌词")).unwrap();
+            assert!(result.file_changed && result.lyrics_written);
+            let mut expected: Vec<_> = plan.effective_fields.keys().cloned().collect();
+            expected.sort();
+            assert_eq!(result.written, expected);
+            assert_eq!(result.readback_fields["title"], "保留原题");
+            assert!(!result.readback_fields.contains_key("comment"));
+            let back = read_tags(&path);
+            assert_eq!(
+                (back.track.as_str(), back.disc.as_str(), back.year.as_str()),
+                ("3", "2", "2004")
+            );
+            assert_eq!(back.comment, "不能改变的注释");
+            assert_eq!(read_lyrics(&path), "新歌词");
+
+            let before = std::fs::read(&path).unwrap();
+            let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+            let noop = apply_update(&path, &desired, false, None, Some("新歌词")).unwrap();
+            assert!(!noop.file_changed && !noop.lyrics_written && noop.written.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().modified().unwrap(),
+                modified
+            );
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_and_blank_values_never_save_or_reach_readback_fields() {
+        let path =
+            std::env::temp_dir().join(format!("metatidy-noop-{}.flac", uuid::Uuid::new_v4()));
+        fixtures::make_flac(&path).unwrap();
+        let desired = HashMap::from([
+            ("album".to_string(), "  ".to_string()),
+            ("track".to_string(), "2/12".to_string()),
+            ("disc".to_string(), "4294967296".to_string()),
+            ("year".to_string(), "not-year".to_string()),
+            ("unsupported".to_string(), "value".to_string()),
+        ]);
+        let before = std::fs::read(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let result = apply_update(&path, &desired, true, None, Some(" ")).unwrap();
+        assert!(
+            !result.file_changed && result.written.is_empty() && result.readback_fields.is_empty()
+        );
+        assert_eq!(result.skipped.len(), 6);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

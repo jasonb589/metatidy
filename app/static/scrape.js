@@ -10,6 +10,7 @@
 
 import { api, pollJob } from "./api.js";
 import * as ui from "./ui.js";
+import { initReviewQueue } from "./review-queue.js";
 import {
   state,
   on,
@@ -21,6 +22,7 @@ import {
   isSelected,
   setCurrentTrack,
   currentTrackRow,
+  updateTrackSnapshot,
 } from "./store.js";
 
 const WRITE_FIELDS = [
@@ -59,6 +61,17 @@ let lyricsRevision = 0;
 let lyricsBusy = false;
 let pendingWrite = null;
 let pickRevision = 0;
+const REVIEW_MAX = 200;
+const REVIEW_TTL = 30 * 60 * 1000;
+const REVIEW_BYTES = 16 * 1024 * 1024;
+const REVIEW_ENTRY_BYTES = 2 * 1024 * 1024;
+let reviewQueue = null;
+let reviewRun = null;
+let reviewGeneration = 0;
+let reviewActiveId = null;
+let reviewOpenRevision = 0;
+let sessionUsable = true;
+let automaticBatchBusy = false;
 
 function currentTrackId() {
   const id = Number(state.currentTrackId);
@@ -66,7 +79,11 @@ function currentTrackId() {
 }
 
 function isCurrentScope(scope) {
-  return Boolean(scope && scope === activeSearchScope && scope.currentId === currentTrackId());
+  if (!sessionUsable || !scope || scope !== activeSearchScope || scope.currentId !== currentTrackId()) return false;
+  if (!scope.review) return true;
+  const { run, entry, attempt } = scope.review;
+  return run === reviewRun && entry.attempt === attempt && entry.status === "ready"
+    && Boolean(entry.response) && Date.now() - entry.searchedAt < REVIEW_TTL;
 }
 
 function chosenCandidate() {
@@ -97,6 +114,7 @@ function syncSingleControls() {
   nodes.applyBtn.title = writable ? "" : "请为当前曲目重新搜索并选择候选后再写入";
   nodes.lyricsTry.disabled = !writable || lyricsBusy || Boolean(pendingWrite);
   nodes.lyricsTry.textContent = lyricsBusy ? "试抓中…" : "试抓歌词";
+  renderReviewContext();
 }
 
 function invalidateCandidates(message = "") {
@@ -175,6 +193,8 @@ export function init() {
     batchRun: ui.byId("btn-batch-run"),
     batchProgress: ui.byId("batch-progress"),
     batchResult: ui.byId("batch-result"),
+    reviewContext: ui.byId("review-context"),
+    reviewNavigation: ui.byId("review-navigation"),
   };
 
   const debouncedPick = ui.debounce(() => {
@@ -252,6 +272,23 @@ export function init() {
 
   renderBatchFields();
   syncBatchMode();
+  reviewQueue = initReviewQueue({
+    host: ui.byId("review-queue-root"), maxItems: REVIEW_MAX,
+    onOpen: openReviewEntry, onRetry: retryReviewEntry, onSkip: skipReviewEntry,
+    onClear: () => clearReviewQueue(), onStop: () => stopReviewSearch(),
+  });
+  for (const [id, mode] of [["scrape-library-tab", "library"], ["scrape-review-tab", "review"]]) {
+    const button = ui.byId(id);
+    button.addEventListener("click", () => showPicker(mode));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? "library" : event.key === "End" ? "review" : mode === "review" ? "library" : "review";
+      showPicker(next);
+      ui.byId(next === "review" ? "scrape-review-tab" : "scrape-library-tab").focus();
+    });
+  }
+  window.setInterval(expireReviewEntries, 30000);
 
   on("selection:changed", () => {
     renderBatchCount();
@@ -261,13 +298,32 @@ export function init() {
     const nextId = currentTrackId();
     if (nextId !== observedTrackId) {
       observedTrackId = nextId;
+      reviewOpenRevision += 1;
+      reviewActiveId = null;
       invalidateCandidates("当前曲目已切换，请重新搜索并选择候选。");
+      syncReviewQueue();
     }
     renderPick();
     syncSearchFields();
   });
+  on("current:updated", (row) => {
+    const review = activeSearchScope?.review;
+    if (review && review.entry.status === "ready" && (String(row.title || "") !== review.entry.baseline.title || String(row.artist || "") !== review.entry.baseline.artist)) {
+      dropReviewResponse(review.run, review.entry);
+      review.entry.status = "expired";
+      review.entry.detail = "曲目标题或歌手已更新，请重新搜索。";
+      invalidateCandidates(review.entry.detail);
+      syncReviewQueue();
+    }
+    syncSearchFields();
+  });
   observedTrackId = currentTrackId();
-  window.addEventListener("metatidy:unauthorized", () => invalidateCandidates());
+  window.addEventListener("metatidy:unauthorized", () => {
+    sessionUsable = false;
+    clearReviewQueue();
+    invalidateCandidates();
+    setCurrentTrack(null);
+  });
 }
 
 /* ------------------------------------------------------------- 数据源 */
@@ -344,6 +400,8 @@ export async function refreshPick() {
     state.scrape.pickTotal = data.total || 0;
     state.scrape.pickPages = data.pages || 1;
     state.scrape.pickPage = data.page || 1;
+    const current = state.scrape.pickItems.find((row) => Number(row.id) === currentTrackId());
+    if (current) updateTrackSnapshot(current, { partial: true });
   } catch (err) {
     if (revision !== pickRevision) return;
     state.scrape.pickItems = [];
@@ -451,6 +509,7 @@ function syncSearchFields() {
 /* ------------------------------------------------------------- 搜索 */
 
 async function runSearch() {
+  if (!sessionUsable) return;
   const keyword = nodes.keyword.value.trim();
   const artistHint = nodes.artistHint.value.trim();
   const row = currentTrackRow();
@@ -463,6 +522,14 @@ async function runSearch() {
     return;
   }
   const limit = Math.max(1, Math.min(10, Number(nodes.limit.value) || 3));
+  const queued = reviewRun?.entries.find((entry) => entry.trackId === reviewActiveId && entry.trackId === Number(row?.id));
+  if (queued) {
+    await retryReviewEntry(reviewPayload(queued), { keyword, artistHint, limit, sources: [...state.sourceChoice] });
+    return;
+  }
+  reviewOpenRevision += 1;
+  reviewActiveId = null;
+  syncReviewQueue();
   invalidateCandidates();
   const scope = { currentId: currentTrackId(), trackId: row ? Number(row.id) : null };
   activeSearchScope = scope;
@@ -603,6 +670,10 @@ function chooseCandidate(index) {
   state.scrape.chosenFields = preset;
   renderCandidates();
   renderWritePanel();
+  if (reviewActiveId !== null && matchMedia("(max-width: 700px)").matches) {
+    ui.byId("scrape-write-card").scrollIntoView({ block: "start", behavior: "instant" });
+    nodes.applyBtn.focus({ preventScroll: true });
+  }
 }
 
 /** 歌词预览面板（常显：标题 + 说明/统计 + 「试抓歌词」按钮；有歌词时摊开全文）。
@@ -785,6 +856,7 @@ function syncChosenFieldsFromDom() {
 
 async function previewAndWrite() {
   if (pendingWrite || lyricsBusy) return;
+  expireReviewEntries();
   const choice = captureChoice();
   const row = currentTrackRow();
   if (!isCurrentChoice(choice) || !row) {
@@ -843,7 +915,7 @@ async function previewAndWrite() {
     let body = [];
     let answer = "apply";
     if (Object.keys(values).length) {
-      const preview = await api.previewTracks({ ids: [choice.scope.trackId], fields: values, normalize_artist: normalize });
+      const preview = await api.previewTracks({ ids: [choice.scope.trackId], fields: values, normalize_artist: normalize, overwrite });
       if (!canContinue()) return;
       const target = Array.isArray(preview.items)
         ? preview.items.find((item) => Number(item?.track_id) === choice.scope.trackId) : null;
@@ -851,9 +923,10 @@ async function previewAndWrite() {
       if (target.file_exists === false) throw new Error("当前音乐文件不存在，请检查挂载或刷新曲库后重试；本次未写入。");
       if (target.current?.error) throw new Error(`无法读取当前文件的标签：${target.current.error}。本次未写入。`);
       body = ui.diffView([target]);
-      const changed = preview.changed_fields || 0;
+      const changed = Object.keys(target.changes || {}).length;
+      const hasWrite = changed > 0 || withCoverLyrics.length > 0;
       ui.clear(nodes.result);
-      nodes.result.append(ui.notice("info", `差异预览完成，共 ${changed} 处变更；尚未写入文件。`));
+      nodes.result.append(ui.notice("info", hasWrite ? `差异预览完成，共 ${changed} 处文本变更；尚未写入文件。` : "本次无需变更，可在预览中查看已跳过的字段。"));
       body.unshift(ui.notice("info", `来源：${cand.source || "未知"} · ${cand.title || ""} — ${cand.artist || ""}`));
       if (withCoverLyrics.length) {
         body.push(
@@ -862,17 +935,25 @@ async function previewAndWrite() {
       }
       coverHints.forEach((text) => body.push(ui.notice("info", text)));
       body.push(
-        ui.el("div", { class: "hint", text: overwrite ? "覆盖已有值：开" : "覆盖已有值：关（已有非空字段会被跳过）" }),
+        ui.el("div", { class: "hint", text: overwrite ? "覆盖已有文本与封面：开；勾选歌词表示明确替换。" : "覆盖已有文本与封面：关；已有值会跳过，勾选歌词仍表示明确替换。" }),
       );
       answer = await ui.openDialog({
         title: `写入预览：${row.title || row.filename}`,
         subtitle: "旧值红色 / 新值绿色，确认后才会写进文件",
         body,
-        actions: [
+        actions: hasWrite ? [
           { id: "cancel", label: "取消" },
           { id: "apply", label: "确认写入", variant: "btn-primary" },
-        ],
+        ] : [{ id: "done", label: "完成审阅", variant: "btn-primary" }],
       });
+      if (answer === "done" && canContinue()) {
+        ui.clear(nodes.result);
+        nodes.result.append(ui.notice("ok", "本次无需变更，没有提交写入。"));
+        const skipped = ui.skippedFieldsView(target.skipped);
+        if (skipped) nodes.result.append(skipped);
+        completeReviewChoice(choice, "无需变更");
+        return;
+      }
     } else {
       answer = (await ui.confirmDialog({
         title: "确认写入",
@@ -882,7 +963,7 @@ async function previewAndWrite() {
           { label: "来源", value: cand.source || "未知" },
         ],
         confirmLabel: "确认写入",
-        note: `${withCoverLyrics.join(" + ")}会直接合并进现有标签，不会删除其它字段。`,
+        note: `封面${overwrite ? "允许覆盖已有封面" : "保留已有封面，只补空缺"}；勾选歌词表示明确替换歌词，不受覆盖开关影响。其它字段保持不变。`,
       }))
         ? "apply"
         : "";
@@ -912,10 +993,11 @@ async function previewAndWrite() {
     });
     const writtenFields = result.written || [];
     const changeCount = Object.keys(result.changes || {}).length;
+    const changedFile = result.file_changed ?? Boolean(writtenFields.length || result.cover || result.lyrics);
     if (canContinue()) {
       ui.clear(nodes.result);
       nodes.result.append(
-        ui.notice("ok", `已写入：${writtenFields.map(ui.fieldLabel).join("、") || "（无字段）"}；实际变更 ${changeCount} 处。`),
+        ui.notice("ok", changedFile ? `已写入：${writtenFields.map(ui.fieldLabel).join("、") || "封面或歌词"}；实际变更 ${changeCount} 处。` : "本次无需变更，已有内容已保留。"),
         ui.resultBlock({
           summary: [
             { label: "字段", value: writtenFields.length },
@@ -925,14 +1007,19 @@ async function previewAndWrite() {
           ],
         }),
       );
+      const skipped = ui.skippedFieldsView(result.skipped);
+      if (skipped) nodes.result.append(skipped);
       const writtenLyrics = typeof result.lyrics === "string" ? result.lyrics
         : result.lyrics && typeof writeCand.lyrics === "string" ? writeCand.lyrics : "";
       if (writtenLyrics) renderLyricsPreview({ lyrics: writtenLyrics }, { written: true });
       else setLyricsBody("", result.lyrics ? "歌词已写入，可在曲目详情中读取文件里的歌词。" : "本次没有写入歌词。");
     }
-    ui.toast("ok", "刮削写入完成", `${row.title || row.filename}：${writtenFields.map(ui.fieldLabel).join("、") || "无字段"}`);
+    completeReviewChoice(choice, changedFile ? "已写入并完成审阅" : "无需变更，已保留现有内容");
+    ui.toast("ok", changedFile ? "刮削写入完成" : "无需变更", `${row.title || row.filename}：${writtenFields.map(ui.fieldLabel).join("、") || (changedFile ? "封面或歌词" : "已有内容已保留")}`);
     emit("status:refresh");
     emit("tracks:refresh");
+    const fresh = await api.track(choice.scope.trackId).catch(() => null);
+    if (fresh && sessionUsable && currentTrackId() === choice.scope.trackId && activeSearchScope === choice.scope) updateTrackSnapshot(fresh);
     await refreshPick();
   } catch (err) {
     if (canContinue()) {
@@ -977,10 +1064,10 @@ function syncBatchMode() {
     : "当前模式不写文件，最低分只在「自动写入」下生效。";
   nodes.batchCover.disabled = !isApply;
   nodes.batchLyrics.disabled = !isApply;
-  if (!isApply) {
-    nodes.batchCover.checked = false;
-    nodes.batchLyrics.checked = false;
-  }
+  ui.byId("batch-fields-wrap").hidden = !isApply;
+  nodes.batchCover.closest("label").hidden = !isApply;
+  nodes.batchLyrics.closest("label").hidden = !isApply;
+  nodes.batchThreshold.closest("label").hidden = !isApply;
   nodes.batchRun.textContent = isApply ? "开始批量刮削并写入" : "开始批量搜索";
 }
 
@@ -990,6 +1077,7 @@ function renderBatchCount() {
 }
 
 async function runBatch() {
+  if (!sessionUsable || pendingWrite || automaticBatchBusy) return;
   const ids = selectionIds();
   if (!ids.length) {
     ui.toast("warn", "还没有选择曲目", "在左侧列表或曲库页勾选要处理的曲目。");
@@ -1006,16 +1094,23 @@ async function runBatch() {
   const threshold = Number(nodes.batchThreshold.value) || 0;
   const sources = [...state.sourceChoice];
   const normalize = nodes.writeNormalize.checked;
+  const writeCover = nodes.batchCover.checked;
+  const writeLyrics = nodes.batchLyrics.checked;
 
   if (!isApply) {
+    if (ids.length > REVIEW_MAX) {
+      ui.toast("warn", "本批超过 200 首", `当前已选 ${ids.length} 首。请缩小选择到 200 首以内后再搜索，队列不会截断曲目。`);
+      return;
+    }
     await runBatchSearchOnly(ids, { fields, limit, sources, normalize });
     return;
   }
-  if (!fields.length && !nodes.batchCover.checked && !nodes.batchLyrics.checked) {
+  if (!fields.length && !writeCover && !writeLyrics) {
     ui.toast("warn", "没有选择要写入的字段", "至少勾选一个字段。");
     return;
   }
 
+  automaticBatchBusy = true;
   const confirmed = await ui.confirmDialog({
     title: "确认批量刮削会写入文件",
     message: `将对 ${ids.length} 首曲目逐首搜索，并把达到阈值的候选字段直接写入文件。批量模式无法逐首预览差异。`,
@@ -1023,8 +1118,8 @@ async function runBatch() {
       { label: "曲目数", value: String(ids.length) },
       { label: "数据源", value: sources.join("、") },
       { label: "写入字段", value: fields.map(ui.fieldLabel).join("、") || "（无）" },
-      { label: "写封面", value: nodes.batchCover.checked ? "是" : "否" },
-      { label: "写歌词", value: nodes.batchLyrics.checked ? "是" : "否" },
+      { label: "写封面", value: writeCover ? "是" : "否" },
+      { label: "写歌词", value: writeLyrics ? "是" : "否" },
       {
         label: "最低分",
         value: threshold > 0 ? `${threshold}（低于该分数的只跳过，不写入）` : "0 —— 不设阈值，只要有候选就写入最佳候选",
@@ -1035,7 +1130,8 @@ async function runBatch() {
     danger: true,
     note: "建议先用「仅搜索」模式看一遍分数，再决定阈值；写入后无法自动撤销。",
   });
-  if (!confirmed) {
+  if (!confirmed || !sessionUsable) {
+    automaticBatchBusy = false;
     ui.toast("info", "已取消批量刮削", "没有写入任何文件。");
     return;
   }
@@ -1062,8 +1158,8 @@ async function runBatch() {
       fields,
       sources,
       limit,
-      write_cover: nodes.batchCover.checked,
-      write_lyrics: nodes.batchLyrics.checked,
+      write_cover: writeCover,
+      write_lyrics: writeLyrics,
       auto_apply_min_score: threshold,
       normalize_artist: normalize,
     });
@@ -1095,6 +1191,7 @@ async function runBatch() {
     nodes.batchResult.append(ui.notice("err", `批量刮削失败：${err.message}`));
     ui.toast("err", "批量刮削失败", err.message);
   } finally {
+    automaticBatchBusy = false;
     nodes.batchRun.disabled = false;
     stopBtn.remove();
   }
@@ -1142,111 +1239,297 @@ function renderBatchApplyResult(result, ids) {
   }
 }
 
-/** 仅搜索模式：前端逐首调 /api/search，绝不写入文件。 */
-async function runBatchSearchOnly(ids, { fields, limit, sources, normalize }) {
-  batchAbort = false;
-  nodes.batchRun.disabled = true;
-  ui.clear(nodes.batchResult);
-  const progress = ui.createProgress(nodes.batchProgress, { label: "批量搜索（不写文件）" });
-  const stopBtn = ui.el("button", {
-    type: "button",
-    class: "btn btn-sm",
-    text: "停止",
-    onClick: () => {
-      batchAbort = true;
-      ui.toast("info", "已停止", "已完成的部分结果保留在下方。");
-    },
-  });
-  progress.node.append(stopBtn);
+/* ------------------------------------------------------ 会话审阅队列 */
 
-  const rows = [];
-  let done = 0;
-  let hits = 0;
-  try {
-    for (const id of ids) {
-      if (batchAbort) break;
-      const row = state.selection.get(Number(id)) || {};
-      const keyword = row.title || "";
-      let status = "无候选";
-      let detail = "";
-      let best = null;
-      try {
-        const result = await api.search({
-          track_id: Number(id),
-          keyword: row.title || "",
-          artist_hint: row.artist || "",
-          sources,
-          limit,
-        });
-        const candidates = result.candidates || [];
-        if (candidates.length) {
-          best = candidates[0];
-          hits += 1;
-          status = "有候选";
-          detail = `${best.source || ""} · ${best.title || ""} — ${best.artist || ""} · 分 ${best.score}（${best.confidence || "待确认"}）`;
-        } else {
-          const errors = (result.source_status || []).filter((item) => item.error);
-          detail = errors.length
-            ? `全部数据源无结果（${errors.length} 个源报错：${errors.map((item) => item.source).join("、")}）`
-            : "全部数据源都没有返回结果";
-        }
-      } catch (err) {
-        status = "失败";
-        detail = err.message;
-      }
-      rows.push({ id, keyword, status, detail });
-      done += 1;
-      progress.update({ state: "running", done, total: ids.length, message: `${keyword || `#${id}`} → ${status}` });
-      renderBatchSearchRows(rows, ids.length, done);
-    }
-    progress.finish({ state: "done", done, total: ids.length, message: batchAbort ? "已停止（已完成的部分保留）" : "搜索完成" });
-    if (batchAbort) progress.setStatus(`已停止：${done}/${ids.length}`, "hint-warn");
-    ui.toast(hits ? "ok" : "warn", `批量搜索完成：${hits} 首有候选`, `共处理 ${done} 首，未写入任何文件。${fields.length ? "（搜索模式不使用字段选择）" : ""}`);
-  } catch (err) {
-    ui.clear(nodes.batchResult);
-    nodes.batchResult.append(ui.notice("err", `批量搜索失败：${err.message}`));
-    ui.toast("err", "批量搜索失败", err.message);
-  } finally {
-    nodes.batchRun.disabled = false;
-    stopBtn.remove();
-    void normalize;
+function showPicker(mode) {
+  const review = mode === "review";
+  ui.byId("scrape-library-picker").hidden = review;
+  ui.byId("review-queue-root").hidden = !review;
+  for (const [id, selected] of [["scrape-library-tab", !review], ["scrape-review-tab", review]]) {
+    const button = ui.byId(id);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
   }
 }
 
-function renderBatchSearchRows(rows, total, done) {
+function reviewEntry(payload) {
+  if (!sessionUsable || !reviewRun || payload.generation !== reviewRun.generation) return null;
+  const entry = reviewRun.entries.find((item) => item.trackId === Number(payload.trackId));
+  return entry && entry.attempt === payload.attempt ? entry : null;
+}
+
+function reviewPayload(entry) {
+  return { generation: reviewRun.generation, trackId: entry.trackId, attempt: entry.attempt };
+}
+
+function dropReviewResponse(run, entry) {
+  run.bytes = Math.max(0, run.bytes - entry.bytes);
+  entry.bytes = 0;
+  entry.response = null;
+}
+
+function completeReviewChoice(choice, detail) {
+  const review = choice?.scope.review;
+  if (!review || review.run !== reviewRun || review.entry.attempt !== review.attempt) return;
+  review.entry.status = "done";
+  review.entry.detail = detail;
+  dropReviewResponse(review.run, review.entry);
+  // Keep the result panel visible while preventing a second write with this result.
+  if (activeSearchScope === choice.scope) {
+    choiceRevision += 1;
+    fetchedLyrics = null;
+    state.scrape.candidates = [];
+    state.scrape.chosenIndex = -1;
+    state.scrape.chosenFields = new Set();
+    renderCandidates();
+  }
+  syncReviewQueue();
+}
+
+function expireReviewEntries() {
+  if (!reviewRun) return;
+  let changed = false;
+  for (const entry of reviewRun.entries) {
+    if (entry.response && Date.now() - entry.searchedAt >= REVIEW_TTL) {
+      dropReviewResponse(reviewRun, entry);
+      if (entry.status === "ready") {
+        entry.status = "expired";
+        entry.detail = "候选已超过 30 分钟，请重新搜索。";
+      }
+      if (activeSearchScope?.review?.entry === entry) invalidateCandidates(entry.detail);
+      changed = true;
+    }
+  }
+  if (changed) syncReviewQueue();
+}
+
+function clearReviewQueue() {
+  const old = reviewRun;
+  if (old) { old.stop = true; old.entries.forEach((entry) => dropReviewResponse(old, entry)); }
+  reviewRun = null;
+  reviewGeneration += 1;
+  reviewOpenRevision += 1;
+  reviewActiveId = null;
+  if (activeSearchScope?.review) invalidateCandidates("待审队列已清空，请重新搜索候选。");
+  reviewQueue?.clear(reviewGeneration);
+  ui.byId("review-count").textContent = "0";
+  nodes.reviewContext.hidden = true;
+  nodes.reviewNavigation.hidden = true;
+  nodes.batchProgress.hidden = true;
   ui.clear(nodes.batchResult);
-  const hit = rows.filter((row) => row.status === "有候选").length;
-  const failed = rows.filter((row) => row.status === "失败").length;
-  nodes.batchResult.append(
-    ui.resultBlock({
-      summary: [
-        { label: "已查", value: `${done}/${total}` },
-        { label: "有候选", value: hit },
-        { label: "无候选", value: rows.length - hit - failed },
-        { label: "失败", value: failed },
-      ],
-      failures: rows
-        .filter((row) => row.status === "失败")
-        .map((row) => ({ who: titleOf(row.id), why: row.detail })),
-      failuresTitle: "失败明细",
-    }),
-    ui.el("div", { class: "lbl", text: "逐首结果（仅搜索，不写文件）" }),
-    ui.el(
-      "div",
-      { class: "result-list" },
-      rows.map((row) =>
-        ui.el("div", { class: "item" }, [
-          ui.el("span", { class: "who", text: titleOf(row.id) }),
-          ui.el("span", {
-            class: "why",
-            style: { color: row.status === "有候选" ? "var(--ok)" : row.status === "失败" ? "" : "var(--fg-3)" },
-            title: row.detail,
-            text: row.detail || row.status,
-          }),
-        ]),
-      ),
-    ),
+  nodes.batchRun.disabled = !sessionUsable || automaticBatchBusy;
+}
+
+function stopReviewSearch() {
+  if (!reviewRun || !reviewRun.running) return;
+  reviewRun.stop = true;
+  reviewRun.running = false;
+  for (const entry of reviewRun.entries) {
+    if (["queued", "searching"].includes(entry.status)) {
+      entry.attempt += 1;
+      entry.status = "stopped";
+      entry.detail = "已停止搜索，可单独重新搜索。";
+    }
+  }
+  nodes.batchRun.disabled = automaticBatchBusy;
+  syncReviewQueue();
+  ui.toast("info", "搜索已停止", "已完成的候选保留在待审队列，可继续审阅。");
+}
+
+function syncReviewQueue({ collapse = false } = {}) {
+  const run = reviewRun;
+  const entries = run?.entries || [];
+  ui.byId("review-count").textContent = String(entries.length);
+  if (run) reviewQueue?.update({ generation: run.generation, items: entries.map((entry) => ({
+    trackId: entry.trackId, attempt: entry.attempt, title: entry.row.title, filename: entry.row.filename,
+    artist: entry.row.artist, status: entry.status, count: entry.count, detail: entry.detail,
+  })), activeId: reviewActiveId, running: run.running, collapse });
+  renderReviewContext();
+}
+
+function renderReviewContext() {
+  const focusedId = (nodes.reviewContext.contains(document.activeElement) || nodes.reviewNavigation.contains(document.activeElement)) ? document.activeElement.id : "";
+  const run = reviewRun;
+  const entry = run?.entries.find((item) => item.trackId === reviewActiveId);
+  nodes.reviewContext.hidden = !entry;
+  nodes.reviewNavigation.hidden = !entry;
+  if (!entry) return;
+  const index = run.entries.indexOf(entry);
+  const payload = reviewPayload(entry);
+  const label = entry.row.title || entry.row.filename || `#${entry.trackId}`;
+  const status = { ready: "选择候选后预览，确认才写入", done: "已处理这一首，可继续下一首", skipped: "已跳过这一首", expired: "需要重新搜索后再审阅", failed: "搜索失败，可重新搜索", empty: "暂无候选，可改关键词重新搜索", searching: "正在重新搜索…", stopped: "这首还没有搜索" }[entry.status] || "等待搜索";
+  nodes.reviewContext.replaceChildren(
+    ui.el("div", { class: "review-context-heading" }, [ui.el("span", { class: "badge badge-accent", text: `审阅 ${index + 1} / ${run.entries.length}` }), ui.el("strong", { text: label })]),
+    ui.el("p", { class: "hint", text: entry.detail || status }),
+    ui.el("div", { class: "review-context-actions" }, [
+      ui.el("button", { id: "review-return", type: "button", class: "btn btn-sm btn-ghost", text: "返回队列", onClick: () => { showPicker("review"); reviewQueue.reveal(entry.trackId); } }),
+      ui.el("button", { id: "review-current-retry", type: "button", class: "btn btn-sm", text: "重新搜索", disabled: entry.status === "searching" || Boolean(pendingWrite), onClick: () => retryReviewEntry(payload) }),
+    ]),
   );
+  const next = run.entries.find((item, i) => i > index && item.status === "ready") || run.entries.find((item, i) => i < index && item.status === "ready");
+  nodes.reviewNavigation.replaceChildren(
+    ui.el("span", { class: "hint", text: status }),
+    ui.el("button", { id: "review-current-skip", type: "button", class: "btn btn-sm", text: "跳过这一首", disabled: ["done", "skipped", "searching"].includes(entry.status) || Boolean(pendingWrite), onClick: () => skipReviewEntry(payload) }),
+    ui.el("button", { id: "review-next", type: "button", class: "btn btn-sm btn-primary", text: "下一首待审阅", disabled: !next || Boolean(pendingWrite), onClick: () => next && openReviewEntry(reviewPayload(next)) }),
+  );
+  if (focusedId) {
+    const replacement = ui.byId(focusedId);
+    if (replacement && !replacement.disabled) replacement.focus({ preventScroll: true });
+    else ui.byId("review-return")?.focus({ preventScroll: true });
+  }
+}
+
+function storeReviewResponse(run, entry, response) {
+  const bytes = new TextEncoder().encode(JSON.stringify(response)).byteLength;
+  dropReviewResponse(run, entry);
+  if (bytes > REVIEW_ENTRY_BYTES) {
+    entry.status = "expired";
+    entry.detail = "这首的候选内容过大，未保留。请减少每源条数后重新搜索。";
+    return;
+  }
+  for (const other of run.entries) {
+    if (run.bytes + bytes <= REVIEW_BYTES) break;
+    if (other === entry || !other.response) continue;
+    dropReviewResponse(run, other);
+    if (other.status === "ready") { other.status = "expired"; other.detail = "较早的候选已释放以控制会话内存，请重新搜索。"; }
+    if (activeSearchScope?.review?.entry === other) invalidateCandidates(other.detail);
+  }
+  entry.response = response;
+  entry.bytes = bytes;
+  run.bytes += bytes;
+}
+
+async function searchReviewEntry(run, entry, options) {
+  if (!sessionUsable || reviewRun !== run) return;
+  const attempt = ++entry.attempt;
+  dropReviewResponse(run, entry);
+  entry.status = "searching"; entry.detail = ""; entry.count = 0;
+  syncReviewQueue();
+  const current = () => sessionUsable && reviewRun === run && entry.attempt === attempt;
+  try {
+    const row = await api.track(entry.trackId);
+    if (!current()) return;
+    if (Number(row.id) !== entry.trackId || row.file_exists === false) throw new Error("音乐文件不存在或已从曲库移除，请检查挂载与索引。");
+    entry.row = { ...row };
+    const query = options || { keyword: row.title || "", artistHint: row.artist || "", sources: run.sources, limit: run.limit };
+    entry.searchOptions = { ...query, sources: [...query.sources] };
+    const response = await api.search({ track_id: entry.trackId, keyword: query.keyword, artist_hint: query.artistHint, sources: query.sources, limit: query.limit });
+    if (!current()) return;
+    const searchedTrack = response.track;
+    if (!searchedTrack || Number(searchedTrack.id) !== entry.trackId) throw new Error("搜索结果未绑定这首曲目，可能已从曲库移除。请刷新曲库后重试。");
+    entry.baseline = { title: String(searchedTrack.title ?? row.title ?? ""), artist: String(searchedTrack.artist ?? row.artist ?? "") };
+    entry.searchedAt = Date.now();
+    entry.count = Array.isArray(response.candidates) ? response.candidates.length : 0;
+    const errors = (response.source_status || []).filter((item) => item.error);
+    entry.status = entry.count ? "ready" : errors.length ? "failed" : "empty";
+    entry.detail = entry.count ? `${entry.count} 个候选 · 最佳分数 ${response.candidates[0].score ?? "—"}`
+      : errors.length ? `${errors.length} 个数据源报错，可以重试。` : "没有匹配候选，可打开后调整关键词搜索。";
+    storeReviewResponse(run, entry, response);
+  } catch (error) {
+    if (!current()) return;
+    entry.status = "failed"; entry.detail = error?.message || "搜索失败，请重试。";
+  }
+  if (current()) syncReviewQueue();
+}
+
+async function openReviewEntry(payload) {
+  expireReviewEntries();
+  const entry = reviewEntry(payload);
+  const run = reviewRun;
+  if (!entry || ["queued", "searching"].includes(entry.status) || pendingWrite?.submitted) return;
+  invalidateCandidates();
+  setCurrentTrack(entry.row);
+  const revision = ++reviewOpenRevision;
+  reviewActiveId = entry.trackId;
+  showPicker("review");
+  syncReviewQueue({ collapse: true });
+  nodes.searchState.append(ui.loadingLine("正在核对曲目资料…"));
+  const current = () => sessionUsable && reviewRun === run && reviewOpenRevision === revision && entry.attempt === payload.attempt && currentTrackId() === entry.trackId;
+  try {
+    const row = await api.track(entry.trackId);
+    if (!current()) return;
+    if (Number(row.id) !== entry.trackId || row.file_exists === false) throw new Error("音乐文件不存在或已移除，请检查挂载与索引。");
+    entry.row = { ...row };
+    updateTrackSnapshot(row);
+    nodes.keyword.value = entry.searchOptions?.keyword ?? row.title ?? "";
+    nodes.artistHint.value = entry.searchOptions?.artistHint ?? row.artist ?? "";
+    if (entry.status === "ready" && (Date.now() - entry.searchedAt >= REVIEW_TTL || !entry.response
+        || String(row.title || "") !== entry.baseline.title || String(row.artist || "") !== entry.baseline.artist)) {
+      dropReviewResponse(run, entry);
+      entry.status = "expired";
+      entry.detail = "曲目标题、歌手或候选有效期已改变，请重新搜索。";
+    }
+    ui.clear(nodes.searchState);
+    if (entry.status === "ready" && entry.response) {
+      const scope = { currentId: entry.trackId, trackId: entry.trackId, review: { run, entry, attempt: entry.attempt } };
+      activeSearchScope = scope; candidateScope = scope;
+      state.scrape.candidates = entry.response.candidates || [];
+      state.scrape.sourceStatus = entry.response.source_status || [];
+      state.scrape.searched = true;
+      nodes.searchState.append(ui.notice("info", "已载入这首的搜索结果。选择候选后预览，确认才会写入。"));
+    } else nodes.searchState.append(ui.notice("info", entry.detail || "请重新搜索当前曲目。"));
+    renderCandidates(); renderSourceStatus(); renderWritePanel(); syncReviewQueue({ collapse: true });
+    if (state.tab === "scrape") {
+      const heading = ui.byId("scrape-candidates-heading");
+      heading.focus({ preventScroll: true }); heading.scrollIntoView({ block: "start", behavior: "instant" });
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) nodes.candList.animate([{ opacity: .55, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], { duration: 180 });
+    }
+  } catch (error) {
+    if (!current()) return;
+    dropReviewResponse(run, entry);
+    entry.status = "failed"; entry.detail = error?.message || "曲目暂时无法读取。";
+    ui.clear(nodes.searchState); nodes.searchState.append(ui.notice("err", entry.detail)); syncReviewQueue();
+  }
+}
+
+async function retryReviewEntry(payload, options) {
+  const entry = reviewEntry(payload);
+  const run = reviewRun;
+  if (!entry || entry.status === "searching" || pendingWrite?.submitted) return;
+  const reopen = reviewActiveId === entry.trackId;
+  if (reopen) { reviewOpenRevision += 1; invalidateCandidates("正在重新搜索这首曲目…"); }
+  await searchReviewEntry(run, entry, options);
+  if (sessionUsable && run === reviewRun && reopen && reviewActiveId === entry.trackId && entry.status === "ready") await openReviewEntry(reviewPayload(entry));
+}
+
+function skipReviewEntry(payload) {
+  const entry = reviewEntry(payload);
+  if (!entry || entry.status === "searching" || pendingWrite?.submitted) return;
+  entry.attempt += 1; entry.status = "skipped"; entry.detail = "本次跳过，需要时可重新搜索。";
+  dropReviewResponse(reviewRun, entry);
+  if (reviewActiveId === entry.trackId) { reviewOpenRevision += 1; invalidateCandidates("已跳过这一首，可继续下一首待审阅。"); }
+  syncReviewQueue();
+}
+
+/** One immutable selection snapshot, one bounded in-memory batch. */
+async function runBatchSearchOnly(ids, { limit, sources }) {
+  clearReviewQueue();
+  const run = {
+    generation: reviewGeneration, running: true, stop: false, bytes: 0, limit, sources: [...sources],
+    entries: ids.map((id) => ({ trackId: Number(id), row: { ...(state.selection.get(Number(id)) || { id }) }, status: "queued", attempt: 0, count: 0, detail: "", response: null, bytes: 0, baseline: null, searchedAt: 0 })),
+  };
+  reviewRun = run;
+  nodes.batchRun.disabled = true;
+  showPicker("review");
+  syncReviewQueue();
+  const text = ui.el("p", { text: "正在搜索这批曲目，已完成的结果可立即进入审阅。" });
+  nodes.batchResult.append(ui.el("div", { class: "review-batch-summary" }, [text, ui.el("button", { id: "review-start", type: "button", class: "btn btn-sm btn-primary", text: "查看待审队列", onClick: () => {
+    showPicker("review");
+    const ready = reviewRun?.entries.find((item) => item.status === "ready");
+    if (ready) void openReviewEntry(reviewPayload(ready));
+    else reviewQueue.reveal();
+  } })]));
+  for (const entry of run.entries) {
+    if (!sessionUsable || reviewRun !== run || run.stop) break;
+    if (entry.status !== "queued") continue;
+    await searchReviewEntry(run, entry);
+  }
+  if (reviewRun !== run || !sessionUsable) return;
+  run.running = false;
+  nodes.batchRun.disabled = automaticBatchBusy;
+  const ready = run.entries.filter((entry) => entry.status === "ready").length;
+  text.textContent = run.stop ? `搜索已停止，保留 ${ready} 首待审结果。` : `搜索完成，${ready} 首可以继续审阅。每首都需要单独预览确认。`;
+  syncReviewQueue();
 }
 
 /** 供 app.js 在状态/设置更新后调用。 */

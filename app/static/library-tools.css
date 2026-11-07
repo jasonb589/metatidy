@@ -21,6 +21,12 @@
 .filter-chip { max-width: 100%; }
 .filter-chip > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filter-chip > .x { flex: none; }
+.edit-skipped-results { padding: 11px 13px; border: 1px solid var(--line); border-radius: 9px; }
+.edit-skipped-results > summary { cursor: pointer; color: var(--fg-2); font-size: 11px; }
+.edit-skipped-results > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.edit-skipped-track { padding-top: 13px; }
+.edit-skipped-track > .lbl { margin: 0; overflow-wrap: anywhere; }
+.edit-skipped-track > .diff-skipped { margin-top: 5px; }
 
 /* One stable toolbar across selection changes; entry motion only on its first appearance. */
 #selection-bar { flex-wrap: wrap; animation: none; gap: 10px; padding: 11px 14px; }
