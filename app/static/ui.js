@@ -202,8 +202,12 @@ export function truncatedPath(text) {
 /** 封面缩略图：只有 has_cover 为真时才请求接口，避免满屏 404。 */
 export function coverThumb(row, { size = 48, big = false } = {}) {
   const cls = big ? "thumb thumb-lg" : "thumb";
+  const seed = String(row?.album || row?.artist || row?.title || row?.id || "music");
+  let tone = 0;
+  for (const char of seed) tone = (tone * 31 + char.codePointAt(0)) % 6;
+  const fallback = () => icon("music", { size: big ? 28 : 20 });
   if (!row || !row.has_cover) {
-    return el("span", { class: `${cls} ph`, "aria-hidden": "true", title: "无内嵌封面", text: "—" });
+    return el("span", { class: `${cls} ph`, dataset: { tone }, "aria-hidden": "true", title: "暂无内嵌封面" }, [fallback()]);
   }
   const img = el("img", {
     src: `/api/tracks/${row.id}/cover?size=${size}`,
@@ -213,13 +217,13 @@ export function coverThumb(row, { size = 48, big = false } = {}) {
     width: size,
     height: size,
   });
-  const wrap = el("span", { class: cls, title: `${row.title || row.filename || "封面"}` }, [img]);
+  const wrap = el("span", { class: cls, dataset: { tone }, title: `${row.title || row.filename || "封面"}` }, [img]);
   img.addEventListener(
     "error",
     () => {
       img.remove();
       wrap.classList.add("ph");
-      wrap.append(document.createTextNode("—"));
+      wrap.append(fallback());
       wrap.title = "封面读取失败（文件可能已被移动或没有内嵌图）";
     },
     { once: true },

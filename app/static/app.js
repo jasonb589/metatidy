@@ -5,7 +5,7 @@
 
 import { api, ApiError } from "./api.js";
 import * as ui from "./ui.js";
-import { state, on, emit } from "./store.js";
+import { state, on } from "./store.js";
 import * as tracks from "./tracks.js";
 import * as scrape from "./scrape.js";
 import * as move from "./move.js";
@@ -15,11 +15,20 @@ import * as auth from "./auth.js";
 import * as palette from "./palette.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
+const PAGE_COPY = {
+  tracks: { eyebrow: "YOUR MUSIC ARCHIVE", title: "我的音乐库", description: "收藏有序，热爱如初。" },
+  scrape: { eyebrow: "METADATA DISCOVERY", title: "元数据刮削", description: "找到每首歌的完整故事。" },
+  move: { eyebrow: "LIBRARY ORGANIZATION", title: "整理音乐库", description: "让每一份收藏，都有自己的位置。" },
+  settings: { eyebrow: "MAKE IT YOURS", title: "工作台设置", description: "按照你的习惯，打理你的音乐。" },
+};
 const loadedTabs = new Set();
 
 let jobsTimer = 0;
 let booted = false;
 let started = false;
+let sessionReady = false;
+let closeSidebar = () => {};
+let closeJobs = () => {};
 
 function boot() {
   if (booted) return;
@@ -33,14 +42,19 @@ function boot() {
   // 命令面板（Ctrl/⌘+K）：纯新增组件，别的模块通过 palette:* 事件响应
   palette.initPalette();
 
+  wireSidebar();
   wireTabs();
   wireJobs();
+  wireShortcuts();
+  wireSessionGuard();
   decorateCardHeads();
 
   on("status:refresh", () => {
+    if (!canUseWorkspace()) return;
     loadStatus().catch(() => {});
   });
   on("tracks:refresh", () => {
+    if (!canUseWorkspace()) return;
     tracks.refresh().catch(() => {});
   });
   on("settings:saved", () => {
@@ -86,10 +100,13 @@ async function startGuarded() {
 
 async function start() {
   started = true;
+  sessionReady = true;
+  setWorkspaceLocked(false);
+  await Promise.all([loadStatus(), loadSettings(), loadSources()]);
+  // 读取最新地址：认证/初始化期间可能通过浏览器前进后退切换了目标页面。
   const hash = (location.hash || "").replace("#", "");
   const initial = TABS.includes(hash) ? hash : "tracks";
-  await Promise.all([loadStatus(), loadSettings(), loadSources()]);
-  await activateTab(initial, { focus: false });
+  await activateTab(initial, { focus: false, scroll: false });
   refreshJobs().catch(() => {});
   window.setInterval(() => {
     if (document.visibilityState === "visible") refreshJobs().catch(() => {});
@@ -100,27 +117,37 @@ async function start() {
 
 function wireTabs() {
   const tabs = [...document.querySelectorAll(".tab")];
+  document.querySelector(".tabs")?.setAttribute("aria-orientation", "vertical");
   tabs.forEach((tab, index) => {
-    tab.addEventListener("click", () => activateTab(tab.dataset.tab, { focus: false }));
+    tab.addEventListener("click", () => {
+      activateTab(tab.dataset.tab, { focus: false }).catch(reportNavigationError);
+    });
     tab.addEventListener("keydown", (event) => {
       let next = -1;
-      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
-      else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + tabs.length) % tabs.length;
       else if (event.key === "Home") next = 0;
       else if (event.key === "End") next = tabs.length - 1;
       if (next < 0) return;
       event.preventDefault();
-      activateTab(tabs[next].dataset.tab, { focus: true });
+      activateTab(tabs[next].dataset.tab, { focus: true, dismissSidebar: false }).catch(reportNavigationError);
     });
   });
   window.addEventListener("hashchange", () => {
     const name = (location.hash || "").replace("#", "");
-    if (TABS.includes(name) && name !== state.tab) activateTab(name, { focus: false });
+    if (TABS.includes(name) && name !== state.tab) {
+      activateTab(name, { focus: false }).catch(reportNavigationError);
+    }
   });
 }
 
-async function activateTab(name, { focus = true } = {}) {
-  if (!TABS.includes(name)) return;
+function reportNavigationError(err) {
+  ui.toast("err", "页面加载失败", err && err.message ? err.message : String(err));
+}
+
+async function activateTab(name, { focus = true, dismissSidebar = true, scroll = true } = {}) {
+  if (!TABS.includes(name) || !canUseWorkspace()) return;
+  const changed = name !== state.tab;
   state.tab = name;
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.tab === name;
@@ -129,11 +156,24 @@ async function activateTab(name, { focus = true } = {}) {
     if (active && focus) tab.focus();
   });
   document.querySelectorAll(".panel").forEach((panel) => {
-    panel.dataset.active = panel.dataset.panel === name ? "true" : "false";
+    const active = panel.dataset.panel === name;
+    panel.dataset.active = active ? "true" : "false";
+    panel.hidden = !active;
   });
+  const copy = PAGE_COPY[name];
+  ui.setText(ui.byId("page-eyebrow"), copy.eyebrow);
+  ui.setText(ui.byId("page-title"), copy.title);
+  ui.setText(ui.byId("page-description"), copy.description);
+  document.title = `${copy.title} · metatidy`;
+  document.body.dataset.page = name;
+  if (dismissSidebar) closeSidebar();
+  closeJobs({ restoreFocus: false });
   if ((location.hash || "").replace("#", "") !== name) {
     history.replaceState(null, "", `#${name}`);
   }
+  // 只在跨页导航时回到标题；刷新、同页点击和初次加载保留当前位置。
+  // instant 避免长列表页面继承 CSS smooth 后仍缓慢停留在下方。
+  if (changed && scroll) window.scrollTo({ top: 0, left: window.scrollX, behavior: "instant" });
 
   if (name === "tracks" && !loadedTabs.has("tracks")) {
     loadedTabs.add("tracks");
@@ -153,6 +193,175 @@ async function activateTab(name, { focus = true } = {}) {
   }
 }
 
+/* ------------------------------------------------------------ 工作区外壳 */
+
+function canUseWorkspace() {
+  const session = auth.current();
+  return sessionReady && (!session.required || session.authenticated);
+}
+
+function setWorkspaceLocked(locked) {
+  if (locked) {
+    closeSidebar({ restoreFocus: false });
+    closeJobs({ restoreFocus: false });
+    palette.closePalette();
+    // 原生 dialog 位于浏览器顶层，会遮住登录框；失效会话下按取消处理。
+    document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+    const drawer = ui.byId("edit-drawer");
+    if (drawer) drawer.inert = true;
+  }
+  const content = document.querySelector(".app-content");
+  if (content) content.inert = locked;
+  const skipLink = document.querySelector(".skip-link");
+  if (skipLink) skipLink.inert = locked;
+  if (locked) {
+    const sidebar = ui.byId("app-sidebar");
+    if (sidebar) sidebar.inert = true;
+  } else closeSidebar({ restoreFocus: false });
+}
+
+function wireSessionGuard() {
+  // 所有控件在确认会话前不可操作，登录表单位于工作区外，仍可正常聚焦。
+  setWorkspaceLocked(true);
+  window.addEventListener("metatidy:unauthorized", () => {
+    sessionReady = false;
+    setWorkspaceLocked(true);
+  });
+  window.addEventListener("keydown", (event) => {
+    if (!canUseWorkspace() && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, true);
+}
+
+/** 模态内容拥有自己的键盘行为，外壳不能在同一次 Escape 中继续关闭下层界面。 */
+function hasForegroundOverlay() {
+  if (palette.isPaletteOpen() || document.querySelector("dialog[open], #edit-drawer[data-open='true']")) return true;
+  const authVeil = ui.byId("auth-veil");
+  return Boolean(authVeil && authVeil.getClientRects().length && !authVeil.hidden);
+}
+
+function wireSidebar() {
+  const sidebar = ui.byId("app-sidebar");
+  const toggle = ui.byId("sidebar-toggle");
+  const backdrop = ui.byId("sidebar-backdrop");
+  if (!sidebar || !toggle || !backdrop) return;
+
+  const media = window.matchMedia("(max-width: 900px)");
+  const originalRole = sidebar.getAttribute("role");
+  const content = document.querySelector(".app-content");
+  const background = content && !content.contains(sidebar)
+    ? [content]
+    : [document.querySelector(".app-header"), ui.byId("main")].filter((node) => node && !node.contains(sidebar));
+  const previousInert = new Map();
+  let open = false;
+
+  const focusables = () => [...sidebar.querySelectorAll("button:not(:disabled), a[href], input:not(:disabled), [tabindex='0']")]
+    .filter((node) => node.tabIndex >= 0 && node.getClientRects().length && !node.closest("[inert]"));
+  const focusInside = () => {
+    const close = ui.byId("sidebar-close");
+    const target = close?.getClientRects().length ? close : sidebar.querySelector(".tab[aria-selected='true']");
+    (target || focusables()[0] || sidebar).focus();
+  };
+
+  function setOpen(want, { restoreFocus = true } = {}) {
+    const wasOpen = open;
+    open = Boolean(want && media.matches && canUseWorkspace());
+    sidebar.dataset.open = String(open);
+    document.body.dataset.sidebarOpen = String(open);
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.setAttribute("aria-label", open ? "关闭导航菜单" : "打开导航菜单");
+    backdrop.hidden = !open;
+    if (!open) {
+      previousInert.forEach((value, node) => { node.inert = value; });
+      previousInert.clear();
+      // 先把焦点交回可用内容，再隐藏抽屉，避免焦点留在 aria-hidden 子树里。
+      if (wasOpen && restoreFocus && media.matches) toggle.focus();
+    }
+    sidebar.inert = !canUseWorkspace() || (media.matches && !open);
+    if (media.matches && !open) sidebar.setAttribute("aria-hidden", "true");
+    else sidebar.removeAttribute("aria-hidden");
+
+    if (open) {
+      sidebar.setAttribute("role", "dialog");
+      sidebar.setAttribute("aria-modal", "true");
+      background.forEach((node) => {
+        if (!previousInert.has(node)) previousInert.set(node, node.inert);
+        node.inert = true;
+      });
+      closeJobs({ restoreFocus: false });
+      if (!wasOpen) requestAnimationFrame(() => { if (open) focusInside(); });
+    } else {
+      if (originalRole) sidebar.setAttribute("role", originalRole);
+      else sidebar.removeAttribute("role");
+      sidebar.removeAttribute("aria-modal");
+    }
+  }
+
+  closeSidebar = (options) => setOpen(false, options);
+  toggle.setAttribute("aria-controls", sidebar.id);
+  toggle.addEventListener("click", () => setOpen(!open));
+  backdrop.addEventListener("click", () => setOpen(false));
+  ui.byId("sidebar-close")?.addEventListener("click", () => setOpen(false));
+
+  document.addEventListener("keydown", (event) => {
+    if (!open || event.defaultPrevented || hasForegroundOverlay()) return;
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      // 命令面板接下来由 window 的监听器打开，先解除侧栏对工作区的焦点隔离。
+      setOpen(false, { restoreFocus: false });
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+    } else if (event.key === "Tab") {
+      const items = focusables();
+      if (!items.length) {
+        event.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && (document.activeElement === first || !sidebar.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !sidebar.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }, true);
+
+  const syncViewport = () => {
+    const wasFocused = sidebar.contains(document.activeElement);
+    setOpen(false, { restoreFocus: false });
+    if (wasFocused && media.matches) toggle.focus();
+    else if (wasFocused && !document.activeElement?.getClientRects().length) {
+      sidebar.querySelector(".tab[aria-selected='true']")?.focus();
+    }
+  };
+  if (typeof media.addEventListener === "function") media.addEventListener("change", syncViewport);
+  else if (typeof media.addListener === "function") media.addListener(syncViewport);
+  setOpen(false, { restoreFocus: false });
+}
+
+function wireShortcuts() {
+  ui.byId("btn-scan-shortcut")?.addEventListener("click", async () => {
+    if (!canUseWorkspace()) return;
+    try {
+      await activateTab("tracks", { focus: false });
+      const options = ui.byId("scan-options");
+      if (options) options.open = true;
+      const button = ui.byId("btn-scan");
+      if (button) {
+        button.scrollIntoView({ block: "nearest", behavior: "auto" });
+        button.focus({ preventScroll: true });
+      }
+    } catch (err) {
+      reportNavigationError(err);
+    }
+  });
+}
+
 /* ------------------------------------------------------------- 全局数据 */
 
 async function loadStatus() {
@@ -163,9 +372,9 @@ async function loadStatus() {
     const scraper = status.scraper || {};
     const pg = status.postgres === true;
     const redis = status.redis === true;
-    // 这个胶囊的价值是「一眼看出后端健不健康」：版本 + 两个存储的连通状态。
-    // 数据源数量只在 tooltip 里给（数字基本恒定，摆在正面没有信息量）。
-    chip.textContent = `v${status.version} · PG ${pg ? "✓" : "✗"} Redis ${redis ? "✓" : "✗"}`;
+    // Redis 是可选依赖：缺少 Redis 不代表曲库服务不可用，降级说明保留在详情里。
+    const healthy = pg && status.music_dir_exists;
+    chip.textContent = healthy ? "服务已连接" : "服务异常";
     chip.title = [
       `后端版本 ${status.version}`,
       `Postgres ${pg ? "已连接" : "未连接！"}`,
@@ -175,8 +384,17 @@ async function loadStatus() {
       `库根目录 ${status.library_root}`,
       `缓存目录 ${status.data_dir}`,
     ].join("\n");
-    chip.className = `chip ${pg && redis && status.music_dir_exists ? "" : "is-bad"}`.trim();
+    chip.classList.toggle("is-bad", !healthy);
+    chip.classList.toggle("is-connected", Boolean(healthy));
   }
+  ui.setText(ui.byId("sidebar-track-count"), ui.fmtNum(status.stats?.tracks ?? status.tracks ?? 0));
+  const path = ui.byId("sidebar-library-path");
+  if (path) {
+    path.textContent = status.library_root || status.music_dir || "尚未设置目录";
+    path.title = path.textContent;
+  }
+  const sourceCount = status.scraper?.count;
+  if (Number.isFinite(Number(sourceCount))) ui.setText(ui.byId("sidebar-source-count"), ui.fmtNum(sourceCount));
   if (!status.music_dir_exists) {
     ui.toast("err", "音乐目录不存在", `${status.music_dir} —— 扫描会失败，请检查挂载或环境变量。`, { timeout: 12000 });
   }
@@ -200,6 +418,7 @@ async function loadSettings() {
 async function loadSources() {
   const data = await api.sources();
   state.sources = data.sources || [];
+  ui.setText(ui.byId("sidebar-source-count"), ui.fmtNum(state.sources.length));
   scrape.onSources(state.sources);
   settings.onSettings();
   return data;
@@ -210,27 +429,47 @@ async function loadSources() {
 function wireJobs() {
   const pop = ui.byId("jobs-pop");
   const button = ui.byId("btn-jobs");
-  button.addEventListener("click", () => {
-    const open = pop.dataset.open !== "true";
+  function setOpen(open, { restoreFocus = false } = {}) {
+    if (open && !canUseWorkspace()) return;
+    const wasOpen = pop.dataset.open === "true";
+    if (!open && wasOpen && restoreFocus) button.focus();
     pop.dataset.open = open ? "true" : "false";
     button.setAttribute("aria-expanded", open ? "true" : "false");
+    pop.setAttribute("aria-hidden", open ? "false" : "true");
+    pop.inert = !open;
+    window.clearInterval(jobsTimer);
     if (open) {
       refreshJobs().catch(() => {});
-      window.clearInterval(jobsTimer);
       jobsTimer = window.setInterval(() => {
         if (pop.dataset.open === "true") refreshJobs().catch(() => {});
       }, 3000);
-    } else {
-      window.clearInterval(jobsTimer);
+      if (!wasOpen) requestAnimationFrame(() => {
+        if (pop.dataset.open === "true") ui.byId("jobs-close")?.focus();
+      });
     }
+  }
+  closeJobs = (options) => setOpen(false, options);
+  button.addEventListener("click", () => {
+    setOpen(pop.dataset.open !== "true");
   });
   ui.byId("jobs-close").addEventListener("click", () => {
-    pop.dataset.open = "false";
-    button.setAttribute("aria-expanded", "false");
-    button.focus();
-    window.clearInterval(jobsTimer);
+    setOpen(false, { restoreFocus: true });
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (pop.dataset.open === "true" && !pop.contains(event.target) && !button.contains(event.target)) setOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented || pop.dataset.open !== "true" || hasForegroundOverlay()) return;
+    event.preventDefault();
+    setOpen(false, { restoreFocus: true });
+  }, true);
+  pop.addEventListener("focusout", () => {
+    requestAnimationFrame(() => {
+      if (pop.dataset.open === "true" && !pop.contains(document.activeElement) && document.activeElement !== button) setOpen(false);
+    });
   });
   ui.byId("jobs-refresh").addEventListener("click", () => refreshJobs().catch(() => {}));
+  setOpen(false);
 }
 
 /** 任务类型 → 图标名（未知类型不显示图标）。 */
@@ -262,6 +501,7 @@ function decorateCardHeads() {
 }
 
 async function refreshJobs() {
+  if (!canUseWorkspace()) return;
   const data = await api.jobs();
   const list = data.jobs || [];
   const running = list.filter((job) => job.state === "running").length;

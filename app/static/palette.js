@@ -76,6 +76,7 @@ let emptyNode = null;
 let items = [];
 let active = 0;
 let seq = 0;
+let searching = false;
 
 function build() {
   if (host) return;
@@ -97,7 +98,8 @@ function build() {
   input.type = "text";
   input.id = "palette-input";
   input.autocomplete = "off";
-  input.placeholder = "输入命令，或搜一首歌…（↑↓ 选择，Enter 执行，Esc 关闭）";
+  input.placeholder = "输入命令，或搜一首歌…";
+  input.setAttribute("aria-label", "搜索命令或曲目");
   head.append(input);
 
   const body = document.createElement("div");
@@ -106,6 +108,7 @@ function build() {
   listNode.className = "palette-list";
   emptyNode = document.createElement("div");
   emptyNode.className = "palette-empty";
+  emptyNode.setAttribute("role", "status");
   emptyNode.textContent = "没有匹配的命令或曲目。";
   body.append(listNode, emptyNode);
 
@@ -124,6 +127,7 @@ function build() {
     void refresh();
   });
   input.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
     if (event.key === "ArrowDown") {
       event.preventDefault();
       move(1);
@@ -167,30 +171,41 @@ async function refresh() {
     run: c.run,
   }));
 
+  // 本地命令必须同步换成当前查询；输入后立即 Enter 也不能执行上一轮结果。
+  // 只有远程曲目匹配时，先清空旧项，等待期间 Enter 不执行任何操作。
+  items = statics;
+  active = 0;
+  searching = query.length >= 2;
+  render();
+  if (!searching) return;
+
   let tracks = [];
-  if (query.length >= 2) {
-    try {
-      const data = await api.tracks({ q: query, page_size: 8 });
-      if (my !== seq) return;
-      tracks = (data.items || []).map((row) => ({
-        title: row.title || row.filename || String(row.id),
-        hint: [row.artist, row.album].filter(Boolean).join(" · ") || "曲目",
-        ico: "music",
-        run: () => emit("palette:track", row),
-      }));
-    } catch {
-      tracks = [];
-    }
+  try {
+    const data = await api.tracks({ q: query, page_size: 8 });
+    if (my !== seq) return;
+    tracks = (data.items || []).map((row) => ({
+      title: row.title || row.filename || String(row.id),
+      hint: [row.artist, row.album].filter(Boolean).join(" · ") || "曲目",
+      ico: "music",
+      run: () => emit("palette:track", row),
+    }));
+  } catch {
+    tracks = [];
   }
   if (my !== seq) return;
 
+  // 请求期间用户可能已用方向键选中本地命令，追加曲目时保留该选择。
+  const selected = items[active];
   items = [...statics, ...tracks];
-  active = 0;
+  active = Math.max(0, items.indexOf(selected));
+  searching = false;
   render();
 }
 
 function render() {
   listNode.replaceChildren();
+  listNode.setAttribute("aria-busy", String(searching));
+  emptyNode.textContent = searching ? "正在查找曲目…" : "没有匹配的命令或曲目。";
   emptyNode.style.display = items.length ? "none" : "";
   items.forEach((item, index) => {
     const row = document.createElement("button");
@@ -241,11 +256,14 @@ export function openPalette() {
   input.value = "";
   void refresh();
   // 等一帧再聚焦：display 刚切成 flex 时直接 focus 有概率落空
-  requestAnimationFrame(() => input.focus());
+  requestAnimationFrame(() => { if (isPaletteOpen()) input.focus(); });
 }
 
 export function closePalette() {
   if (!host) return;
+  // 已关闭的查询不能在回包后覆盖下一次打开的命令列表。
+  seq += 1;
+  searching = false;
   host.style.display = "none";
 }
 

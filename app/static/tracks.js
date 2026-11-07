@@ -48,10 +48,15 @@ const FILTER_KEYS = ["language", "albumtype", "genre", "year", "missing_cover", 
 
 let nodes = null;
 let editTrigger = null;
+let refreshSequence = 0;
+let editRevision = 0;
+let lyricsInputRevision = 0;
 
 export function init() {
   nodes = {
     strip: ui.byId("stats-strip"),
+    health: ui.byId("library-health"),
+    quickFilters: ui.byId("quick-filters"),
     scanBtn: ui.byId("btn-scan"),
     scanFull: ui.byId("scan-full"),
     scanFast: ui.byId("scan-fast"),
@@ -101,7 +106,13 @@ export function init() {
     refresh();
   }, 300);
 
-  nodes.q.addEventListener("input", debouncedSearch);
+  nodes.q.addEventListener("input", () => {
+    // 先保存文字，避免防抖期间点击快捷筛选时被旧 query 覆盖。
+    state.tracks.q = nodes.q.value.trim();
+    state.tracks.page = 1;
+    syncFilterShortcuts();
+    debouncedSearch();
+  });
   nodes.q.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       debouncedSearch.cancel();
@@ -135,6 +146,31 @@ export function init() {
   nodes.fLyrics.addEventListener("change", () => applyFilter("missing_lyrics", nodes.fLyrics.checked));
   nodes.fNoArtist.addEventListener("change", () => applyFilter("no_artist", nodes.fNoArtist.checked));
   nodes.fNoAlbum.addEventListener("change", () => applyFilter("no_album", nodes.fNoAlbum.checked));
+
+  nodes.quickFilters?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-quick-filter]");
+    if (!button) return;
+    const key = button.dataset.quickFilter;
+    if (key === "all") resetFilters();
+    else if (key === "missing_cover" || key === "missing_lyrics") {
+      state.tracks.filters.missing_cover = key === "missing_cover";
+      state.tracks.filters.missing_lyrics = key === "missing_lyrics";
+      syncControls();
+    } else return;
+    state.tracks.page = 1;
+    refresh();
+  });
+
+  on("selection:changed", () => {
+    nodes.tbody.querySelectorAll("tr[data-id]").forEach((row) => {
+      const selected = isSelected(row.dataset.id);
+      row.setAttribute("aria-selected", String(selected));
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      if (checkbox) checkbox.checked = selected;
+    });
+    syncPageCheckbox();
+    renderSelectionBar();
+  });
 
   nodes.reset.addEventListener("click", () => {
     resetFilters();
@@ -233,11 +269,15 @@ export function init() {
       if (input) input.value = "";
     });
     if (nodes.editLyrics) nodes.editLyrics.value = "";
+    lyricsInputRevision += 1;
     lyricsBase = "";
   });
+  nodes.editLyrics?.addEventListener("input", () => { lyricsInputRevision += 1; });
   nodes.drawerPreview.addEventListener("click", runPreview);
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.edit.open) closeEdit();
+    if (event.key !== "Escape" || !state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
+    event.preventDefault();
+    closeEdit();
   });
 
   // 抽屉关闭时整体移出可聚焦顺序，避免 Tab 走到 aria-hidden 面板里的输入框
@@ -247,6 +287,7 @@ export function init() {
 
 function applyFilter(key, value) {
   state.tracks.filters[key] = value;
+  syncFilterShortcuts();
   state.tracks.page = 1;
   refresh();
 }
@@ -256,6 +297,7 @@ function resetFilters() {
     state.tracks.filters[key] = typeof state.tracks.filters[key] === "boolean" ? false : "";
   });
   state.tracks.q = "";
+  state.tracks.page = 1;
   syncControls();
 }
 
@@ -272,6 +314,22 @@ function syncControls() {
   nodes.fLyrics.checked = state.tracks.filters.missing_lyrics;
   nodes.fNoArtist.checked = state.tracks.filters.no_artist;
   nodes.fNoAlbum.checked = state.tracks.filters.no_album;
+  syncFilterShortcuts();
+}
+
+/** 快捷筛选与完整筛选共用同一份状态，切换入口后保持选中态一致。 */
+function syncFilterShortcuts() {
+  const filters = state.tracks.filters;
+  nodes.quickFilters?.querySelectorAll("button[data-quick-filter]").forEach((button) => {
+    const key = button.dataset.quickFilter;
+    const active = key === "all"
+      ? !state.tracks.q && !FILTER_KEYS.some((filter) => Boolean(filters[filter]))
+      : Boolean(filters[key]);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  nodes.health?.querySelectorAll("button[data-health-filter]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(Boolean(filters[button.dataset.healthFilter])));
+  });
 }
 
 /* ------------------------------------------------- 筛选 chips / 偏好 / 键盘 */
@@ -306,7 +364,7 @@ function renderFilterChips() {
       typeof value === "boolean"
         ? FILTER_LABELS[key] || key
         : `${FILTER_LABELS[key] || key}：${value}`;
-    const x = ui.el("button", { class: "x", type: "button", title: "移除这个条件", text: "×" });
+    const x = ui.el("button", { class: "x", type: "button", title: "移除这个条件", "aria-label": `移除筛选：${text}`, text: "×" });
     x.addEventListener("click", () => {
       state.tracks.filters[key] = typeof value === "boolean" ? false : "";
       syncControls();
@@ -346,7 +404,7 @@ function loadPrefs() {
       if ([50, 100, 200].includes(Number(saved.page_size))) state.tracks.page_size = Number(saved.page_size);
       FILTER_KEYS.forEach((key) => {
         const value = saved.filters ? saved.filters[key] : undefined;
-        if (typeof value === "boolean" || typeof value === "string") state.tracks.filters[key] = value;
+        if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = value;
       });
     }
   } catch {
@@ -358,7 +416,7 @@ function loadPrefs() {
 /** 键盘导航：`/` 聚焦搜索、`↑↓` 选行、`Enter` 打开编辑、空格勾选、`Esc` 取消。 */
 function wireTableKeys() {
   let activeRow = null;
-  const rows = () => [...nodes.tbody.querySelectorAll("tr")];
+  const rows = () => [...nodes.tbody.querySelectorAll("tr[data-id]")];
 
   function setActive(row) {
     rows().forEach((r) => r.classList.remove("is-active"));
@@ -383,6 +441,9 @@ function wireTableKeys() {
   }
 
   document.addEventListener("keydown", (event) => {
+    // 隐藏的曲库与浮层不抢别的工作区的键盘操作。
+    if (state.tab !== "tracks" || state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
+    if (activeRow && !activeRow.isConnected) activeRow = null;
     const target = event.target;
     const tag = (target && target.tagName) || "";
     const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || Boolean(target && target.isContentEditable);
@@ -420,8 +481,11 @@ function wireTableKeys() {
 /* --------------------------------------------------------------- 数据 */
 
 export async function refresh() {
+  const sequence = ++refreshSequence;
   state.tracks.loading = true;
   state.tracks.error = "";
+  syncFilterShortcuts();
+  renderFilterChips();
   renderTableStatus();
   // 加载中先把骨架行铺上（已有旧数据时保持旧行，避免闪一下）
   renderTable();
@@ -435,20 +499,23 @@ export async function refresh() {
   };
   try {
     const data = await api.tracks(params);
+    if (sequence !== refreshSequence) return;
     state.tracks.items = data.items || [];
     state.tracks.total = data.total || 0;
     state.tracks.page = data.page || 1;
     state.tracks.pages = data.pages || 1;
     state.tracks.loadedAt = Date.now();
   } catch (err) {
+    if (sequence !== refreshSequence) return;
     state.tracks.error = err.message;
     state.tracks.items = [];
     state.tracks.total = 0;
     state.tracks.pages = 1;
     ui.toast("err", "读取曲目失败", err.message);
   } finally {
-    state.tracks.loading = false;
+    if (sequence === refreshSequence) state.tracks.loading = false;
   }
+  if (sequence !== refreshSequence) return;
   renderTableStatus();
   renderTable();
   renderPager();
@@ -460,48 +527,24 @@ export async function refresh() {
 /** 库统计条 + 语言/类型下拉选项（依赖 /api/status）。 */
 export function onStatus(status) {
   const stats = status.stats || {};
-  const filters = state.tracks.filters;
 
   const cards = [
-    { key: "tracks", label: "歌曲", value: ui.fmtNum(stats.tracks || 0), ico: "music" },
-    { key: "artists", label: "歌手", value: ui.fmtNum(stats.artists || 0), ico: "artist" },
-    { key: "albums", label: "专辑", value: ui.fmtNum(stats.albums || 0), ico: "album" },
-    { key: "missing_cover", label: "缺封面", value: ui.fmtNum(stats.missing_cover || 0), filter: "missing_cover", miss: true, ico: "cover" },
-    { key: "missing_lyrics", label: "缺歌词", value: ui.fmtNum(stats.missing_lyrics || 0), filter: "missing_lyrics", miss: true, ico: "lyrics" },
-    { key: "bytes", label: "占用", value: ui.fmtBytes(stats.bytes || 0), ico: "disk" },
+    { key: "tracks", label: "曲目总数", value: ui.fmtNum(stats.tracks || 0), ico: "music", note: "每一首，都值得珍藏" },
+    { key: "artists", label: "艺术家", value: ui.fmtNum(stats.artists || 0), ico: "artist", note: "收藏不同的声音" },
+    { key: "albums", label: "专辑", value: ui.fmtNum(stats.albums || 0), ico: "album", note: "让音乐成辑归档" },
+    { key: "bytes", label: "曲库体积", value: ui.fmtBytes(stats.bytes || 0), ico: "disk", note: "已索引的音频文件" },
   ];
 
   ui.clear(nodes.strip);
   cards.forEach((card) => {
-    const active = card.filter ? Boolean(filters[card.filter]) : false;
-    const body = [
-      ui.el("span", { class: "k" }, [ui.icon(card.ico, { size: 13 }), ui.el("span", { text: card.label })]),
-      ui.el("span", { class: `v ${card.miss && Number(String(card.value).replace(/[^\d]/g, "")) > 0 ? "miss" : ""}`.trim(), text: card.value }),
-    ];
-    if (card.filter) {
-      nodes.strip.append(
-        ui.el(
-          "button",
-          {
-            type: "button",
-            class: "stat",
-            "aria-pressed": active ? "true" : "false",
-            title: active ? "点击取消该筛选" : "点击只看这些曲目",
-            onClick: () => {
-              filters[card.filter] = !filters[card.filter];
-              syncControls();
-              state.tracks.page = 1;
-              refresh();
-              onStatus(state.status);
-            },
-          },
-          body,
-        ),
-      );
-    } else {
-      nodes.strip.append(ui.el("div", { class: "stat" }, body));
-    }
+    nodes.strip.append(ui.el("div", { class: `stat stat-${card.key}` }, [
+      ui.el("span", { class: "stat-icon", "aria-hidden": "true" }, [ui.icon(card.ico, { size: 20 })]),
+      ui.el("span", { class: "k", text: card.label }),
+      ui.el("span", { class: "v", text: card.value }),
+      ui.el("span", { class: "stat-note", text: card.note }),
+    ]));
   });
+  renderLibraryHealth(stats);
 
   const languages = stats.languages || [];
   const albumtypes = stats.albumtypes || [];
@@ -510,6 +553,52 @@ export function onStatus(status) {
   fillDatalist(nodes.dlLanguages, languages);
   fillDatalist(nodes.dlAlbumtypes, albumtypes);
   renderTableStatus();
+  syncFilterShortcuts();
+}
+
+function renderLibraryHealth(stats) {
+  if (!nodes.health) return;
+  const total = Number(stats.tracks) || 0;
+  // 缺失字段可能重叠，因此只计算独立的封面覆盖率，不推算“完整曲目”数量。
+  const covered = Math.max(0, total - (Number(stats.missing_cover) || 0));
+  const coverage = total ? Math.max(0, Math.min(100, Math.round(covered / total * 100))) : 0;
+  ui.clear(nodes.health);
+  nodes.health.append(
+    ui.el("div", { class: "health-summary" }, [
+      ui.el("span", { class: "health-icon", "aria-hidden": "true" }, [ui.icon("cover", { size: 18 })]),
+      ui.el("div", {}, [
+        ui.el("strong", { text: "收藏完整度" }),
+        ui.el("span", { class: "hint", text: total ? `封面覆盖率 ${coverage}%` : "扫描后查看曲库信息" }),
+      ]),
+      ui.el("div", {
+        class: "health-meter",
+        role: "meter",
+        "aria-label": "已索引曲目的封面覆盖率",
+        "aria-valuemin": "0",
+        "aria-valuemax": "100",
+        "aria-valuenow": String(coverage),
+        "aria-valuetext": total ? `${coverage}%` : "暂无曲目",
+      }, [ui.el("span", { style: { width: `${coverage}%` } })]),
+    ]),
+    ui.el("div", { class: "health-filters" }, [
+      ["missing_cover", "待补封面", "cover"],
+      ["missing_lyrics", "待补歌词", "lyrics"],
+      ["no_artist", "缺少艺术家", "artist"],
+      ["no_album", "缺少专辑", "album"],
+    ].map(([key, label, ico]) => ui.el("button", {
+      type: "button",
+      class: "health-filter",
+      dataset: { healthFilter: key },
+      "aria-pressed": String(Boolean(state.tracks.filters[key])),
+      title: `筛选${label}的曲目`,
+      onClick: () => {
+        state.tracks.filters[key] = !state.tracks.filters[key];
+        state.tracks.page = 1;
+        syncControls();
+        refresh();
+      },
+    }, [ui.icon(ico, { size: 14 }), ui.el("span", { text: label }), ui.el("b", { class: "badge", text: ui.fmtNum(stats[key] || 0) })]))),
+  );
 }
 
 function fillSelect(select, values, current) {
@@ -517,9 +606,9 @@ function fillSelect(select, values, current) {
   ui.clear(select);
   select.append(ui.el("option", { value: "", text: "全部" }));
   values.forEach((value) => select.append(ui.el("option", { value, text: value })));
-  const values2 = values.includes(previous) ? previous : "";
-  select.value = values2;
-  state.tracks.filters[select.id === "filter-language" ? "language" : "albumtype"] = values2;
+  // 统计与列表并行刷新时，旧筛选可能暂时不在统计里；保留它，避免控件与结果不一致。
+  if (previous && !values.includes(previous)) select.append(ui.el("option", { value: previous, text: previous }));
+  select.value = previous;
 }
 
 function fillDatalist(list, values) {
@@ -531,22 +620,27 @@ function fillDatalist(list, values) {
 
 function renderTableStatus() {
   ui.clear(nodes.tableStatus);
+  nodes.tableWrap.setAttribute("aria-busy", String(state.tracks.loading));
+  nodes.reload.disabled = state.tracks.loading;
   if (state.tracks.loading && !state.tracks.items.length) {
     nodes.tableStatus.append(ui.loadingLine("正在读取索引…"));
     return;
   }
   if (state.tracks.error) {
-    nodes.tableStatus.append(ui.notice("err", [ui.el("strong", { text: "读取失败：" }), state.tracks.error]));
+    nodes.tableStatus.append(ui.emptyState("warn", "暂时无法读取曲库", state.tracks.error, [
+      ui.el("button", { type: "button", class: "btn", text: "重新加载", onClick: () => refresh() }),
+    ]));
+    nodes.tableWrap.hidden = true;
     return;
   }
   const stats = (state.status && state.status.stats) || {};
   if ((stats.tracks || 0) === 0) {
     nodes.tableStatus.append(
-      ui.emptyState("music", "曲库还是空的", "后端还没有索引到任何音频文件。扫描会遍历音乐目录并按 mtime 增量解析标签，不会改动文件。", [
+      ui.emptyState("album", "你的音乐收藏，从这里开始", "扫描音乐目录，把散落的歌曲收进曲库。扫描只建立索引，不修改音频文件。", [
         ui.el("button", {
           type: "button",
           class: "btn btn-primary",
-          text: "扫描曲库",
+          text: "开始扫描曲库",
           onClick: () => nodes.scanBtn.click(),
         }),
       ]),
@@ -556,7 +650,7 @@ function renderTableStatus() {
   }
   if (!state.tracks.total) {
     nodes.tableStatus.append(
-      ui.emptyState("search", "没有匹配的曲目", "当前搜索或筛选条件下没有结果，试试放宽条件。", [
+      ui.emptyState("search", "还没有找到这首歌", "试试其他关键词，或清除筛选，重新看看整个音乐收藏。", [
         ui.el("button", {
           type: "button",
           class: "btn",
@@ -589,6 +683,9 @@ function renderTable() {
 
   rows.forEach((row, index) => {
     const tr = ui.el("tr", { dataset: { id: row.id } });
+    const format = String(row.ext || (row.filename || "").match(/\.([^./\\]+)$/)?.[1] || "").replace(/^\./, "").toUpperCase();
+    const duration = ui.fmtDuration(row.duration);
+    const mobileMeta = [row.artist || "未知艺术家", row.album].filter(Boolean).join(" · ");
     if (isSelected(row.id)) tr.setAttribute("aria-selected", "true");
     if (index < 12) {
       tr.classList.add("enter");
@@ -617,16 +714,22 @@ function renderTable() {
           title: row.path || row.filename || "",
           text: row.title || "（无标题）",
         }),
+        ui.el("span", { class: "truncate cell-mobile-meta", title: mobileMeta, text: mobileMeta }),
+        ui.el("span", { class: "cell-meta" }, [
+          format ? ui.el("span", { class: "format-tag", text: format }) : null,
+          duration ? ui.el("span", { class: "track-duration", text: duration }) : null,
+          !format && !duration ? ui.el("span", { class: "truncate", text: row.filename || "待完善元数据" }) : null,
+        ]),
       ]),
       ui.el("td", {}, [
         ui.el("span", { class: "truncate", title: row.artist || "无歌手", text: row.artist || "—" }),
       ]),
       ui.el("td", {}, [ui.el("span", { class: "truncate", title: row.album || "无专辑", text: row.album || "—" })]),
       ui.el("td", { class: "num", text: row.year || "—" }),
-      ui.el("td", { class: "num", text: row.track || "—" }),
-      ui.el("td", {}, [ui.el("span", { class: "truncate", text: row.language || "—" })]),
-      ui.el("td", {}, [ui.el("span", { class: "truncate", text: row.albumtype || "—" })]),
-      ui.el("td", {}, [
+      ui.el("td", { class: "num col-track", text: row.track || "—" }),
+      ui.el("td", { class: "col-language" }, [ui.el("span", { class: "truncate", text: row.language || "—" })]),
+      ui.el("td", { class: "col-albumtype" }, [ui.el("span", { class: "truncate", text: row.albumtype || "—" })]),
+      ui.el("td", { class: "col-filename" }, [
         ui.el("span", {
           class: "truncate path-cell",
           title: row.path || row.filename || "",
@@ -636,11 +739,10 @@ function renderTable() {
       ui.el("td", {}, [
         ui.el("button", {
           type: "button",
-          class: "btn btn-sm",
-          text: "编辑",
+          class: "btn btn-sm row-edit",
           dataset: { editId: String(row.id) },
           "aria-label": `编辑 ${row.title || row.filename || row.id} 的元数据`,
-        }),
+        }, [ui.icon("edit", { size: 14 }), ui.el("span", { class: "row-edit-label", text: "编辑" })]),
       ]),
     );
     fragment.append(tr);
@@ -764,6 +866,7 @@ async function startScan() {
   // 留空 = 整个库；填子目录（相对音乐目录）就只走这一支，新增专辑时不用全库重走
   const root = (nodes.scanRoot.value || "").trim();
   nodes.scanBtn.disabled = true;
+  nodes.scanBtn.setAttribute("aria-busy", "true");
   nodes.scanBtn.textContent = "扫描中…";
   const progress = ui.createProgress(nodes.scanProgress, {
     label: `${fast ? "快速扫描（只建索引）" : full ? "全量扫描" : "扫描"}${root ? ` · 只扫 ${root}` : ""}`,
@@ -793,7 +896,9 @@ async function startScan() {
     ui.toast("err", "扫描失败", err.message);
   } finally {
     nodes.scanBtn.disabled = false;
-    nodes.scanBtn.textContent = "扫描曲库";
+    nodes.scanBtn.setAttribute("aria-busy", "false");
+    nodes.scanBtn.textContent = "开始扫描";
+    ui.withIcon(nodes.scanBtn, "scan");
     nodes.scanRoot.value = "";
     emit("status:refresh");
     await refresh();
@@ -803,24 +908,37 @@ async function startScan() {
 
 /* ------------------------------------------------------- 编辑 + 预览确认 */
 
+function hasOverlayAboveEditor() {
+  return Boolean(document.querySelector("dialog[open]")) ||
+    [...document.querySelectorAll(".palette-veil, #auth-veil")].some((node) => node.getClientRects().length && !node.hidden);
+}
+
+function isCurrentEdit(revision) {
+  return state.edit.open && revision === editRevision;
+}
+
 /** 载入文件里现有的歌词（只读；失败也不影响编辑其它字段）。 */
 async function loadLyrics(trackId) {
   const rowId = Number(trackId);
   if (!rowId || !nodes.editLyrics) return;
+  const revision = editRevision;
+  const inputRevision = lyricsInputRevision;
   if (nodes.editLyricsHint) nodes.editLyricsHint.textContent = "正在读取文件里的歌词…";
   try {
     const data = await api.trackLyrics(rowId);
     // 期间可能已经关了面板或换了曲目：只认当前这一首
     const current = state.edit.rows[0];
-    if (!state.edit.open || !current || Number(current.id) !== rowId) return;
+    if (!isCurrentEdit(revision) || !current || Number(current.id) !== rowId) return;
     lyricsBase = data.lyrics || "";
-    nodes.editLyrics.value = lyricsBase;
+    // 网络返回之前已经开始输入时，保留用户的文字，只更新比对基线。
+    if (inputRevision === lyricsInputRevision) nodes.editLyrics.value = lyricsBase;
     if (nodes.editLyricsHint) {
       nodes.editLyricsHint.textContent = data.has_lyrics
         ? `文件里现有 ${data.lines} 行 · ${data.chars} 字（改了才会写入；清空 = 不改动）`
         : "这个文件当前没有歌词：写进去后点「预览变更」，确认才会落盘。";
     }
   } catch (err) {
+    if (!isCurrentEdit(revision)) return;
     if (nodes.editLyricsHint) {
       nodes.editLyricsHint.textContent = `读取现有歌词失败：${err.message}（留空表示不改动歌词）`;
     }
@@ -829,9 +947,16 @@ async function loadLyrics(trackId) {
 
 function openEdit(rows) {
   if (!rows || !rows.length) return;
+  const revision = ++editRevision;
+  const trigger = document.activeElement;
+  if (!state.edit.open || !nodes.drawer.contains(trigger)) {
+    editTrigger = trigger instanceof HTMLElement ? trigger : null;
+  }
   state.edit.rows = rows.map((row) => ({ ...row }));
   state.edit.open = true;
-  editTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  state.edit.busy = false;
+  nodes.drawerPreview.disabled = false;
+  nodes.drawerPreview.textContent = "预览变更";
   nodes.drawerResult.replaceChildren();
   EDIT_FIELDS.forEach((key) => {
     const input = ui.byId(`edit-${key}`);
@@ -858,15 +983,21 @@ function openEdit(rows) {
   nodes.drawer.inert = false;
   // 等一帧：抽屉用 visibility 过渡，切换当帧直接 focus 有概率落空
   const focusTarget = ui.byId("edit-title");
-  if (focusTarget) requestAnimationFrame(() => focusTarget.focus());
+  if (focusTarget) requestAnimationFrame(() => { if (isCurrentEdit(revision)) focusTarget.focus(); });
 }
 
 function closeEdit() {
+  if (!state.edit.open) return;
+  editRevision += 1;
   state.edit.open = false;
+  state.edit.busy = false;
   nodes.drawer.dataset.open = "false";
+  // 先把焦点移出即将隐藏的抽屉；列表刷新后原触发按钮可能已经不在文档中。
+  if (editTrigger?.isConnected && editTrigger.getClientRects().length && !editTrigger.matches(":disabled") && !editTrigger.closest("[inert]") && !nodes.drawer.contains(editTrigger)) editTrigger.focus();
+  else if (state.tab === "tracks") nodes.q.focus();
+  else document.querySelector('.tab[aria-selected="true"]')?.focus();
   nodes.drawer.setAttribute("aria-hidden", "true");
   nodes.drawer.inert = true;
-  if (editTrigger && editTrigger.isConnected) editTrigger.focus();
   editTrigger = null;
 }
 
@@ -885,6 +1016,8 @@ function collectFields() {
 }
 
 async function runPreview() {
+  if (state.edit.busy || !state.edit.open) return;
+  const revision = editRevision;
   const ids = state.edit.rows.map((row) => Number(row.id)).filter(Boolean);
   if (!ids.length) return;
   const fields = collectFields();
@@ -901,6 +1034,7 @@ async function runPreview() {
   nodes.drawerResult.append(ui.loadingLine("正在读取文件内的现值…（只读，不改动文件）"));
   try {
     const preview = await api.previewTracks({ ids, fields, normalize_artist: normalize });
+    if (!isCurrentEdit(revision)) return;
     ui.clear(nodes.drawerResult);
     const changed = preview.changed_fields || 0;
     nodes.drawerResult.append(
@@ -927,46 +1061,54 @@ async function runPreview() {
         { id: changed ? "apply" : "apply", label: changed ? `确认写入 ${ids.length} 首` : `仍然执行（0 处变更）`, variant: "btn-primary" },
       ],
     });
+    if (!isCurrentEdit(revision)) return;
     if (answer !== "apply") {
       nodes.drawerResult.append(ui.notice("info", "已取消，未写入任何文件。"));
       return;
     }
-    await applyChanges(ids, fields, normalize, overwrite);
+    await applyChanges(ids, fields, normalize, overwrite, revision);
   } catch (err) {
+    if (!isCurrentEdit(revision)) return;
     ui.clear(nodes.drawerResult);
     nodes.drawerResult.append(ui.notice("err", `预览失败：${err.message}`));
     ui.toast("err", "预览失败", err.message);
   } finally {
-    state.edit.busy = false;
-    nodes.drawerPreview.disabled = false;
-    nodes.drawerPreview.textContent = "预览变更";
+    if (isCurrentEdit(revision)) {
+      state.edit.busy = false;
+      nodes.drawerPreview.disabled = false;
+      nodes.drawerPreview.textContent = "预览变更";
+    }
   }
 }
 
-async function applyChanges(ids, fields, normalize, overwrite) {
+async function applyChanges(ids, fields, normalize, overwrite, revision) {
   ui.clear(nodes.drawerResult);
   nodes.drawerResult.append(ui.loadingLine("正在写入标签…"));
   try {
     const result = await api.applyTracks({ ids, fields, normalize_artist: normalize, overwrite });
     const failed = result.failed || [];
-    ui.clear(nodes.drawerResult);
-    nodes.drawerResult.append(
-      ui.el("div", { class: "lbl", text: "写入结果" }),
-      ui.resultBlock({
-        summary: [
-          { label: "成功", value: result.written ?? 0, variant: "chip" },
-          { label: "失败", value: failed.length, variant: failed.length ? "chip" : "chip" },
-          { label: "字段", value: (result.fields || []).length },
-        ],
-        failures: failed.map((item) => ({
-          who: item.path || `#${item.track_id}`,
-          why: item.error || "未知错误",
-        })),
-        failuresTitle: "失败明细（这些文件没有被改动）",
-      }),
-    );
+    if (isCurrentEdit(revision)) {
+      ui.clear(nodes.drawerResult);
+      nodes.drawerResult.append(
+        ui.el("div", { class: "lbl", text: "写入结果" }),
+        ui.resultBlock({
+          summary: [
+            { label: "成功", value: result.written ?? 0, variant: "chip" },
+            { label: "失败", value: failed.length, variant: failed.length ? "chip" : "chip" },
+            { label: "字段", value: (result.fields || []).length },
+          ],
+          failures: failed.map((item) => ({
+            who: item.path || `#${item.track_id}`,
+            why: item.error || "未知错误",
+          })),
+          failuresTitle: "失败明细（这些文件没有被改动）",
+        }),
+      );
+    }
     if (failed.length) {
-      ui.toast("warn", `写入完成，但有 ${failed.length} 首失败`, "失败原因已列在编辑面板里。");
+      ui.toast("warn", `写入完成，但有 ${failed.length} 首失败`, isCurrentEdit(revision)
+        ? "失败原因已列在编辑面板里。"
+        : failed.map((item) => `${item.path || `#${item.track_id}`}：${item.error || "未知错误"}`).join("；"));
     } else {
       ui.toast("ok", `已写入 ${result.written ?? 0} 首`, `字段：${(result.fields || []).map(ui.fieldLabel).join("、")}`);
     }
@@ -974,8 +1116,10 @@ async function applyChanges(ids, fields, normalize, overwrite) {
     emit("status:refresh");
     await refresh();
   } catch (err) {
-    ui.clear(nodes.drawerResult);
-    nodes.drawerResult.append(ui.notice("err", `写入失败：${err.message}`));
+    if (isCurrentEdit(revision)) {
+      ui.clear(nodes.drawerResult);
+      nodes.drawerResult.append(ui.notice("err", `写入失败：${err.message}`));
+    }
     ui.toast("err", "写入失败", err.message);
   }
 }

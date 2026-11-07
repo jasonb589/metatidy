@@ -33,3 +33,6 @@ desktop.ini
 # Rust 后端
 backend-rs/target/
 backend-rs/Cargo.lock.bak
+
+# Local UI preview logs and screenshots
+.codex/ui-preview/

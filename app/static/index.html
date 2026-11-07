@@ -25,32 +25,61 @@
 <body>
 <a class="skip-link" href="#main">跳到主内容</a>
 
-<header class="app-header">
+<aside class="app-sidebar" id="app-sidebar" aria-label="主导航">
   <div class="brand">
-    <img class="brand-mark" src="./icon.svg" alt="" width="22" height="22">
+    <img class="brand-mark" src="./icon.svg" alt="" width="38" height="38">
     <div>
-      <h1>metatidy</h1>
-      <p class="brand-sub">音乐元数据工作台</p>
+      <span class="brand-name">metatidy<span class="brand-dot">.</span></span>
+      <p class="brand-sub">给音乐一个有序的家</p>
     </div>
+    <button class="sidebar-close" id="sidebar-close" aria-label="关闭导航">×</button>
   </div>
 
-  <nav class="tabs" role="tablist" aria-label="功能页签">
-    <button class="tab" role="tab" id="tab-tracks" aria-controls="panel-tracks" aria-selected="true" data-tab="tracks">曲库</button>
-    <button class="tab" role="tab" id="tab-scrape" aria-controls="panel-scrape" aria-selected="false" tabindex="-1" data-tab="scrape">搜索刮削</button>
-    <button class="tab" role="tab" id="tab-move" aria-controls="panel-move" aria-selected="false" tabindex="-1" data-tab="move">整理移动</button>
-    <button class="tab" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-tab="settings">设置</button>
+  <div class="nav-label">工作空间 <span>WORKSPACE</span></div>
+  <nav class="tabs" role="tablist" aria-orientation="vertical" aria-label="功能页签">
+    <button class="tab" role="tab" id="tab-tracks" aria-controls="panel-tracks" aria-selected="true" data-tab="tracks">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="14" height="16" rx="3"/><path d="M21 7v10M7 9h6M7 13h4"/></svg>
+      <span>我的曲库</span><span class="nav-count" id="sidebar-track-count">—</span>
+    </button>
+    <button class="tab" role="tab" id="tab-scrape" aria-controls="panel-scrape" aria-selected="false" tabindex="-1" data-tab="scrape">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5ZM20 3v4m-2-2h4"/></svg>
+      <span>元数据刮削</span>
+    </button>
+    <button class="tab" role="tab" id="tab-move" aria-controls="panel-move" aria-selected="false" tabindex="-1" data-tab="move">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M8 14h8m-3-3 3 3-3 3"/></svg>
+      <span>整理与归档</span>
+    </button>
+    <button class="tab" role="tab" id="tab-settings" aria-controls="panel-settings" aria-selected="false" tabindex="-1" data-tab="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>
+      <span>偏好设置</span>
+    </button>
   </nav>
 
+  <div class="sidebar-library">
+    <div class="nav-label">当前音乐库</div>
+    <div class="library-location"><span class="location-dot"></span><span id="sidebar-library-path" title="音乐库目录">等待连接…</span></div>
+    <div class="sidebar-source"><span id="sidebar-source-count">—</span> 个元数据源，为收藏补全细节</div>
+  </div>
+
+  <div class="sidebar-bottom">
+    <div class="sidebar-note"><span class="note-disc" aria-hidden="true"></span><p>每一份热爱<br><strong>都值得被珍藏。</strong></p></div>
+    <div class="sidebar-status"><span class="chip" id="header-version" title="服务连接状态">连接中…</span></div>
+    <div class="sidebar-account"><span class="chip" id="auth-chip" title="登录状态">—</span><button class="btn btn-ghost btn-sm" id="btn-logout" hidden title="退出登录">退出</button></div>
+    <span class="sidebar-caption">YOUR MUSIC. BEAUTIFULLY ORGANIZED.</span>
+  </div>
+</aside>
+<button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
+
+<div class="app-content">
+<header class="app-header">
+  <button class="btn btn-ghost btn-icon sidebar-toggle" id="sidebar-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="app-sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <div class="breadcrumb"><span class="breadcrumb-mark" aria-hidden="true">m.</span><span>音乐工作台</span><span class="breadcrumb-slash">/</span><span>让收藏井井有条</span></div>
   <div class="header-right">
-          <button class="btn btn-ghost btn-sm btn-palette" id="btn-palette" title="命令面板（Ctrl/⌘ + K）">
-            搜索或跳转 <kbd>Ctrl K</kbd>
-          </button>
-    <button class="btn btn-ghost btn-sm" id="btn-theme" title="切换日夜主题">浅色</button>
-    <span class="chip" id="header-version" title="后端版本与数据源状态">v—</span>
-    <span class="chip" id="auth-chip" title="登录状态">—</span>
-    <button class="btn btn-ghost btn-sm" id="btn-logout" hidden title="退出登录（删掉服务端会话）">退出</button>
-    <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-expanded="false" aria-controls="jobs-pop">
-      任务 <span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
+    <button class="btn btn-ghost btn-palette" id="btn-palette" title="命令面板（Ctrl/⌘ + K）"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>搜索或跳转</span><kbd>Ctrl K</kbd></button>
+    <span class="header-divider"></span>
+    <button class="btn btn-ghost btn-sm" id="btn-theme" title="切换日夜主题">切换主题</button>
+    <button class="btn btn-ghost btn-sm" id="btn-jobs" aria-expanded="false" aria-controls="jobs-pop"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v14h16V6a2 2 0 0 0-2-2h-2"/><rect x="8" y="2" width="8" height="4" rx="1.5"/><path d="m8 13 3 3 5-6"/></svg>
+      <span>任务中心</span><span class="badge badge-accent count-chip" id="jobs-running" hidden>0</span>
     </button>
   </div>
 </header>
@@ -66,50 +95,54 @@
   <div class="card-body" id="jobs-list"></div>
 </div>
 
-<main id="main">
+<main id="main" tabindex="-1">
+<div class="page-heading">
+  <div><p class="eyebrow" id="page-eyebrow">YOUR MUSIC ARCHIVE</p><h1 id="page-title">我的音乐库</h1><p class="page-description" id="page-description">收藏有序，热爱如初。</p></div>
+  <button class="btn btn-primary btn-lg" id="btn-scan-shortcut"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3M8 12h8m-4-4v8"/></svg>扫描音乐库</button>
+</div>
 
 <!-- ==================================================== 页签 1：曲库 -->
 <section class="panel" id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" data-panel="tracks" data-active="true">
   <div class="wrap">
-    <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
-
-    <div class="card">
-      <div class="card-body tight">
-        <div class="row">
-          <button class="btn btn-primary" id="btn-scan">扫描曲库</button>
-          <label class="check"><input type="checkbox" id="scan-fast"><span>快速扫描（只建索引、不读文件，云盘必用）</span></label>
-          <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫（忽略缓存，慢）</span></label>
-          <label class="check"><input type="checkbox" id="scan-prune" checked><span>清理已删除的文件记录</span></label>
-          <label class="row-inline flex-1" title="只扫描这个子目录（相对音乐目录），留空 = 整个库。新增几张专辑时用它，就不用把整个库再走一遍。">
-            <span class="lbl">只扫这个子目录</span>
-            <input type="text" id="scan-root" placeholder="留空 = 整个库，例如 中文/浅影阿" autocomplete="off">
-          </label>
-          <span class="hint">扫描只更新索引，不改动音频标签。</span>
-          <div class="spacer"></div>
-          <span class="hint" id="tracks-updated"></span>
-        </div>
-        <div id="scan-progress" hidden></div>
-      </div>
+    <div class="library-intro">
+      <div class="intro-copy"><span class="intro-kicker"><span></span> A LITTLE ORDER. MORE MUSIC.</span><h2>好音乐，值得好好收藏<span>。</span></h2><p>补全封面与标签，让每一次翻阅，都遇见最初的心动。</p><a class="intro-link" href="#scrape">开始完善音乐资料 <span aria-hidden="true">↗</span></a></div>
+      <div class="record-scene" aria-hidden="true"><div class="record-orbit orbit-one"></div><div class="record-orbit orbit-two"></div><div class="record-sleeve"><span class="sleeve-label">THE<br>COLLECTION</span><span class="sleeve-line"></span><span class="sleeve-footer">SOUNDS LIKE HOME. &nbsp; VOL. 01</span></div><div class="vinyl"><div class="vinyl-label"><span>mt.</span><i></i><small>33⅓ RPM</small></div></div><span class="record-caption">CURATED WITH LOVE</span><span class="scene-spark spark-one">✳</span><span class="scene-spark spark-two">+</span></div>
     </div>
+    <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
+    <div class="library-health" id="library-health" role="group" aria-label="音乐资料完整情况"></div>
 
-    <div class="card">
+    <details class="card scan-options" id="scan-options">
+      <summary><span class="disclosure-icon" aria-hidden="true">↻</span><span>扫描与导入</span><span class="hint">将新收藏加入音乐库</span><span class="disclosure-chevron" aria-hidden="true">⌄</span></summary>
+      <div class="card-body">
+        <div class="row scan-modes">
+          <label class="check"><input type="checkbox" id="scan-fast"><span>快速扫描</span><span class="badge badge-accent">云盘推荐</span></label>
+          <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫</span></label>
+          <label class="check"><input type="checkbox" id="scan-prune" checked><span>清理已删除的文件记录</span></label>
+        </div>
+        <div class="row"><label class="row-inline flex-1" title="子目录相对于音乐目录，留空扫描整个库"><span class="lbl">扫描目录</span><input type="text" id="scan-root" placeholder="整个音乐库，或输入子目录，例如 中文/浅影阿" autocomplete="off"></label><button class="btn btn-primary" id="btn-scan">开始扫描</button></div>
+        <p class="hint">快速扫描只从路径建立索引；全量重扫会忽略缓存。扫描不改动音频标签。</p>
+      </div>
+    </details>
+    <div id="scan-progress" hidden></div>
+
+    <div class="card library-card">
       <div class="card-head">
-        <h2>曲目</h2>
+        <h2>曲目收藏</h2>
         <span class="badge count-chip" id="tracks-total">—</span>
         <div class="grow">
-          <button class="btn btn-sm" id="btn-tracks-reload">刷新列表</button>
-          <button class="btn btn-sm" id="btn-filters-reset">清空筛选</button>
+          <span class="hint" id="tracks-updated"></span>
+          <button class="btn btn-sm btn-ghost" id="btn-tracks-reload" title="刷新列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg><span>刷新</span></button>
           <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
         </div>
       </div>
 
-      <div class="card-body tight">
-        <div class="row">
-          <label class="row-inline flex-1">
-            <span class="lbl">搜索</span>
-            <input type="search" id="tracks-q" placeholder="标题 / 歌手 / 专辑 / 文件名 / 路径 / 流派 / 年份" autocomplete="off">
+      <div class="card-body library-toolbar">
+        <div class="row library-search-row">
+          <label class="search-field flex-1">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">搜索曲库</span>
+            <input type="search" id="tracks-q" placeholder="搜索歌曲、艺术家、专辑…" autocomplete="off">
           </label>
-          <label class="row-inline">
+          <label class="row-inline sort-control">
             <span class="lbl">排序</span>
             <select id="tracks-sort">
               <option value="artist">歌手</option>
@@ -122,14 +155,14 @@
               <option value="edited">最后编辑时间</option>
             </select>
           </label>
-          <label class="row-inline">
+          <label class="row-inline sort-control">
             <span class="lbl">方向</span>
             <select id="tracks-order">
               <option value="asc">升序</option>
               <option value="desc">降序</option>
             </select>
           </label>
-          <label class="row-inline">
+          <label class="row-inline page-size-control">
             <span class="lbl">每页</span>
             <select id="tracks-pagesize">
               <option value="50">50</option>
@@ -138,7 +171,8 @@
             </select>
           </label>
         </div>
-        <div class="row">
+        <div class="filter-toolbar"><div class="quick-filters" id="quick-filters" role="group" aria-label="快速筛选"><button type="button" data-quick-filter="all" aria-pressed="true">全部曲目</button><button type="button" data-quick-filter="missing_cover" aria-pressed="false">待补封面</button><button type="button" data-quick-filter="missing_lyrics" aria-pressed="false">待补歌词</button></div><span class="filter-toolbar-hint">为你的收藏补全细节</span></div>
+        <details class="advanced-filters"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>更多筛选<span aria-hidden="true">⌄</span></summary><div class="row">
           <label class="row-inline"><span class="lbl">语言</span><select id="filter-language"><option value="">全部</option></select></label>
           <label class="row-inline"><span class="lbl">专辑类型</span><select id="filter-albumtype"><option value="">全部</option></select></label>
           <label class="row-inline"><span class="lbl">流派</span><input type="text" id="filter-genre" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
@@ -147,7 +181,8 @@
           <label class="check"><input type="checkbox" id="filter-missing-lyrics"><span>缺歌词</span></label>
           <label class="check"><input type="checkbox" id="filter-no-artist"><span>无歌手</span></label>
           <label class="check"><input type="checkbox" id="filter-no-album"><span>无专辑</span></label>
-        </div>
+          <button class="btn btn-sm btn-ghost" id="btn-filters-reset">清空筛选</button>
+        </div></details>
         <div class="filter-chips" id="filter-chips" hidden></div>
       </div>
 
@@ -158,22 +193,22 @@
         <table class="data" id="tracks-table">
           <caption class="sr-only">曲目列表，可用表头按钮排序，勾选框用于批量编辑</caption>
           <colgroup>
-            <col style="width:30px"><col style="width:34px"><col style="width:22%"><col style="width:13%">
-            <col style="width:16%"><col style="width:56px"><col style="width:48px"><col style="width:62px">
-            <col style="width:70px"><col style="width:18%"><col style="width:62px">
+            <col style="width:40px"><col style="width:58px"><col style="width:24%"><col style="width:15%">
+            <col style="width:19%"><col style="width:64px"><col class="col-track" style="width:46px"><col class="col-language" style="width:64px">
+            <col class="col-albumtype" style="width:76px"><col class="col-filename" style="width:13%"><col style="width:66px">
           </colgroup>
           <thead>
             <tr>
               <th scope="col" class="col-check"><input type="checkbox" id="check-page" aria-label="选择本页全部曲目"></th>
               <th scope="col"><span class="sr-only">封面</span></th>
-              <th scope="col" data-sort-col="title"><button type="button" class="th-sort" data-sort="title">标题</button></th>
-              <th scope="col" data-sort-col="artist"><button type="button" class="th-sort" data-sort="artist">歌手</button></th>
+              <th scope="col" data-sort-col="title"><button type="button" class="th-sort" data-sort="title">歌曲</button></th>
+              <th scope="col" data-sort-col="artist"><button type="button" class="th-sort" data-sort="artist">艺术家</button></th>
               <th scope="col" data-sort-col="album"><button type="button" class="th-sort" data-sort="album">专辑</button></th>
               <th scope="col" data-sort-col="year"><button type="button" class="th-sort" data-sort="year">年份</button></th>
-              <th scope="col" data-sort-col="track"><button type="button" class="th-sort" data-sort="track">轨号</button></th>
-              <th scope="col">语言</th>
-              <th scope="col">类型</th>
-              <th scope="col">文件名</th>
+              <th scope="col" class="col-track" data-sort-col="track"><button type="button" class="th-sort" data-sort="track">轨号</button></th>
+              <th scope="col" class="col-language">语言</th>
+              <th scope="col" class="col-albumtype">类型</th>
+              <th scope="col" class="col-filename">文件名</th>
               <th scope="col"><span class="sr-only">操作</span></th>
             </tr>
           </thead>
@@ -188,6 +223,7 @@
 <!-- ================================================ 页签 2：搜索刮削 -->
 <section class="panel" id="panel-scrape" role="tabpanel" aria-labelledby="tab-scrape" data-panel="scrape" data-active="false">
   <div class="wrap">
+    <div class="workflow-guide" aria-label="刮削流程"><span><b>01</b> 选择音乐与数据源</span><i aria-hidden="true">→</i><span><b>02</b> 查找最合适的版本</span><i aria-hidden="true">→</i><span><b>03</b> 预览差异，确认写入</span></div>
     <div class="card">
       <div class="card-head">
         <h2>数据源</h2>
@@ -200,7 +236,7 @@
       </div>
       <div class="card-body tight">
         <div class="row" id="src-chips"></div>
-        <p class="hint">每个数据源都会发起一次独立网络请求：只勾选 3–5 个会快很多，全选 13 个通常要几十秒。标为「不可用」的源在当前环境没有实现，勾了只会在结果里返回错误。</p>
+        <p class="hint">建议选择 3–5 个常用来源，搜索更快。标为「不可用」的来源暂时无法提供结果。</p>
       </div>
     </div>
 
@@ -208,7 +244,7 @@
       <div class="zone zone-pick">
         <div class="card">
           <div class="card-head">
-            <h3>选一首歌</h3>
+            <h3><span class="step-number">01</span> 选择曲目</h3>
             <span class="badge count-chip" id="pick-total">—</span>
           </div>
           <div class="card-body tight">
@@ -226,7 +262,7 @@
       <div class="zone zone-cand">
         <div class="card">
           <div class="card-head">
-            <h3>搜索候选</h3>
+            <h3><span class="step-number">02</span> 匹配候选</h3>
             <span class="badge count-chip" id="cand-count">0</span>
             <div class="grow"><span class="hint" id="cand-hidden">按分数从高到低</span></div>
           </div>
@@ -258,7 +294,7 @@
       <div class="zone zone-write">
         <div class="card">
           <div class="card-head">
-            <h3>写入面板</h3>
+            <h3><span class="step-number">03</span> 完善资料</h3>
             <span class="badge" id="write-target">未选候选</span>
           </div>
           <div class="card-body tight">
@@ -340,6 +376,7 @@
 <!-- ================================================ 页签 3：整理移动 -->
 <section class="panel" id="panel-move" role="tabpanel" aria-labelledby="tab-move" data-panel="move" data-active="false">
   <div class="wrap">
+    <div class="workflow-guide" aria-label="归档流程"><span><b>01</b> 设计目录与命名</span><i aria-hidden="true">→</i><span><b>02</b> 预览移动计划</span><i aria-hidden="true">→</i><span><b>03</b> 演练确认，再归档</span></div>
     <div class="card">
       <div class="card-head">
         <h2>目录层级模板</h2>
@@ -368,7 +405,7 @@
         <div class="notice notice-warn">
           <div class="body">
             目标路径必须落在库根目录 <span class="mono" id="move-root">—</span> 内，越界项会标记为 <span class="mono">invalid</span> 且在演练与执行时都被跳过。
-            执行走的是「预览计划 → 拿到 token → 确认执行」，同一份计划只能执行一次。
+            请先预览并演练，再确认移动文件；同一份计划只能执行一次。
           </div>
         </div>
       </div>
@@ -457,7 +494,7 @@
     <div class="card">
       <div class="card-head">
         <h2>整理与写入设置</h2>
-        <div class="grow"><span class="hint">保存到后端 settings 表，立即对扫描以外的功能生效</span></div>
+        <div class="grow"><span class="hint">设置会自动保留，下次打开继续使用</span></div>
       </div>
       <div class="card-body">
         <div class="grid-2">
@@ -548,6 +585,8 @@
 </section>
 
 </main>
+<footer class="workspace-footer"><span>metatidy <span class="footer-dot">·</span> 用心收藏，从容整理</span><span><kbd>/</kbd> 搜索曲库 <span class="footer-dot">·</span> <kbd>Ctrl K</kbd> 快捷操作</span></footer>
+</div>
 
 <datalist id="dl-languages"></datalist>
 <datalist id="dl-albumtypes"></datalist>
@@ -612,8 +651,10 @@
      兜底一定是最新的、登录框一定出得来。auth.js 只负责顶栏状态、退出按钮和 401 接管。 -->
 <div class="auth-veil" id="auth-veil" role="dialog" aria-modal="true" aria-label="登录" style="display: none">
   <form class="auth-card" id="auth-form" novalidate>
-    <h2>需要登录</h2>
-    <p class="hint">这个服务启用了密码保护（METATIDY_PASSWORD）。</p>
+    <img class="auth-logo" src="./icon.svg" width="48" height="48" alt="metatidy">
+    <p class="eyebrow">WELCOME TO YOUR COLLECTION</p>
+    <h2>好久不见，音乐收藏家。</h2>
+    <p class="hint">输入访问密码，回到你的音乐工作台。</p>
     <label class="auth-field">
       <span class="hint">访问密码</span>
       <input type="password" id="auth-password" autocomplete="current-password" placeholder="访问密码" aria-label="访问密码">
