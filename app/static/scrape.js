@@ -45,6 +45,10 @@ const DEFAULT_WRITE_FIELDS = ["title", "artist", "album", "albumartist", "genre"
 let nodes = null;
 let batchAbort = false;
 let fetchedLyrics = null;
+// 用户在写入面板里手动改过勾选后，设置页的值就不再覆盖它们
+let panelTouched = false;
+// 用户对「写封面」的意愿（null = 还没表达过）；候选没有封面时会临时取消勾选
+let coverWanted = null;
 
 export function init() {
   nodes = {
@@ -143,6 +147,18 @@ export function init() {
   nodes.applyBtn.addEventListener("click", previewAndWrite);
   // 勾选框一改，预览里的说明也跟着变（否则「勾了写歌词」看不到任何反馈）
   nodes.writeLyrics.addEventListener("change", renderWritePanel);
+
+  // 面板里改过这几项之后，设置页的值不再覆盖它们；另外记住「写封面」的意愿，
+  // 换成没有封面的候选时会临时取消勾选，换回来要恢复
+  nodes.writeCover.addEventListener("change", () => {
+    panelTouched = true;
+    coverWanted = nodes.writeCover.checked;
+  });
+  [nodes.writeLyrics, nodes.writeOverwrite, nodes.writeNormalize].forEach((box) => {
+    box.addEventListener("change", () => {
+      panelTouched = true;
+    });
+  });
   nodes.lyricsTry.addEventListener("click", tryFetchLyrics);
 
   nodes.batchUseCurrent.addEventListener("click", () => {
@@ -609,9 +625,12 @@ function renderWritePanel() {
   const hasCoverUrl = Boolean(cand.cover);
   nodes.writeCover.disabled = !hasCoverUrl;
   if (!hasCoverUrl) {
+    // 候选没有封面地址就写不了，只能先取消勾选；但记住用户原本的意愿，
+    // 换到带封面的候选时恢复，免得把用户勾的选择静默清掉
     nodes.writeCover.checked = false;
     nodes.writeCover.parentElement.title = "这个候选项没有封面地址";
   } else {
+    if (coverWanted !== null) nodes.writeCover.checked = coverWanted;
     nodes.writeCover.parentElement.title = "";
   }
   const hasLyrics = Boolean(cand.lyrics);
@@ -1097,10 +1116,14 @@ function renderBatchSearchRows(rows, total, done) {
 /** 供 app.js 在状态/设置更新后调用。 */
 export function onSettingsLoaded() {
   const values = (state.settings && state.settings.values) || {};
-  if (values.write_cover !== undefined) nodes.writeCover.checked = Boolean(values.write_cover);
-  if (values.write_lyrics !== undefined) nodes.writeLyrics.checked = Boolean(values.write_lyrics);
-  if (values.overwrite_existing !== undefined) nodes.writeOverwrite.checked = Boolean(values.overwrite_existing);
-  if (values.normalize_artist_ampersand !== undefined) nodes.writeNormalize.checked = Boolean(values.normalize_artist_ampersand);
+  // 写入面板里的勾选是「本次写入」的即时决定：用户手动改过之后就别再用设置页的值覆盖他
+  // （否则在面板里取消勾选、中途保存一次设置，就会被悄悄改回设置里的默认值）
+  if (!panelTouched) {
+    if (values.write_cover !== undefined) nodes.writeCover.checked = Boolean(values.write_cover);
+    if (values.write_lyrics !== undefined) nodes.writeLyrics.checked = Boolean(values.write_lyrics);
+    if (values.overwrite_existing !== undefined) nodes.writeOverwrite.checked = Boolean(values.overwrite_existing);
+    if (values.normalize_artist_ampersand !== undefined) nodes.writeNormalize.checked = Boolean(values.normalize_artist_ampersand);
+  }
   renderWritePanel();
 }
 

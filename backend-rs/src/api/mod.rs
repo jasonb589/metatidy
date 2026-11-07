@@ -62,7 +62,7 @@ pub fn user_setting_defaults() -> Vec<(&'static str, Value)> {
             "enabled_sources",
             json!(["netease", "qq", "kugou", "kuwo", "musicbrainz", "itunes", "deezer"]),
         ),
-        ("write_cover", json!(true)),
+        ("write_cover", json!(false)),
         ("write_lyrics", json!(true)),
         ("overwrite_existing", json!(true)),
     ]
@@ -849,6 +849,17 @@ mod tests {
         assert_eq!(TEMPLATE_PLACEHOLDERS.len(), 14);
         assert_eq!(placeholder_keys()[0], "artist");
         assert_eq!(placeholder_keys()[13], "original");
+    }
+
+    #[test]
+    fn write_cover_defaults_to_off() {
+        // 封面是「替换」写而不是追加：出厂默认勾上，会在用户没注意时把旧封面换掉
+        // （实机报障）。这里把默认值钉死成关。
+        let value = user_setting_defaults()
+            .into_iter()
+            .find(|(k, _)| *k == "write_cover")
+            .map(|(_, v)| v);
+        assert_eq!(value, Some(json!(false)), "「默认写封面」的出厂值必须是 false");
     }
 
     #[test]
