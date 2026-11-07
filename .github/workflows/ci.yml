@@ -15,6 +15,34 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  ui:
+    name: 浏览器界面验收
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 安装固定版本浏览器测试工具
+        run: |
+          npm install --prefix "$RUNNER_TEMP/metatidy-ui" --no-audit --no-fund playwright@1.62.1
+          node "$RUNNER_TEMP/metatidy-ui/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: 界面回归与曲库工具验收
+        env:
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/metatidy-ui/node_modules/playwright
+        run: |
+          node tests/ui-smoke.mjs
+          node tests/ui-library-tools.mjs
+      - name: 保存桌面与手机预览
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-previews
+          path: .codex/ui-preview/*.png
+          include-hidden-files: true
+          retention-days: 14
+
   rust:
     name: Rust 后端
     runs-on: ubuntu-latest
@@ -170,9 +198,8 @@ jobs:
 
   build:
     name: 构建并推送镜像
-    # 只依赖 Rust 门禁：Python 版已退役为「契约参考实现」，
-    # 它那套会真联网的集成测试抖动时不该挡住镜像发布（那个 job 仍会自己报红）。
-    needs: [rust]
+    # 后端真实验收与浏览器交互验收均通过后才发布镜像。
+    needs: [rust, ui]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

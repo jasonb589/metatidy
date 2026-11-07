@@ -67,6 +67,12 @@ const STATIC_COMMANDS = [
     ico: "jobs",
     run: () => document.getElementById("btn-jobs")?.click(),
   },
+  {
+    title: "查看键盘快捷键",
+    hint: "帮助",
+    ico: "command",
+    run: () => document.getElementById("btn-shortcuts-footer")?.click(),
+  },
 ];
 
 let host = null;
@@ -77,6 +83,7 @@ let items = [];
 let active = 0;
 let seq = 0;
 let searching = false;
+let paletteTrigger = null;
 
 function build() {
   if (host) return;
@@ -251,7 +258,9 @@ function runActive() {
 }
 
 export function openPalette() {
+  if (document.querySelector("dialog[open], .app-content[inert]")) return;
   build();
+  if (!isPaletteOpen()) paletteTrigger = document.activeElement;
   host.style.display = "flex";
   input.value = "";
   void refresh();
@@ -261,10 +270,18 @@ export function openPalette() {
 
 export function closePalette() {
   if (!host) return;
+  const restoreFocus = host.contains(document.activeElement);
   // 已关闭的查询不能在回包后覆盖下一次打开的命令列表。
   seq += 1;
   searching = false;
   host.style.display = "none";
+  if (restoreFocus) {
+    const valid = paletteTrigger instanceof HTMLElement && paletteTrigger.isConnected
+      && paletteTrigger.getClientRects().length && !paletteTrigger.closest("[inert]")
+      && !paletteTrigger.matches(":disabled") && !host.contains(paletteTrigger);
+    (valid ? paletteTrigger : document.getElementById("btn-palette"))?.focus({ preventScroll: true });
+  }
+  paletteTrigger = null;
 }
 
 export function isPaletteOpen() {
@@ -274,6 +291,7 @@ export function isPaletteOpen() {
 export function initPalette() {
   build();
   window.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.isComposing || document.querySelector("dialog[open]")) return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && key === "k") {
       event.preventDefault();

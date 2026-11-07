@@ -49,6 +49,8 @@ export const state = {
     view: "list",
     density: "comfortable",
     filters: {
+      artist: "",
+      album: "",
       language: "",
       albumtype: "",
       genre: "",
@@ -57,6 +59,7 @@ export const state = {
       missing_lyrics: false,
       no_artist: false,
       no_album: false,
+      not_loaded: false,
     },
     loading: false,
     error: "",

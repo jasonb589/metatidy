@@ -100,6 +100,7 @@ function filterTracks(params) {
   for (const [flag, field] of [['missing_cover', 'has_cover'], ['missing_lyrics', 'has_lyrics'], ['no_artist', 'artist'], ['no_album', 'album']]) {
     if (['1', 'true'].includes(params.get(flag))) result = result.filter(t => !t[field]);
   }
+  if (['1', 'true'].includes(params.get('not_loaded'))) result = result.filter(t => !t.tags_loaded);
   const key = { indexed: 'indexed_at', edited: 'edited_at' }[params.get('sort')] || params.get('sort') || 'artist';
   result.sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''), 'zh-CN', { numeric: true }));
   if (params.get('order') === 'desc') result.reverse();

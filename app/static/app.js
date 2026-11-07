@@ -14,6 +14,7 @@ import * as theme from "./theme.js";
 import * as auth from "./auth.js";
 import * as palette from "./palette.js";
 import { renderJobs, parseResult } from "./jobs-panel.js";
+import { initKeyboardHelp } from "./keyboard-help.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -48,6 +49,7 @@ function boot() {
   auth.init();
   // 命令面板（Ctrl/⌘+K）：纯新增组件，别的模块通过 palette:* 事件响应
   palette.initPalette();
+  initKeyboardHelp();
 
   wireSidebar();
   wireTabs();
@@ -71,6 +73,15 @@ function boot() {
   });
   on("jobs:refresh", () => {
     refreshJobs().catch(() => {});
+  });
+  on("library:batch-scrape", () => {
+    if (!canUseWorkspace() || !state.selection.size) return;
+    activateTab("scrape", { focus: false }).then(() => {
+      if (state.tab !== "scrape" || !canUseWorkspace()) return;
+      const button = ui.byId("btn-batch-run");
+      button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
+      document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
+    }).catch(reportNavigationError);
   });
 
   window.addEventListener("error", (event) => {

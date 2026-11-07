@@ -9,6 +9,9 @@
 <link rel="stylesheet" href="./styles.css">
 <link rel="stylesheet" href="./library-views.css">
 <link rel="stylesheet" href="./storage.css">
+<link rel="stylesheet" href="./track-inspector.css">
+<link rel="stylesheet" href="./saved-filters.css">
+<link rel="stylesheet" href="./library-tools.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -176,6 +179,8 @@
         </div>
         <div class="filter-toolbar"><div class="quick-filters" id="quick-filters" role="group" aria-label="快速筛选"><button type="button" data-quick-filter="all" aria-pressed="true">全部曲目</button><button type="button" data-quick-filter="missing_cover" aria-pressed="false">待补封面</button><button type="button" data-quick-filter="missing_lyrics" aria-pressed="false">待补歌词</button></div><span class="filter-toolbar-hint">为你的收藏补全细节</span></div>
         <details class="advanced-filters"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>更多筛选<span aria-hidden="true">⌄</span></summary><div class="row">
+          <label class="row-inline"><span class="lbl">艺术家</span><input type="text" id="filter-artist" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
+          <label class="row-inline"><span class="lbl">专辑</span><input type="text" id="filter-album" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
           <label class="row-inline"><span class="lbl">语言</span><select id="filter-language"><option value="">全部</option></select></label>
           <label class="row-inline"><span class="lbl">专辑类型</span><select id="filter-albumtype"><option value="">全部</option></select></label>
           <label class="row-inline"><span class="lbl">流派</span><input type="text" id="filter-genre" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
@@ -184,9 +189,11 @@
           <label class="check"><input type="checkbox" id="filter-missing-lyrics"><span>缺歌词</span></label>
           <label class="check"><input type="checkbox" id="filter-no-artist"><span>无歌手</span></label>
           <label class="check"><input type="checkbox" id="filter-no-album"><span>无专辑</span></label>
+          <label class="check"><input type="checkbox" id="filter-not-loaded"><span>待读标签</span></label>
           <button class="btn btn-sm btn-ghost" id="btn-filters-reset">清空筛选</button>
         </div></details>
         <div class="filter-chips" id="filter-chips" hidden></div>
+        <div id="saved-filters-host"></div>
       </div>
 
       <div class="row" id="selection-bar" hidden></div>
@@ -588,7 +595,7 @@
 </section>
 
 </main>
-<footer class="workspace-footer"><span>metatidy <span class="footer-dot">·</span> 用心收藏，从容整理</span><span><kbd>/</kbd> 搜索曲库 <span class="footer-dot">·</span> <kbd>Ctrl K</kbd> 快捷操作</span></footer>
+<footer class="workspace-footer"><span>metatidy <span class="footer-dot">·</span> 用心收藏，从容整理</span><span><kbd>/</kbd> 搜索曲库 <span class="footer-dot">·</span> <kbd>Ctrl K</kbd> 快捷操作 <span class="footer-dot">·</span> <button type="button" class="shortcut-help-link" id="btn-shortcuts-footer">键盘快捷键 <kbd>?</kbd></button></span></footer>
 </div>
 
 <datalist id="dl-languages"></datalist>

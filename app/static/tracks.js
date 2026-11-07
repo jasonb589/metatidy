@@ -9,6 +9,9 @@
 
 import { api, coverUrl, pollJob } from "./api.js";
 import * as ui from "./ui.js";
+import { openTrackDetails } from "./track-inspector.js";
+import { initSavedFilters } from "./saved-filters.js";
+import { showKeyboardHelp } from "./keyboard-help.js";
 import {
   state,
   emit,
@@ -45,13 +48,15 @@ const EDIT_FIELDS = [
 /** 打开面板时从文件里读回来的歌词基线：只有改动过才带进预览 / 写入。 */
 let lyricsBase = "";
 
-const FILTER_KEYS = ["language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album"];
+const FILTER_KEYS = ["artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
+const SORT_KEYS = ["artist", "album", "title", "year", "track", "path", "indexed", "edited"];
 
 let nodes = null;
 let editTrigger = null;
 let refreshSequence = 0;
 let editRevision = 0;
 let lyricsInputRevision = 0;
+let savedFilters = null;
 
 export function init() {
   nodes = {
@@ -73,6 +78,8 @@ export function init() {
     sort: ui.byId("tracks-sort"),
     order: ui.byId("tracks-order"),
     pageSize: ui.byId("tracks-pagesize"),
+    fArtist: ui.byId("filter-artist"),
+    fAlbum: ui.byId("filter-album"),
     fLanguage: ui.byId("filter-language"),
     fAlbumtype: ui.byId("filter-albumtype"),
     fGenre: ui.byId("filter-genre"),
@@ -81,6 +88,7 @@ export function init() {
     fLyrics: ui.byId("filter-missing-lyrics"),
     fNoArtist: ui.byId("filter-no-artist"),
     fNoAlbum: ui.byId("filter-no-album"),
+    fNotLoaded: ui.byId("filter-not-loaded"),
     checkPage: ui.byId("check-page"),
     tbody: ui.byId("tracks-tbody"),
     tableWrap: ui.byId("tracks-table-wrap"),
@@ -140,6 +148,8 @@ export function init() {
     refresh();
   });
 
+  nodes.fArtist.addEventListener("change", () => applyFilter("artist", nodes.fArtist.value.trim()));
+  nodes.fAlbum.addEventListener("change", () => applyFilter("album", nodes.fAlbum.value.trim()));
   nodes.fLanguage.addEventListener("change", () => applyFilter("language", nodes.fLanguage.value));
   nodes.fAlbumtype.addEventListener("change", () => applyFilter("albumtype", nodes.fAlbumtype.value));
   nodes.fGenre.addEventListener("change", () => applyFilter("genre", nodes.fGenre.value.trim()));
@@ -148,6 +158,7 @@ export function init() {
   nodes.fLyrics.addEventListener("change", () => applyFilter("missing_lyrics", nodes.fLyrics.checked));
   nodes.fNoArtist.addEventListener("change", () => applyFilter("no_artist", nodes.fNoArtist.checked));
   nodes.fNoAlbum.addEventListener("change", () => applyFilter("no_album", nodes.fNoAlbum.checked));
+  nodes.fNotLoaded.addEventListener("change", () => applyFilter("not_loaded", nodes.fNotLoaded.checked));
 
   nodes.quickFilters?.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-quick-filter]");
@@ -186,6 +197,20 @@ export function init() {
 
   // 恢复上次的筛选/排序/每页，并挂上表格键盘导航
   loadPrefs();
+  savedFilters = initSavedFilters({
+    host: ui.byId("saved-filters-host"),
+    getSnapshot: () => ({
+      q: state.tracks.q, sort: state.tracks.sort, order: state.tracks.order,
+      page_size: state.tracks.page_size, view: state.tracks.view, density: state.tracks.density,
+      filters: { ...state.tracks.filters },
+    }),
+    applySnapshot: (snapshot) => {
+      debouncedSearch.cancel();
+      Object.assign(state.tracks, snapshot, { filters: { ...snapshot.filters }, page: 1 });
+      syncControls();
+      refresh();
+    },
+  });
   wireTableKeys();
 
   // 命令面板（Ctrl/⌘+K）只发事件，真正做事在这里
@@ -260,6 +285,11 @@ export function init() {
   });
 
   nodes.tbody.addEventListener("click", (event) => {
+    const detail = event.target.closest("button[data-detail-id]");
+    if (detail) {
+      inspectTrack(detail.dataset.detailId, detail);
+      return;
+    }
     const edit = event.target.closest("button[data-edit-id]");
     if (edit) {
       const row = state.tracks.items.find((item) => String(item.id) === edit.dataset.editId);
@@ -306,6 +336,7 @@ function initLibraryViews() {
         syncViewControls();
         renderTableStatus();
         renderCollection({ animate: false });
+        animateViewChange();
         savePrefs();
       },
     }, [ui.icon(icon, { size: 14 }), ui.el("span", { text: label })]));
@@ -324,7 +355,10 @@ function initLibraryViews() {
       },
     }));
   }
-  nodes.viewControls.append(views, nodes.densityControls);
+  nodes.viewControls.append(views, nodes.densityControls, ui.el("button", {
+    type: "button", id: "btn-library-shortcuts", class: "library-help-button", text: "?",
+    title: "键盘快捷键（?）", "aria-label": "查看键盘快捷键", onClick: showKeyboardHelp,
+  }));
   const toolbar = nodes.quickFilters?.closest(".filter-toolbar") || nodes.q.closest(".library-toolbar");
   toolbar.append(nodes.viewControls);
 
@@ -350,8 +384,12 @@ function initLibraryViews() {
   nodes.grid = ui.el("ul", { id: "tracks-grid", class: "tracks-grid", "aria-label": "曲目封面卡片", hidden: true });
   nodes.tableWrap.after(nodes.gridControls, nodes.grid);
   nodes.grid.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-edit-id], button[data-scrape-id]");
+    const button = event.target.closest("button[data-edit-id], button[data-scrape-id], button[data-detail-id]");
     if (!button) return;
+    if (button.dataset.detailId) {
+      inspectTrack(button.dataset.detailId, button);
+      return;
+    }
     const id = button.dataset.editId || button.dataset.scrapeId;
     const row = state.tracks.items.find((item) => String(item.id) === id);
     if (!row) return;
@@ -363,12 +401,33 @@ function initLibraryViews() {
   });
 }
 
+function inspectTrack(id, trigger) {
+  const row = state.tracks.items.find((item) => String(item.id) === String(id));
+  if (!row) return;
+  openTrackDetails(row, {
+    rows: [...state.tracks.items], trigger,
+    onEdit: (track) => openEdit([track]),
+    onScrape: (track) => { setCurrentTrack(track); location.hash = "#scrape"; },
+  });
+}
+
+/** 只在用户切换视图时轻淡入，不让后台轮询重播动画。 */
+function animateViewChange() {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const host = state.tracks.view === "cards" ? nodes.grid : nodes.tableWrap;
+  host.getAnimations().forEach((animation) => animation.cancel());
+  host.animate([{ opacity: .35, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }], {
+    duration: 180, easing: "cubic-bezier(.2,.7,.2,1)",
+  });
+}
+
 function syncViewControls() {
   nodes.libraryCard.dataset.libraryView = state.tracks.view;
   nodes.libraryCard.dataset.libraryDensity = state.tracks.density;
   for (const view of ["list", "cards"]) ui.byId(`view-${view}`).setAttribute("aria-pressed", String(state.tracks.view === view));
   for (const density of ["comfortable", "compact"]) ui.byId(`density-${density}`).setAttribute("aria-pressed", String(state.tracks.density === density));
   nodes.densityControls.hidden = state.tracks.view !== "list";
+  savedFilters?.sync();
 }
 
 function showCollection(visible) {
@@ -399,6 +458,8 @@ function syncControls() {
   nodes.sort.value = state.tracks.sort;
   nodes.order.value = state.tracks.order;
   nodes.pageSize.value = String(state.tracks.page_size);
+  nodes.fArtist.value = state.tracks.filters.artist;
+  nodes.fAlbum.value = state.tracks.filters.album;
   nodes.fLanguage.value = state.tracks.filters.language;
   nodes.fAlbumtype.value = state.tracks.filters.albumtype;
   nodes.fGenre.value = state.tracks.filters.genre;
@@ -407,6 +468,7 @@ function syncControls() {
   nodes.fLyrics.checked = state.tracks.filters.missing_lyrics;
   nodes.fNoArtist.checked = state.tracks.filters.no_artist;
   nodes.fNoAlbum.checked = state.tracks.filters.no_album;
+  nodes.fNotLoaded.checked = state.tracks.filters.not_loaded;
   syncViewControls();
   syncFilterShortcuts();
 }
@@ -425,12 +487,15 @@ function syncFilterShortcuts() {
     button.setAttribute("aria-pressed", String(Boolean(filters[button.dataset.healthFilter])));
   });
   nodes.recentIndexed.setAttribute("aria-pressed", String(state.tracks.sort === "indexed" && state.tracks.order === "desc"));
+  savedFilters?.sync();
 }
 
 /* ------------------------------------------------- 筛选 chips / 偏好 / 键盘 */
 
 /** 筛选键 → 中文名（chips 上显示）。 */
 const FILTER_LABELS = {
+  artist: "艺术家",
+  album: "专辑",
   language: "语言",
   albumtype: "专辑类型",
   genre: "流派",
@@ -439,6 +504,7 @@ const FILTER_LABELS = {
   missing_lyrics: "缺歌词",
   no_artist: "无歌手",
   no_album: "无专辑",
+  not_loaded: "待读标签",
 };
 
 const PREFS_KEY = "metatidy.tracks.prefs";
@@ -495,15 +561,15 @@ function loadPrefs() {
     const raw = localStorage.getItem(PREFS_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
-      if (typeof saved.q === "string") state.tracks.q = saved.q;
-      if (typeof saved.sort === "string") state.tracks.sort = saved.sort;
+      if (typeof saved.q === "string") state.tracks.q = saved.q.slice(0, 1000);
+      if (SORT_KEYS.includes(saved.sort)) state.tracks.sort = saved.sort;
       if (saved.order === "asc" || saved.order === "desc") state.tracks.order = saved.order;
       if ([50, 100, 200].includes(Number(saved.page_size))) state.tracks.page_size = Number(saved.page_size);
       if (saved.view === "list" || saved.view === "cards") state.tracks.view = saved.view;
       if (saved.density === "comfortable" || saved.density === "compact") state.tracks.density = saved.density;
       FILTER_KEYS.forEach((key) => {
         const value = saved.filters ? saved.filters[key] : undefined;
-        if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = value;
+        if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = typeof value === "string" ? value.slice(0, 1000) : value;
       });
     }
   } catch {
@@ -542,7 +608,7 @@ function wireTableKeys() {
 
   document.addEventListener("keydown", (event) => {
     // 隐藏的曲库与浮层不抢别的工作区的键盘操作。
-    if (state.tab !== "tracks" || state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
+    if (state.tab !== "tracks" || state.edit.open || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || hasOverlayAboveEditor()) return;
     if (activeRow && (!activeRow.isConnected || !rows().includes(activeRow))) activeRow = null;
     const target = event.target;
     if (target?.closest?.("#jobs-pop")) return;
@@ -582,6 +648,9 @@ function wireTableKeys() {
       event.preventDefault();
       const btn = activeRow.querySelector("button[data-edit-id]");
       btn?.click();
+    } else if (event.key.toLowerCase() === "i" && activeRow) {
+      event.preventDefault();
+      inspectTrack(activeRow.dataset.id, activeRow.querySelector("button[data-detail-id]"));
     }
   });
 }
@@ -789,7 +858,8 @@ function renderCollection({ animate = true } = {}) {
   const oldRow = focused?.closest("tr[data-id], .track-card[data-id]");
   const action = focused?.matches('input[type="checkbox"]') ? 'input[type="checkbox"]'
     : focused?.matches("button[data-edit-id]") ? "button[data-edit-id]"
-      : focused?.matches("button[data-scrape-id]") ? "button[data-scrape-id]" : null;
+      : focused?.matches("button[data-scrape-id]") ? "button[data-scrape-id]"
+        : focused?.matches("button[data-detail-id]") ? "button[data-detail-id]" : null;
   if (state.tracks.view === "cards") {
     ui.clear(nodes.tbody);
     renderCards({ animate });
@@ -847,7 +917,10 @@ function renderCards({ animate = true } = {}) {
     });
     const checkbox = ui.el("input", { type: "checkbox", checked: isSelected(row.id), "aria-label": `选择曲目 ${title}` });
     checkbox.addEventListener("change", () => toggleSelect(row, checkbox.checked));
-    const art = cardArtwork(row, animate);
+    const art = ui.el("button", {
+      type: "button", class: "track-art-button", dataset: { detailId: String(row.id) },
+      "aria-label": `查看 ${title} 的详细资料`, title: "查看曲目资料",
+    }, [cardArtwork(row, animate), ui.el("span", { class: "art-detail-hint", "aria-hidden": "true" }, [ui.icon("info", { size: 14 }), "查看资料"])]);
     card.append(
       ui.el("div", { class: "track-card-top" }, [
         art,
@@ -855,7 +928,10 @@ function renderCards({ animate = true } = {}) {
         !row.has_lyrics ? ui.el("span", { class: "card-missing-lyrics", text: "待补歌词" }) : null,
       ]),
       ui.el("div", { class: "track-card-body" }, [
-        ui.el("h3", { id: `card-title-${row.id}`, class: "track-card-title truncate", title: row.path || title, text: title }),
+        ui.el("h3", { id: `card-title-${row.id}`, class: "track-card-title" }, [ui.el("button", {
+          type: "button", class: "track-title-button truncate", dataset: { detailId: String(row.id) },
+          title: row.path || title, "aria-label": `查看 ${title} 的详细资料`, text: title,
+        })]),
         ui.el("p", { class: "track-card-artist truncate", title: row.artist || "未知艺术家", text: row.artist || "未知艺术家" }),
         ui.el("p", { class: "track-card-album truncate", title: row.album || "尚未填写专辑", text: row.album || "尚未填写专辑" }),
         ui.el("div", { class: "track-card-meta" }, [
@@ -914,8 +990,9 @@ function renderTable({ animate = true } = {}) {
       ui.el("td", { class: "col-check" }, [checkbox]),
       ui.el("td", {}, [ui.coverThumb(row, { size: 48, reveal: animate })]),
       ui.el("td", {}, [
-        ui.el("span", {
-          class: "truncate cell-title",
+        ui.el("button", {
+          type: "button", class: "truncate cell-title track-title-button", dataset: { detailId: String(row.id) },
+          "aria-label": `查看 ${row.title || row.filename || row.id} 的详细资料`,
           title: row.path || row.filename || "",
           text: row.title || "（无标题）",
         }),
@@ -986,32 +1063,45 @@ function syncPageCheckbox() {
 }
 
 function renderSelectionBar() {
+  const focusedAction = nodes.selectionBar.contains(document.activeElement) ? document.activeElement.id : "";
+  const wasHidden = nodes.selectionBar.hidden;
   ui.clear(nodes.selectionBar);
   const count = selectionCount();
   nodes.editSelected.disabled = count === 0;
   if (!count) {
     nodes.selectionBar.hidden = true;
+    nodes.selectionBar.classList.remove("selection-enter");
     return;
   }
   nodes.selectionBar.hidden = false;
-  const rows = selectionRows().slice(0, 6);
+  if (wasHidden) nodes.selectionBar.classList.add("selection-enter");
+  const rows = selectionRows().slice(0, 2);
+  const onPage = state.tracks.items.filter((row) => isSelected(row.id)).length;
   nodes.selectionBar.append(
-    ui.el("span", { class: "lbl", style: { marginBottom: "0" }, text: `已选 ${count} 首` }),
+    ui.el("div", { class: "selection-summary", role: "status", "aria-live": "polite" }, [
+      ui.el("strong", { text: `已选 ${count} 首` }),
+      ui.el("span", { text: count > onPage ? `当前页 ${onPage} 首 · 其他页 ${count - onPage} 首` : "跨页保留选择" }),
+    ]),
     ...rows.map((row) =>
-      ui.el("span", { class: "chip", title: row.path || row.filename }, [
-        ui.el("span", { class: "truncate", style: { maxWidth: "180px" }, text: row.title || row.filename || String(row.id) }),
+      ui.el("span", { class: "chip selection-track", title: row.path || row.filename }, [
+        ui.el("span", { class: "truncate", style: { maxWidth: "120px" }, text: row.title || row.filename || String(row.id) }),
       ]),
     ),
-    count > rows.length ? ui.el("span", { class: "hint", text: `…等 ${count} 首` }) : "",
     ui.el("div", { class: "spacer" }),
     ui.el("button", {
-      type: "button",
+      type: "button", id: "selection-edit",
       class: "btn btn-sm btn-primary",
       text: "编辑已选",
       onClick: () => openEdit(selectionRows()),
     }),
-    ui.el("button", { type: "button", class: "btn btn-sm", text: "清空选择", onClick: () => clearSelection() }),
+    ui.el("button", { type: "button", id: "selection-scrape", class: "btn btn-sm", text: "批量刮削", onClick: () => emit("library:batch-scrape") }),
+    ui.el("button", { type: "button", id: "selection-clear", class: "btn btn-sm btn-ghost", text: "清空选择", onClick: () => {
+      clearSelection();
+      const pageCheck = state.tracks.view === "cards" ? nodes.checkGridPage : nodes.checkPage;
+      (pageCheck.disabled || !pageCheck.getClientRects().length ? nodes.q : pageCheck).focus({ preventScroll: true });
+    } }),
   );
+  if (focusedAction) ui.byId(focusedAction)?.focus({ preventScroll: true });
 }
 
 function renderPager() {

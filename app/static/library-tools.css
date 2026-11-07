@@ -1,0 +1,41 @@
+/* Detail entry points stay legible and discoverable with pointer, touch or keyboard. */
+.track-title-button { appearance: none; display: block; width: 100%; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; text-align: left; cursor: pointer; }
+.track-title-button:hover { color: var(--accent-2); text-decoration: underline; text-underline-offset: 4px; }
+.track-title-button:focus-visible { outline-offset: 2px; }
+.track-art-button { appearance: none; display: block; position: relative; width: 100%; padding: 0; border: 0; background: transparent; color: var(--fg); cursor: pointer; }
+.track-art-button:focus-visible { outline-offset: -4px; outline: 2px solid var(--accent); }
+.track-art-button .track-card-art > img { transition: transform 240ms var(--ease-out); }
+.art-detail-hint { position: absolute; bottom: 10px; left: 10px; display: flex; gap: 5px; align-items: center; padding: 4px 7px; border-radius: 5px; color: var(--fg); background: var(--glass); font-size: 10px; opacity: 0; transform: translateY(3px); transition: opacity var(--t-fast), transform var(--t-fast); pointer-events: none; }
+.track-art-button:hover .art-detail-hint, .track-art-button:focus-visible .art-detail-hint { opacity: 1; transform: none; }
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .track-art-button:hover .track-card-art > img { transform: scale(1.025); }
+}
+.library-help-button { display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 50%; color: var(--fg-2); background: var(--bg-1); font: 600 12px var(--font); cursor: pointer; }
+.library-help-button:hover { border-color: var(--accent-line); color: var(--accent-2); background: var(--accent-soft); }
+.shortcut-help-link { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.shortcut-help-link:hover { color: var(--accent-2); }
+.keyboard-shortcuts { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 14px 22px; margin: 0; align-items: baseline; }
+.keyboard-shortcuts dt, .keyboard-shortcuts dd { margin: 0; }
+.keyboard-shortcuts dd { color: var(--fg-2); font-size: 12px; }
+.keyboard-shortcuts kbd { padding: 4px 7px; color: var(--fg); }
+
+/* One stable toolbar across selection changes; entry motion only on its first appearance. */
+#selection-bar { flex-wrap: wrap; animation: none; gap: 10px; padding: 11px 14px; }
+#selection-bar.selection-enter { animation: bar-in 220ms var(--ease-out) both; }
+.selection-summary { display: flex; flex-direction: column; flex: none; padding-right: 8px; }
+.selection-summary strong { font-size: 12px; font-weight: 600; color: var(--accent-2); }
+.selection-summary > span { color: var(--fg-3); font-size: 10px; }
+body:has(#selection-bar:not([hidden])) .workspace-footer { padding-bottom: 100px; }
+@media (max-width: 1100px) { #selection-bar .selection-track { display: none; } }
+@media (max-width: 700px) {
+  #selection-bar { bottom: max(12px, env(safe-area-inset-bottom)); width: min(440px, calc(100vw - 24px)); gap: 8px; }
+  #selection-bar .selection-summary { flex: 1 1 100%; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 10px; padding: 0; }
+  #selection-bar > .spacer { display: none; }
+  #selection-bar > .btn { flex: 1 1 auto; padding-inline: 8px; }
+  .keyboard-shortcuts { gap: 13px 14px; }
+  .keyboard-shortcuts dd { font-size: 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .track-art-button .track-card-art > img, .art-detail-hint { transition: none; transform: none; }
+  #selection-bar.selection-enter { animation: none; }
+}
