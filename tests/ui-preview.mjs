@@ -166,6 +166,19 @@ async function handleApi(req, res, url) {
     auto_scan: { enabled: true, watching: true, fast: false, debounce_secs: 10, pending_scopes: 0,
       state: 'watching', error: '', last_job_id: null, last_scan_at: now - 3600, overflow_count: 0 },
   });
+  if (route === '/api/storage' || route === '/api/storage/check') {
+    const checked = route.endsWith('/check') && method === 'POST';
+    const paths = ['/fixture-data', '/fixture-data/covers', '/fixture-data/thumbs'];
+    return json(res, {
+      checked_at: now, database: { engine: 'PostgreSQL', connected: true, stores: ['曲库索引', '应用设置', '别名', '任务记录'] },
+      music: { path: '/fixture-music', exists: true },
+      cache: { root: '/fixture-data', format: 'AVIF', on_demand: true,
+        originals: { path: paths[1], exists: true, files: 2, bytes: 204800, truncated: false, error: '' },
+        thumbnails: { path: paths[2], exists: true, files: 15, bytes: 78600, truncated: false, error: '' } },
+      runtime: { container: false },
+      write_checks: checked ? paths.map(path => ({ path, state: 'ok', error: '' })) : null,
+    });
+  }
   if (route === '/api/settings') {
     if (method === 'PUT') { values = { ...values, ...payload.values }; return json(res, { saved: payload.values, warnings: [] }); }
     return json(res, { values, placeholders });

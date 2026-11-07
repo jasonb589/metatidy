@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO))
 from tests.audiofix import make_flac  # noqa: E402
 from tests.cover_acceptance import check_covers, seed_cover_fixtures  # noqa: E402
 from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
+from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -130,6 +131,7 @@ def main() -> int:
         st = requests.get(f"{BASE}/api/status", timeout=20).json()
         check("服务可用", st["version"].count(".") == 2 and st["version"][0].isdigit(), f"版本 {st['version']}")
         check("迁移层 13 个源就绪", st["scraper"]["count"] >= 12, f"可用 {st['scraper']['count']} 个")
+        check_storage(BASE, data, music, check)
 
         print("\n=== 1. 扫描（功能底座） ===")
         t0 = time.time()
@@ -149,6 +151,7 @@ def main() -> int:
 
         print("\n=== 1.1. AVIF 封面缩略图 ===")
         check_covers(BASE, listing["items"], data, check, wait_job)
+        check_cache_totals(BASE, data, check)
 
         print("\n=== 2. 功能一：元数据编辑 ===")
         target = next(i for i in listing["items"] if i["title"] == "七里香")
@@ -412,6 +415,9 @@ def main() -> int:
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
+            check("未登录不能访问存储诊断或执行写权限探针",
+                  requests.get(f"{auth_base}/api/storage", timeout=20).status_code == 401
+                  and requests.post(f"{auth_base}/api/storage/check", timeout=20).status_code == 401)
             fake = requests.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20,
                                 cookies={"metatidy_session": "0" * 64})
             check("伪造会话 Cookie 被拒（401）", fake.status_code == 401, f"HTTP {fake.status_code}")

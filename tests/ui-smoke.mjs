@@ -148,6 +148,53 @@ try {
     await page.locator('#edit-close').click();
   });
 
+  await check('Cover view shares selection, search and persisted presentation preferences', async () => {
+    await page.locator('#view-cards').click();
+    await page.locator('#tracks-grid .track-card').first().waitFor();
+    assert.equal(await page.locator('#tracks-grid .track-card').count(), 18);
+    assert.equal(await page.locator('#tracks-table-wrap').isVisible(), false);
+    const card = page.locator('#tracks-grid .track-card').first();
+    const id = await card.getAttribute('data-id');
+    await card.locator('input[type="checkbox"]').check();
+    assert.equal(await card.getAttribute('data-selected'), 'true');
+    const image = page.locator('#tracks-grid .track-card img').first();
+    assert.equal(new URL(await image.getAttribute('src'), base).searchParams.get('size'), '256');
+    await card.locator('.card-edit').click();
+    assert.equal(await page.locator('#edit-drawer').getAttribute('aria-hidden'), 'false');
+    await page.locator('#edit-close').click();
+    await page.locator('#view-list').click();
+    assert.equal(await page.locator(`#tracks-tbody tr[data-id="${id}"] input[type="checkbox"]`).isChecked(), true);
+    await page.locator(`#tracks-tbody tr[data-id="${id}"] input[type="checkbox"]`).uncheck();
+    await page.locator('#density-compact').click();
+    assert.equal(await page.locator('.library-card').getAttribute('data-library-density'), 'compact');
+    await page.locator('#view-cards').click();
+    await page.reload();
+    await page.locator('#tracks-grid .track-card').first().waitFor();
+    assert.equal(await page.locator('#view-cards').getAttribute('aria-pressed'), 'true');
+    await page.locator('#tracks-q').fill('周杰伦');
+    await page.waitForFunction(() => document.querySelectorAll('#tracks-grid .track-card').length === 3);
+    await page.locator('#quick-recent-indexed').click();
+    assert.equal(await page.locator('#tracks-sort').inputValue(), 'indexed');
+    assert.equal(await page.locator('#tracks-order').inputValue(), 'desc');
+    assert.equal(await page.locator('#tracks-q').inputValue(), '周杰伦');
+    await page.locator('[data-quick-filter="all"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('#tracks-grid .track-card').length === 18);
+    await page.screenshot({ path: path.join(outputDir, 'cover-library-desktop.png'), fullPage: true });
+    for (const width of [320, 390, 768, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await noPageOverflow(page);
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: path.join(outputDir, 'cover-library-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('#view-list').click();
+    assert.equal(await page.locator('#density-compact').getAttribute('aria-pressed'), 'true');
+    await page.locator('#density-comfortable').click();
+    await page.locator('#tracks-sort').selectOption('artist');
+    await page.locator('#tracks-order').selectOption('asc');
+    await waitRows(page, 18);
+  });
+
   await check('Automatic update status explains incremental scanning and retained records', async () => {
     assert.equal(await page.locator('#sidebar-auto-scan').innerText(), '自动更新已开启');
     assert.equal(await page.locator('#sidebar-auto-scan').getAttribute('aria-live'), 'polite');
@@ -218,6 +265,22 @@ try {
     assert.equal(await page.locator('#btn-jobs').getAttribute('aria-expanded'), 'false');
   });
 
+  await check('Task disclosure keyboard controls take priority over the active library card', async () => {
+    await page.locator('#view-cards').click();
+    await page.locator('#tracks-grid .track-card').first().focus();
+    await page.keyboard.press('ArrowRight');
+    await page.locator('#btn-jobs').click();
+    await page.waitForFunction(() => document.activeElement?.id === 'jobs-close');
+    const task = page.locator('.job-card').first();
+    await task.evaluate(node => { node.open = false; });
+    await task.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await task.getAttribute('open'), '');
+    assert.equal(await page.locator('#edit-drawer').getAttribute('aria-hidden'), 'true');
+    await page.keyboard.press('Escape');
+    await page.locator('#view-list').click();
+  });
+
   await check('Command palette opens with keyboard and returns focus', async () => {
     await page.locator('#btn-palette').focus();
     await page.keyboard.press('Control+k');
@@ -270,7 +333,7 @@ try {
     await page.screenshot({ path: path.join(outputDir, 'organizer-desktop.png'), fullPage: true });
     await page.locator('#tab-settings').click();
     await page.locator('#alias-artist-body input').first().waitFor();
-    assert.ok((await page.locator('#status-kv').innerText()).includes('fixture'));
+    assert.ok((await page.locator('#status-kv').textContent()).includes('fixture'));
     await noPageOverflow(page);
     await page.screenshot({ path: path.join(outputDir, 'settings-desktop.png'), fullPage: true });
   });
@@ -285,6 +348,53 @@ try {
     await waitRows(page, 18);
     assert.equal(await page.locator('html').getAttribute('data-theme'), after);
     await page.screenshot({ path: path.join(outputDir, 'desktop-dark.png'), fullPage: true });
+  });
+
+  await check('Storage diagnostics separate PostgreSQL settings from on-demand AVIF caches', async () => {
+    await page.locator('#tab-settings').click();
+    await page.locator('#storage-cards .storage-card').first().waitFor();
+    const copy = await page.locator('#storage-cards').innerText();
+    assert.match(copy, /PostgreSQL/);
+    assert.match(copy, /应用设置/);
+    assert.match(copy, /AVIF/);
+    assert.doesNotMatch(await page.locator('#status-kv').textContent(), /metatidy\.db/);
+    assert.equal(writes.includes('/api/storage/check'), false, 'Viewing storage must not automatically probe writes');
+    const checked = page.waitForResponse(response => new URL(response.url()).pathname === '/api/storage/check');
+    await page.locator('#storage-check-write').click();
+    await checked;
+    await page.waitForFunction(() => document.querySelectorAll('.storage-check-row').length === 3);
+    assert.match(await page.locator('#storage-feedback').innerText(), /可写/);
+    await page.screenshot({ path: path.join(outputDir, 'storage-diagnostics-desktop.png'), fullPage: true });
+    for (const width of [320, 390, 768]) {
+      await page.setViewportSize({ width, height: 900 });
+      await noPageOverflow(page);
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.locator('#tab-tracks').click();
+  });
+
+  await check('Settings and alias drafts survive navigation and status refresh independently', async () => {
+    await page.locator('#tab-settings').click();
+    await page.locator('#set-unknown-artist').fill('保留未保存的设置');
+    const source = page.locator('#set-sources input[data-source="netease"]');
+    const originalSource = await source.isChecked();
+    await source.setChecked(!originalSource);
+    await page.locator('#alias-artist-body input').first().fill('Keep artist draft');
+    await page.locator('#alias-album-body input').first().fill('Keep album draft');
+    await page.locator('#tab-tracks').click();
+    await page.locator('#tab-settings').click();
+    await page.locator('#btn-status-reload').click();
+    await page.locator('#btn-status-reload').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#set-unknown-artist').inputValue(), '保留未保存的设置');
+    assert.equal(await source.isChecked(), !originalSource);
+    assert.equal(await page.locator('#alias-artist-body input').first().inputValue(), 'Keep artist draft');
+    assert.equal(await page.locator('#alias-album-body input').first().inputValue(), 'Keep album draft');
+    await page.locator('#btn-settings-reload').click();
+    await page.locator('dialog.modal[open]').getByRole('button', { name: '放弃修改', exact: true }).click();
+    assert.notEqual(await page.locator('#set-unknown-artist').inputValue(), '保留未保存的设置');
+    assert.equal(await source.isChecked(), originalSource);
+    assert.equal(await page.locator('#alias-artist-body input').first().inputValue(), 'Keep artist draft', 'Discarding settings must not discard alias drafts');
+    await page.locator('#tab-tracks').click();
   });
 
   await check('Mobile navigation opens, closes and activates all functional panels', async () => {
@@ -347,7 +457,7 @@ try {
   await check('Authentication gates data requests until successful login', async () => {
     const authPage = await context.newPage();
     const dataRequests = [];
-    authPage.on('request', request => { if (/\/api\/(status|settings|tracks|sources|jobs)/.test(request.url())) dataRequests.push(request.url()); });
+    authPage.on('request', request => { if (/\/api\/(status|settings|tracks|sources|jobs|storage)/.test(request.url())) dataRequests.push(request.url()); });
     await authPage.goto(authBase);
     await authPage.locator('#auth-password').waitFor({ state: 'visible' });
     assert.equal(dataRequests.length, 0);
@@ -385,6 +495,28 @@ try {
     assert.equal(await sourceNode.evaluate(node => node.isConnected), true, 'Routine status must retain source controls');
     assert.equal(await source.isChecked(), !sourceBefore);
     assert.equal(await page.locator('#set-unknown-artist').inputValue(), draft);
+  }));
+
+  await check('Expanded task details retain focus and disclose structured scan results during polling', () => withPollingPage(base, async ({ page, model, pollJobs }) => {
+    await page.locator('#btn-jobs').click();
+    const task = page.locator('.job-card[data-job-id="fixture-scan-001"]');
+    await task.locator('summary').click();
+    assert.equal(await task.getAttribute('open'), '');
+    assert.match(await task.innerText(), /新增/);
+    const summary = await task.locator('summary').elementHandle();
+    await task.locator('summary').focus();
+    model.jobs.jobs[0].message = 'Updated progress message';
+    await pollJobs();
+    assert.equal(await summary.evaluate(node => node.isConnected), true);
+    assert.equal(await summary.evaluate(node => node === document.activeElement), true);
+    assert.equal(await task.getAttribute('open'), '');
+    const result = JSON.parse(model.jobs.jobs[0].result);
+    model.jobs.jobs[0].result = JSON.stringify({ ...result, failed: 1, errors: ['<img src=x onerror=alert(1)>Permission denied'] });
+    await pollJobs();
+    assert.match(await task.locator('.job-errors').innerText(), /Permission denied/);
+    assert.equal(await task.locator('.job-errors img').count(), 0, 'Error messages must render as text');
+    assert.equal(await task.locator('.job-copy-error').isVisible(), true);
+    await page.screenshot({ path: path.join(outputDir, 'task-result-details.png'), fullPage: true });
   }));
 
   await check('A newly completed automatic job refreshes once without resetting settings', () => withPollingPage(base, async ({ page, model, calls, pollJobs, completeWatch }) => {
@@ -438,6 +570,65 @@ try {
     await page.waitForFunction(id => document.querySelector(`#tracks-tbody tr[data-id="${id}"] .cell-title`)?.textContent === '关闭对话框后显示', id);
     assert.equal(calls.tracks, before.tracks + 1);
   }));
+
+  await check('Storage permission errors remain readable and copied reports exclude credentials', async () => {
+    const isolated = await browser.newContext({ viewport: { width: 390, height: 844 }, reducedMotion: 'reduce' });
+    const inspected = await isolated.newPage();
+    const report = await (await isolated.request.get(`${base}/api/storage`)).json();
+    report.database.password = 'SHOULD_NOT_COPY';
+    report.database.connection_string = 'postgres://SHOULD_NOT_COPY';
+    report.cache.thumbnails.error = 'Permission denied';
+    report.cache.thumbnails.exists = false;
+    report.cache.thumbnails.files = 0;
+    report.cache.thumbnails.bytes = 0;
+    report.write_checks = [{ path: '/fixture-data/thumbs', state: 'error', error: 'Permission denied' }];
+    await inspected.addInitScript(() => Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined }));
+    await inspected.route('**/api/storage**', route => route.fulfill({ json: report }));
+    try {
+      await inspected.goto(`${base}/#settings`);
+      await inspected.locator('#storage-cards .storage-card').first().waitFor();
+      await inspected.waitForFunction(() => document.querySelector('#storage-feedback')?.textContent.includes('Permission denied'));
+      assert.match(await inspected.locator('#storage-cards').innerText(), /至少 200 KB/);
+      assert.match(await inspected.locator('.storage-breakdown').innerText(), /读取受限/);
+      await inspected.locator('#storage-copy-report').click();
+      const text = inspected.locator('textarea.storage-report-text');
+      await text.waitFor();
+      const copied = await text.inputValue();
+      assert.match(copied, /Permission denied/);
+      assert.doesNotMatch(copied, /SHOULD_NOT_COPY|connection_string|password/);
+      await noPageOverflow(inspected);
+    } finally { await isolated.close(); }
+  });
+
+  await check('Edits made during a settings save remain unsaved drafts after the response', async () => {
+    const isolated = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
+    const editor = await isolated.newPage();
+    let releaseSave;
+    let confirmRequest;
+    const saveStarted = new Promise(resolve => { confirmRequest = resolve; });
+    const pendingSave = new Promise(resolve => { releaseSave = resolve; });
+    await editor.route('**/api/settings', async route => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      const submitted = route.request().postDataJSON().values;
+      confirmRequest();
+      await pendingSave;
+      await route.fulfill({ json: { saved: submitted, warnings: [] } });
+    });
+    try {
+      await editor.goto(`${base}/#settings`);
+      await editor.locator('#set-unknown-artist').fill('提交时的草稿');
+      await editor.locator('#btn-settings-save').click();
+      await saveStarted;
+      await editor.locator('#set-unknown-artist').fill('请求期间继续修改');
+      releaseSave();
+      await editor.waitForFunction(() => document.querySelector('#settings-result')?.textContent.includes('之后的修改仍是草稿'));
+      assert.equal(await editor.locator('#set-unknown-artist').inputValue(), '请求期间继续修改');
+      assert.match(await editor.locator('#settings-dirty').innerText(), /未保存/);
+      await editor.locator('#tab-tracks').click();
+      await editor.locator('#tab-settings').click();
+      assert.equal(await editor.locator('#set-unknown-artist').inputValue(), '请求期间继续修改');
+    } finally { releaseSave(); await isolated.close(); }
+  });
 
   console.log(`\n${checks.length} checks passed; ${failures.length} failed. Screenshots: ${outputDir}`);
   if (injectedRequests.length) console.log(`Observed ${injectedRequests.length} known local AdGuard injection requests; all other external requests were checked.`);

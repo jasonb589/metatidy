@@ -1,321 +1,368 @@
-/**
- * 页签 4：设置。
- * 表单 → PUT /api/settings（后端回 {saved, warnings}，warnings 直接显示在表单下方）；
- * 别名库两张可编辑表格 → PUT /api/aliases/{kind}；
- * 顶部状态卡展示后端真实路径，音乐目录不存在时红色告警。
- */
-
+/** Settings and aliases keep independent drafts across internal navigation. */
 import { api } from "./api.js";
 import * as ui from "./ui.js";
+import * as storage from "./storage.js";
 import { state, emit } from "./store.js";
 
 const SETTING_IDS = {
-  dir_template: "set-dir-template",
-  filename_template: "set-filename-template",
-  conflict_policy: "set-conflict",
-  unknown_artist: "set-unknown-artist",
-  unknown_album: "set-unknown-album",
-  unknown_other: "set-unknown-other",
+  dir_template: "set-dir-template", filename_template: "set-filename-template",
+  conflict_policy: "set-conflict", unknown_artist: "set-unknown-artist",
+  unknown_album: "set-unknown-album", unknown_other: "set-unknown-other",
 };
-
 const SWITCH_IDS = {
-  write_cover: "set-write-cover",
-  write_lyrics: "set-write-lyrics",
-  overwrite_existing: "set-overwrite",
-  normalize_artist_ampersand: "set-normalize",
+  write_cover: "set-write-cover", write_lyrics: "set-write-lyrics",
+  overwrite_existing: "set-overwrite", normalize_artist_ampersand: "set-normalize",
 };
-
+const aliasDrafts = Object.fromEntries(["artist", "album"].map((kind) => [kind, {
+  loaded: false, attempted: false, dirty: false, revision: 0, saving: false, loading: null, saved: [],
+}]));
 let nodes = null;
 let dirty = false;
+let revision = 0;
+let loaded = false;
+let saving = false;
+let sourceChoice = new Set();
+let sourceSignature = "";
 
 export function init() {
+  if (nodes) return;
   nodes = {
-    statusKv: ui.byId("status-kv"),
-    statusReload: ui.byId("btn-status-reload"),
-    dir: ui.byId("set-dir-template"),
-    filename: ui.byId("set-filename-template"),
-    conflict: ui.byId("set-conflict"),
-    unknownArtist: ui.byId("set-unknown-artist"),
-    unknownAlbum: ui.byId("set-unknown-album"),
-    unknownOther: ui.byId("set-unknown-other"),
-    sources: ui.byId("set-sources"),
-    writeCover: ui.byId("set-write-cover"),
-    writeLyrics: ui.byId("set-write-lyrics"),
-    overwrite: ui.byId("set-overwrite"),
-    normalize: ui.byId("set-normalize"),
-    save: ui.byId("btn-settings-save"),
-    reload: ui.byId("btn-settings-reload"),
-    dirtyHint: ui.byId("settings-dirty"),
+    statusKv: ui.byId("status-kv"), statusReload: ui.byId("btn-status-reload"),
+    dir: ui.byId("set-dir-template"), filename: ui.byId("set-filename-template"),
+    conflict: ui.byId("set-conflict"), unknownArtist: ui.byId("set-unknown-artist"),
+    unknownAlbum: ui.byId("set-unknown-album"), unknownOther: ui.byId("set-unknown-other"),
+    sources: ui.byId("set-sources"), writeCover: ui.byId("set-write-cover"),
+    writeLyrics: ui.byId("set-write-lyrics"), overwrite: ui.byId("set-overwrite"),
+    normalize: ui.byId("set-normalize"), save: ui.byId("btn-settings-save"),
+    reload: ui.byId("btn-settings-reload"), dirtyHint: ui.byId("settings-dirty"),
     result: ui.byId("settings-result"),
-    aliasArtistBody: ui.byId("alias-artist-body"),
-    aliasAlbumBody: ui.byId("alias-album-body"),
-    aliasArtistAdd: ui.byId("alias-artist-add"),
-    aliasAlbumAdd: ui.byId("alias-album-add"),
-    aliasArtistSave: ui.byId("alias-artist-save"),
-    aliasAlbumSave: ui.byId("alias-album-save"),
-    aliasArtistResult: ui.byId("alias-artist-result"),
-    aliasAlbumResult: ui.byId("alias-album-result"),
   };
+  ui.byId("panel-settings")?.classList.add("settings-workspace");
+  nodes.save.closest(".card")?.classList.add("settings-editor-card");
+  nodes.save.parentElement.classList.add("settings-save-bar");
+  nodes.dirtyHint.setAttribute("role", "status");
+  const editorHint = nodes.save.closest(".card")?.querySelector(".card-head .hint");
+  if (editorHint) editorHint.textContent = "保存后长期保留；未保存的草稿可在页面间继续编辑";
 
-  Object.values(SETTING_IDS).forEach((id) => {
-    const node = ui.byId(id);
-    if (node) node.addEventListener("input", markDirty);
-    if (node) node.addEventListener("change", markDirty);
-  });
-  Object.values(SWITCH_IDS).forEach((id) => {
-    const node = ui.byId(id);
-    if (node) node.addEventListener("change", markDirty);
-  });
-
+  for (const id of Object.values(SETTING_IDS)) {
+    ui.byId(id).disabled = true;
+    ui.byId(id)?.addEventListener("input", markDirty);
+    ui.byId(id)?.addEventListener("change", markDirty);
+  }
+  for (const id of Object.values(SWITCH_IDS)) {
+    ui.byId(id).disabled = true;
+    ui.byId(id)?.addEventListener("change", markDirty);
+  }
   nodes.save.addEventListener("click", saveSettings);
-  nodes.reload.addEventListener("click", () => {
-    fillForm();
-    ui.toast("info", "已还原为后端当前设置", "");
-  });
+  nodes.reload.addEventListener("click", discardSettings);
+  storage.init(nodes.statusKv, nodes.statusReload);
   nodes.statusReload.addEventListener("click", () => emit("status:refresh"));
 
-  nodes.aliasArtistAdd.addEventListener("click", () => addAliasRow(nodes.aliasArtistBody));
-  nodes.aliasAlbumAdd.addEventListener("click", () => addAliasRow(nodes.aliasAlbumBody));
-  nodes.aliasArtistSave.addEventListener("click", () => saveAliases("artist", nodes.aliasArtistBody, nodes.aliasArtistResult));
-  nodes.aliasAlbumSave.addEventListener("click", () => saveAliases("album", nodes.aliasAlbumBody, nodes.aliasAlbumResult));
+  for (const kind of ["artist", "album"]) initAliasEditor(kind);
+  updateSettingsDraft();
+  window.addEventListener("beforeunload", (event) => {
+    if (!isDirty()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
 }
 
 function markDirty() {
   dirty = true;
-  ui.setText(nodes.dirtyHint, "有未保存的修改");
-  nodes.dirtyHint.className = "hint hint-warn";
+  revision += 1;
+  updateSettingsDraft();
+}
+
+function updateSettingsDraft(message = "") {
+  nodes.dirtyHint.textContent = message || (dirty ? "有未保存的修改 · 切换页面会保留" : "已与保存的设置同步");
+  nodes.dirtyHint.className = `hint settings-draft ${dirty ? "hint-warn is-dirty" : ""}`;
+  nodes.save.disabled = saving || !loaded;
+  nodes.reload.disabled = saving || !loaded;
+  nodes.save.textContent = saving ? "保存中…" : "保存设置";
 }
 
 export function onStatus(status) {
-  const rows = [
-    ["版本", status.version || "—", ""],
-    ["音乐目录", status.music_dir || "—", status.music_dir_exists ? "good" : "bad"],
-    ["音乐目录存在", status.music_dir_exists ? "是" : "否 —— 扫描会直接失败", status.music_dir_exists ? "good" : "bad"],
-    ["库根目录（整理移动的边界）", status.library_root || "—", ""],
-    ["数据目录", status.data_dir || "—", ""],
-    ["数据库", status.db_path || "—", ""],
-    ["支持格式", (status.supported_formats || []).join("  "), ""],
-    [
-      "迁移层",
-      status.scraper && status.scraper.available
-        ? `可用（${status.scraper.count} 个源：${(status.scraper.sources || []).join("、") || "无"}）`
-        : "不可用（仅内置实现的数据源可用）",
-      status.scraper && status.scraper.available ? "good" : "bad",
-    ],
-    ["运行环境", status.docker ? "容器内（/.dockerenv 存在）" : "非容器进程", ""],
-  ];
-  ui.clear(nodes.statusKv);
-  const fragment = document.createDocumentFragment();
-  rows.forEach(([label, value, variant]) => {
-    fragment.append(ui.el("dt", { text: label }), ui.el("dd", { class: variant, title: value, text: value }));
-  });
-  nodes.statusKv.append(fragment);
-  if (!status.music_dir_exists) {
-    nodes.statusKv.append(
-      ui.el("dd", { style: { gridColumn: "1 / -1" } }, [
-        ui.notice("err", `音乐目录不存在：${status.music_dir} —— 扫描会失败，请检查 METATIDY_MUSIC_DIR 环境变量或挂载。`),
-      ]),
-    );
-  }
+  storage.onStatus(status);
 }
 
 function renderSourceDefaults() {
-  if (!nodes.sources) return;
-  const values = (state.settings && state.settings.values) || {};
-  const enabled = new Set(values.enabled_sources || []);
+  sourceSignature = JSON.stringify(state.sources);
   ui.clear(nodes.sources);
   if (!state.sources.length) {
     nodes.sources.append(ui.el("span", { class: "hint", text: "没有读取到数据源列表。" }));
     return;
   }
-  state.sources.forEach((source) => {
-    const input = ui.el("input", { type: "checkbox", checked: enabled.has(source.name), "aria-label": `默认启用数据源 ${source.label}` });
+  for (const source of state.sources) {
+    const input = ui.el("input", { type: "checkbox", checked: sourceChoice.has(source.name), "aria-label": `默认启用数据源 ${source.label}` });
     input.dataset.source = source.name;
-    input.addEventListener("change", markDirty);
-    nodes.sources.append(
-      ui.el("label", { class: "check", title: `${source.label} · ${source.status}${source.needs_key ? ` · 需要 ${source.needs_key}` : ""}` }, [
-        input,
-        ui.el("span", { text: source.label }),
-        ui.el("span", { class: `badge ${source.status === "不可用" ? "badge-warn" : "badge-mute"}`, text: source.status }),
-      ]),
-    );
-  });
-  nodes.sources.append(
-    ui.el("button", {
-      type: "button",
-      class: "btn btn-sm",
-      text: "全选",
+    input.addEventListener("change", () => {
+      if (input.checked) sourceChoice.add(source.name);
+      else sourceChoice.delete(source.name);
+      markDirty();
+    });
+    nodes.sources.append(ui.el("label", { class: "check", title: `${source.label} · ${source.status}${source.needs_key ? ` · 需要 ${source.needs_key}` : ""}` }, [
+      input, ui.el("span", { text: source.label }),
+      ui.el("span", { class: `badge ${source.status === "不可用" ? "badge-warn" : "badge-mute"}`, text: source.status }),
+    ]));
+  }
+  for (const [label, availableOnly] of [["全选", false], ["只留可用", true]]) {
+    nodes.sources.append(ui.el("button", {
+      type: "button", class: "btn btn-sm", text: label,
       onClick: () => {
-        nodes.sources.querySelectorAll("input[type=checkbox]").forEach((input) => {
-          input.checked = true;
-        });
+        for (const input of nodes.sources.querySelectorAll("input[type=checkbox]")) {
+          const source = state.sources.find((entry) => entry.name === input.dataset.source);
+          input.checked = !availableOnly || Boolean(source && source.status !== "不可用");
+          if (input.checked) sourceChoice.add(input.dataset.source);
+          else sourceChoice.delete(input.dataset.source);
+        }
         markDirty();
       },
-    }),
-    ui.el("button", {
-      type: "button",
-      class: "btn btn-sm",
-      text: "只留可用",
-      onClick: () => {
-        nodes.sources.querySelectorAll("input[type=checkbox]").forEach((input) => {
-          const source = state.sources.find((item) => item.name === input.dataset.source);
-          input.checked = Boolean(source && source.status !== "不可用");
-        });
-        markDirty();
-      },
-    }),
-  );
+    }));
+  }
 }
 
 export function onSettings() {
+  // Startup requests and tab navigation both call this hook. Neither may
+  // overwrite a draft, including edits made while a save is in flight.
+  if (!nodes || !state.settings?.values) return;
+  if (dirty || saving) {
+    // The source catalogue can arrive after settings. Keep existing choices
+    // when rendering that late response; it must not reset other draft fields.
+    if (sourceSignature !== JSON.stringify(state.sources)) renderSourceDefaults();
+    return;
+  }
   fillForm();
-  renderSourceDefaults();
 }
 
 function fillForm() {
-  const values = (state.settings && state.settings.values) || {};
-  nodes.dir.value = values.dir_template || "";
-  nodes.filename.value = values.filename_template || "";
-  ui.clear(nodes.conflict);
-  [
-    ["rename", "rename · 目标存在时自动改名"],
-    ["skip", "skip · 目标存在时跳过"],
-    ["overwrite", "overwrite · 目标存在时覆盖（谨慎）"],
-  ].forEach(([value, label]) => nodes.conflict.append(ui.el("option", { value, text: label })));
+  const values = state.settings?.values || {};
+  for (const [key, id] of Object.entries(SETTING_IDS)) {
+    ui.byId(id).disabled = false;
+    if (key !== "conflict_policy") ui.byId(id).value = values[key] || "";
+  }
+  nodes.conflict.replaceChildren(...[
+    ["rename", "目标存在时自动改名"], ["skip", "目标存在时跳过"], ["overwrite", "覆盖目标文件（谨慎）"],
+  ].map(([value, text]) => ui.el("option", { value, text })));
   nodes.conflict.value = values.conflict_policy || "rename";
-  nodes.unknownArtist.value = values.unknown_artist || "";
-  nodes.unknownAlbum.value = values.unknown_album || "";
-  nodes.unknownOther.value = values.unknown_other || "";
-  nodes.writeCover.checked = Boolean(values.write_cover);
-  nodes.writeLyrics.checked = Boolean(values.write_lyrics);
-  nodes.overwrite.checked = Boolean(values.overwrite_existing);
-  nodes.normalize.checked = Boolean(values.normalize_artist_ampersand);
+  for (const [key, id] of Object.entries(SWITCH_IDS)) {
+    ui.byId(id).disabled = false;
+    ui.byId(id).checked = Boolean(values[key]);
+  }
+  sourceChoice = new Set(values.enabled_sources || []);
+  renderSourceDefaults();
+  loaded = true;
   dirty = false;
-  ui.setText(nodes.dirtyHint, "与后端当前设置一致");
-  nodes.dirtyHint.className = "hint";
+  updateSettingsDraft();
 }
 
 function collectValues() {
-  const values = {
-    conflict_policy: nodes.conflict.value,
-    unknown_artist: nodes.unknownArtist.value,
-    unknown_album: nodes.unknownAlbum.value,
-    unknown_other: nodes.unknownOther.value,
-    write_cover: nodes.writeCover.checked,
-    write_lyrics: nodes.writeLyrics.checked,
-    overwrite_existing: nodes.overwrite.checked,
-    normalize_artist_ampersand: nodes.normalize.checked,
-    enabled_sources: [...nodes.sources.querySelectorAll("input[type=checkbox]")]
-      .filter((input) => input.checked)
-      .map((input) => input.dataset.source),
-  };
-  values.dir_template = nodes.dir.value;
-  values.filename_template = nodes.filename.value;
+  const values = Object.fromEntries(Object.entries(SETTING_IDS).map(([key, id]) => [key, ui.byId(id).value]));
+  for (const [key, id] of Object.entries(SWITCH_IDS)) values[key] = ui.byId(id).checked;
+  values.enabled_sources = [...sourceChoice];
   return values;
 }
 
+async function discardSettings() {
+  if (saving || !loaded) return;
+  if (dirty && !await ui.confirmDialog({
+    title: "放弃这份设置草稿？", message: "整理模板、默认数据源和写入开关将恢复为最近保存的设置。别名草稿会继续保留。",
+    confirmLabel: "放弃修改",
+  })) return;
+  revision += 1;
+  fillForm();
+  nodes.result.replaceChildren();
+  ui.toast("info", "已还原为最近保存的设置", "");
+}
+
 async function saveSettings() {
-  nodes.save.disabled = true;
-  nodes.save.textContent = "保存中…";
-  ui.clear(nodes.result);
+  if (saving || !loaded) return;
+  const payload = collectValues();
+  const submittedRevision = revision;
+  saving = true;
+  updateSettingsDraft();
+  nodes.result.replaceChildren();
   try {
-    const payload = collectValues();
     const response = await api.saveSettings(payload);
-    state.settings = { ...(state.settings || {}), values: { ...payload } };
-    const savedKeys = Object.keys(response.saved || {});
-    const warnings = response.warnings || [];
-    dirty = false;
-    ui.setText(nodes.dirtyHint, "已保存");
-    nodes.dirtyHint.className = "hint hint-ok";
-    nodes.result.append(
-      ui.el("div", { class: "result-block" }, [
-        ui.notice(warnings.length ? "warn" : "ok", `已保存 ${savedKeys.length} 项设置。${warnings.length ? "后端返回了模板警告：" : ""}`),
-        warnings.length ? ui.el("div", { class: "result-list" }, warnings.map((text) => ui.el("div", { class: "item" }, [ui.el("span", { class: "who", text })]))) : null,
-        ui.el("div", { class: "hint", text: "模板与开关对「整理移动」和「刮削写入」立即生效；默认数据源会自动同步到刮削页的初始勾选。" }),
-      ]),
-    );
-    ui.toast(warnings.length ? "warn" : "ok", "设置已保存", warnings.length ? `${warnings.length} 条警告` : "后端无警告");
+    state.settings = { ...(state.settings || {}), values: { ...payload, ...(response.saved || {}) } };
+    const warnings = Array.isArray(response.warnings) ? response.warnings : [];
+    const newerEdits = submittedRevision !== revision;
+    if (!newerEdits) dirty = false;
+    const message = newerEdits ? "提交时的设置已保存，之后的修改仍是草稿。" : `已保存 ${Object.keys(response.saved || {}).length} 项设置。`;
+    nodes.result.append(ui.el("div", { class: "result-block" }, [
+      ui.notice(warnings.length || newerEdits ? "warn" : "ok", message),
+      ...warnings.map((text) => ui.el("p", { class: "hint", text })),
+    ]));
+    ui.toast(warnings.length ? "warn" : "ok", newerEdits ? "已保存提交时的设置" : "设置已保存", newerEdits ? "新的修改还没有保存" : warnings.length ? `${warnings.length} 条模板提示` : "");
     emit("settings:saved");
-  } catch (err) {
-    ui.clear(nodes.result);
-    nodes.result.append(ui.notice("err", `保存失败：${err.message}`));
-    ui.toast("err", "保存设置失败", err.message);
+  } catch (error) {
+    nodes.result.replaceChildren(ui.notice("err", `保存失败：${error.message}`));
+    ui.toast("err", "保存设置失败", error.message);
   } finally {
-    nodes.save.disabled = false;
-    nodes.save.textContent = "保存设置";
+    saving = false;
+    updateSettingsDraft();
   }
 }
 
-/* ------------------------------------------------------------- 别名库 */
+function initAliasEditor(kind) {
+  const draft = aliasDrafts[kind];
+  draft.body = ui.byId(`alias-${kind}-body`);
+  draft.add = ui.byId(`alias-${kind}-add`);
+  draft.save = ui.byId(`alias-${kind}-save`);
+  draft.result = ui.byId(`alias-${kind}-result`);
+  const card = draft.body.closest(".card");
+  card.classList.add("settings-alias-card");
+  draft.hint = ui.el("span", { id: `alias-${kind}-dirty`, class: "hint settings-draft", role: "status" });
+  draft.reload = ui.el("button", {
+    type: "button", id: `alias-${kind}-reload`, class: "btn btn-sm btn-ghost", text: "放弃修改",
+    onClick: () => discardAliases(kind),
+  });
+  draft.result.before(ui.el("div", { class: "alias-draft-bar" }, [draft.hint, draft.reload]));
+  draft.add.textContent = "添加别名";
+  draft.add.addEventListener("click", () => {
+    if (!draft.loaded) return;
+    const row = addAliasRow(kind);
+    markAliasDirty(kind);
+    row.querySelector("input")?.focus();
+  });
+  draft.save.addEventListener("click", () => saveAliases(kind));
+  updateAliasDraft(kind);
+}
 
-function addAliasRow(tbody, item = { from: "", to: "" }) {
-  const tr = ui.el("tr", {});
-  const from = ui.el("input", { type: "text", value: item.from, "aria-label": "别名原名", placeholder: "原名" });
-  const to = ui.el("input", { type: "text", value: item.to, "aria-label": "别名替换为", placeholder: "替换为" });
-  tr.append(
-    ui.el("td", {}, [from]),
-    ui.el("td", {}, [to]),
-    ui.el("td", { class: "act" }, [
-      ui.el("button", {
-        type: "button",
-        class: "btn btn-sm btn-ghost",
-        text: "✕",
-        "aria-label": "删除这一行别名",
-        onClick: () => tr.remove(),
-      }),
-    ]),
-  );
-  tbody.append(tr);
+function markAliasDirty(kind) {
+  const draft = aliasDrafts[kind];
+  draft.dirty = true;
+  draft.revision += 1;
+  updateAliasDraft(kind);
+}
+
+function updateAliasDraft(kind) {
+  const draft = aliasDrafts[kind];
+  draft.hint.textContent = draft.loading ? "正在读取别名…" : draft.dirty ? "有未保存的别名 · 切换页面会保留" : draft.loaded ? "别名已保存" : "尚未读取别名";
+  draft.hint.className = `hint settings-draft ${draft.dirty ? "hint-warn is-dirty" : ""}`;
+  draft.save.disabled = draft.saving || !draft.loaded;
+  draft.save.textContent = draft.saving ? "保存中…" : "保存";
+  draft.add.disabled = !draft.loaded;
+  draft.reload.disabled = draft.saving || Boolean(draft.loading);
+  draft.reload.textContent = draft.loaded ? "放弃修改" : "重新读取";
+}
+
+function addAliasRow(kind, item = { from: "", to: "" }) {
+  const draft = aliasDrafts[kind];
+  const tr = ui.el("tr");
+  for (const [key, label] of [["from", "原名"], ["to", "替换为"]]) {
+    const input = ui.el("input", { type: "text", value: item[key] || "", "aria-label": `别名${label}`, placeholder: label });
+    input.addEventListener("input", () => {
+      input.removeAttribute("aria-invalid");
+      markAliasDirty(kind);
+    });
+    tr.append(ui.el("td", {}, [input]));
+  }
+  tr.append(ui.el("td", { class: "act" }, [ui.el("button", {
+    type: "button", class: "btn btn-sm btn-ghost", "aria-label": "删除这一行别名", title: "删除这一行别名",
+    onClick: () => { tr.remove(); markAliasDirty(kind); },
+  }, [ui.icon("close", { size: 14 })])]));
+  draft.body.append(tr);
   return tr;
 }
 
-async function loadAliases() {
-  for (const kind of ["artist", "album"]) {
-    const body = kind === "artist" ? nodes.aliasArtistBody : nodes.aliasAlbumBody;
-    try {
-      const data = await api.aliases(kind);
-      ui.clear(body);
-      const items = data.items || [];
-      if (!items.length) {
-        addAliasRow(body);
-      } else {
-        items.forEach((item) => addAliasRow(body, item));
-      }
-    } catch (err) {
-      ui.clear(body);
-      body.append(ui.el("tr", {}, [ui.el("td", { colspan: "3" }, [ui.notice("err", `读取失败：${err.message}`)])]));
-    }
-  }
+function renderAliases(kind, items) {
+  aliasDrafts[kind].body.replaceChildren();
+  for (const item of items.length ? items : [{ from: "", to: "" }]) addAliasRow(kind, item);
 }
 
-async function saveAliases(kind, tbody, resultHost) {
+function loadAliases(kind, { force = false } = {}) {
+  const draft = aliasDrafts[kind];
+  if (draft.loading) return draft.loading;
+  if ((draft.attempted && !force) || draft.dirty || draft.saving) return Promise.resolve();
+  draft.attempted = true;
+  const requestedRevision = draft.revision;
+  draft.loading = (async () => {
+    try {
+      const data = await api.aliases(kind);
+      draft.saved = (data.items || []).map((item) => ({ from: item.from, to: item.to }));
+      draft.loaded = true;
+      if (!draft.dirty && requestedRevision === draft.revision) renderAliases(kind, draft.saved);
+      draft.result.replaceChildren();
+    } catch (error) {
+      draft.result.replaceChildren(ui.notice("err", `读取别名失败：${error.message}。可点击「重新读取」重试。`));
+    } finally {
+      draft.loading = null;
+      updateAliasDraft(kind);
+    }
+  })();
+  updateAliasDraft(kind);
+  return draft.loading;
+}
+
+async function discardAliases(kind) {
+  const draft = aliasDrafts[kind];
+  if (draft.saving || draft.loading) return;
+  if (!draft.loaded) { await loadAliases(kind, { force: true }); return; }
+  if (draft.dirty && !await ui.confirmDialog({
+    title: `放弃${kind === "artist" ? "歌手" : "专辑"}别名草稿？`,
+    message: "这一组别名将恢复为最近保存的内容，其他设置与别名草稿会继续保留。", confirmLabel: "放弃修改",
+  })) return;
+  draft.revision += 1;
+  draft.dirty = false;
+  renderAliases(kind, draft.saved);
+  draft.result.replaceChildren();
+  updateAliasDraft(kind);
+}
+
+function collectAliases(kind) {
+  const draft = aliasDrafts[kind];
   const items = [];
-  tbody.querySelectorAll("tr").forEach((tr) => {
-    const inputs = tr.querySelectorAll("input");
-    if (inputs.length < 2) return;
-    const from = inputs[0].value.trim();
-    const to = inputs[1].value.trim();
-    if (from && to) items.push({ from, to });
-  });
-  const button = kind === "artist" ? nodes.aliasArtistSave : nodes.aliasAlbumSave;
-  button.disabled = true;
-  ui.clear(resultHost);
+  const seen = new Set();
+  for (const [index, row] of [...draft.body.querySelectorAll("tr")].entries()) {
+    const inputs = [...row.querySelectorAll("input")];
+    if (inputs.length < 2) continue;
+    const [from, to] = inputs.map((input) => input.value.trim());
+    if (!from && !to) continue;
+    if (!from || !to || seen.has(from)) {
+      const message = seen.has(from) ? `第 ${index + 1} 行的原名重复，请合并为一条。` : `第 ${index + 1} 行请填写原名和替换名，或删除这一行。`;
+      const target = !from || seen.has(from) ? inputs[0] : inputs[1];
+      target.setAttribute("aria-invalid", "true");
+      target.focus();
+      draft.result.replaceChildren(ui.notice("warn", message));
+      return null;
+    }
+    seen.add(from);
+    items.push({ from, to });
+  }
+  return items;
+}
+
+async function saveAliases(kind) {
+  const draft = aliasDrafts[kind];
+  if (draft.saving || !draft.loaded) return;
+  const items = collectAliases(kind);
+  if (!items) return;
+  const submittedRevision = draft.revision;
+  draft.saving = true;
+  draft.result.replaceChildren();
+  updateAliasDraft(kind);
   try {
-    const result = await api.saveAliases(kind, items);
-    resultHost.append(ui.notice("ok", `已保存 ${result.saved ?? items.length} 条${kind === "artist" ? "歌手" : "专辑"}别名。`));
-    ui.toast("ok", "别名库已保存", `${result.saved ?? items.length} 条`);
-  } catch (err) {
-    resultHost.append(ui.notice("err", `保存失败：${err.message}`));
-    ui.toast("err", "别名库保存失败", err.message);
+    const response = await api.saveAliases(kind, items);
+    draft.saved = items.map((item) => ({ ...item }));
+    const newerEdits = draft.revision !== submittedRevision;
+    if (!newerEdits) draft.dirty = false;
+    draft.result.append(ui.notice(newerEdits ? "warn" : "ok", newerEdits
+      ? "提交时的别名已保存，之后的修改仍是草稿。"
+      : `已保存 ${response.saved ?? items.length} 条${kind === "artist" ? "歌手" : "专辑"}别名。`));
+    ui.toast("ok", "别名库已保存", newerEdits ? "新的修改还没有保存" : `${response.saved ?? items.length} 条`);
+  } catch (error) {
+    draft.result.replaceChildren(ui.notice("err", `保存失败：${error.message}`));
+    ui.toast("err", "别名库保存失败", error.message);
   } finally {
-    button.disabled = false;
+    draft.saving = false;
+    updateAliasDraft(kind);
   }
 }
 
 export function refreshAll() {
-  loadAliases();
+  return Promise.allSettled([storage.ensureLoaded(), loadAliases("artist"), loadAliases("album")]);
 }
 
 export function isDirty() {
-  return dirty;
+  return dirty || Object.values(aliasDrafts).some((draft) => draft.dirty);
 }

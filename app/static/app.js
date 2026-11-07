@@ -13,6 +13,7 @@ import * as settings from "./settings.js";
 import * as theme from "./theme.js";
 import * as auth from "./auth.js";
 import * as palette from "./palette.js";
+import { renderJobs, parseResult } from "./jobs-panel.js";
 
 const TABS = ["tracks", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -30,7 +31,6 @@ let sessionReady = false;
 let closeSidebar = () => {};
 let closeJobs = () => {};
 let jobsRequest = null;
-let jobsSnapshot = "";
 let watchJobsReady = false;
 const completedWatchJobs = new Set();
 let pendingLibraryRefresh = false;
@@ -227,6 +227,7 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
   ui.setText(ui.byId("page-eyebrow"), copy.eyebrow);
   ui.setText(ui.byId("page-title"), copy.title);
   ui.setText(ui.byId("page-description"), copy.description);
+  ui.setText(ui.byId("header-page-name"), copy.title);
   document.title = `${copy.title} · metatidy`;
   document.body.dataset.page = name;
   if (dismissSidebar) closeSidebar();
@@ -578,9 +579,6 @@ function wireJobs() {
   setOpen(false);
 }
 
-/** 任务类型 → 图标名（未知类型不显示图标）。 */
-const JOB_KIND_ICONS = { scan: "scan", scrape: "search", move: "move" };
-
 /** 卡片小标题 → 图标名。纯装饰：文案对不上就不加，不影响任何功能。 */
 const CARD_ICONS = {
   "最近任务": "jobs",
@@ -612,13 +610,8 @@ function refreshJobs() {
   return jobsRequest;
 }
 
-function jobResult(job) {
-  if (job.result && typeof job.result === "object") return job.result;
-  try { return JSON.parse(job.result || "{}"); } catch { return {}; }
-}
-
 function isAutomaticScan(job) {
-  return job.kind === "scan" && (jobResult(job)?.trigger === "watch" || state.status?.auto_scan?.last_job_id === job.id);
+  return job.kind === "scan" && (parseResult(job).trigger === "watch" || state.status?.auto_scan?.last_job_id === job.id);
 }
 
 async function loadJobs() {
@@ -642,37 +635,7 @@ async function loadJobs() {
   badge.style.display = running === 0 ? "none" : "";
   if (badge.textContent !== String(running)) badge.textContent = String(running);
 
-  const snapshot = JSON.stringify(list);
-  if (snapshot === jobsSnapshot) return;
-  jobsSnapshot = snapshot;
-
-  const host = ui.byId("jobs-list");
-  ui.clear(host);
-  if (!list.length) {
-      host.append(ui.el("div", { class: "hint jobs-empty" }, [ui.icon("jobs", { size: 14 }), ui.el("span", { text: "还没有任务记录：扫描、批量刮削、整理执行都会出现在这里。" })]));
-    return;
-  }
-  list.forEach((job) => {
-    const percent = job.total ? Math.round((job.done / job.total) * 100) : null;
-    host.append(
-      ui.el("div", { class: "row", style: { gap: "var(--s2)", alignItems: "baseline" } }, [
-          ui.el("span", { class: "badge" }, [ui.icon(JOB_KIND_ICONS[job.kind], { size: 12 }), ui.el("span", { text: isAutomaticScan(job) ? "自动增量扫描" : ui.jobKindLabel(job.kind) })]),
-        ui.jobStateBadge(job.state),
-        ui.el("span", { class: "hint mono", text: job.id }),
-        ui.el("span", {
-          class: "hint",
-          text: job.state === "running" && job.total ? `${job.done}/${job.total}（${percent}%）` : job.state === "running" ? `已处理 ${job.done}` : "",
-        }),
-        ui.el("div", { class: "spacer" }),
-        ui.el("span", { class: "hint", text: ui.fmtTime(job.created_at) }),
-      ]),
-      ui.el("div", {
-        class: "hint mono truncate",
-        title: job.error || job.message || "",
-        text: job.error || job.message || "—",
-      }),
-    );
-  });
+  renderJobs(list, isAutomaticScan);
 }
 
 document.addEventListener("DOMContentLoaded", boot);

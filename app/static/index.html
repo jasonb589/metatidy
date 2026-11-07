@@ -7,6 +7,8 @@
     <!-- 图标是本地静态文件（镜像里离线可用）；同一份也拿去当 Arcane 的容器图标 -->
     <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="./styles.css">
+<link rel="stylesheet" href="./library-views.css">
+<link rel="stylesheet" href="./storage.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -74,7 +76,7 @@
 <div class="app-content">
 <header class="app-header">
   <button class="btn btn-ghost btn-icon sidebar-toggle" id="sidebar-toggle" aria-label="打开导航" aria-expanded="false" aria-controls="app-sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
-  <div class="breadcrumb"><span class="breadcrumb-mark" aria-hidden="true">m.</span><span>音乐工作台</span><span class="breadcrumb-slash">/</span><span>让收藏井井有条</span></div>
+  <div class="breadcrumb"><span class="breadcrumb-mark" aria-hidden="true">m.</span><span>音乐工作台</span><span class="breadcrumb-slash">/</span><span id="header-page-name">我的音乐库</span></div>
   <div class="header-right">
     <button class="btn btn-ghost btn-palette" id="btn-palette" title="命令面板（Ctrl/⌘ + K）"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>搜索或跳转</span><kbd>Ctrl K</kbd></button>
     <span class="header-divider"></span>
@@ -87,12 +89,13 @@
 
 <div class="jobs-pop" id="jobs-pop" data-open="false" role="region" aria-label="最近任务">
   <div class="card-head">
-    <h2>最近任务</h2>
+    <div class="jobs-heading"><p class="eyebrow">WORKSPACE ACTIVITY</p><h2>最近任务</h2></div>
     <div class="grow">
-      <button class="btn btn-sm btn-ghost" id="jobs-refresh">刷新</button>
+      <button class="btn btn-sm btn-ghost" id="jobs-refresh" title="刷新任务">刷新</button>
       <button class="btn btn-sm btn-ghost" id="jobs-close" aria-label="关闭任务面板">关闭</button>
     </div>
   </div>
+  <p class="jobs-summary" id="jobs-summary" role="status">工作记录，随时可查</p>
   <div class="card-body" id="jobs-list"></div>
 </div>
 
@@ -105,12 +108,10 @@
 <!-- ==================================================== 页签 1：曲库 -->
 <section class="panel" id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" data-panel="tracks" data-active="true">
   <div class="wrap">
-    <div class="library-intro">
-      <div class="intro-copy"><span class="intro-kicker"><span></span> A LITTLE ORDER. MORE MUSIC.</span><h2>好音乐，值得好好收藏<span>。</span></h2><p>补全封面与标签，让每一次翻阅，都遇见最初的心动。</p><a class="intro-link" href="#scrape">开始完善音乐资料 <span aria-hidden="true">↗</span></a></div>
-      <div class="record-scene" aria-hidden="true"><div class="record-orbit orbit-one"></div><div class="record-orbit orbit-two"></div><div class="record-sleeve"><span class="sleeve-label">THE<br>COLLECTION</span><span class="sleeve-line"></span><span class="sleeve-footer">SOUNDS LIKE HOME. &nbsp; VOL. 01</span></div><div class="vinyl"><div class="vinyl-label"><span>mt.</span><i></i><small>33⅓ RPM</small></div></div><span class="record-caption">CURATED WITH LOVE</span><span class="scene-spark spark-one">✳</span><span class="scene-spark spark-two">+</span></div>
+    <div class="library-overview">
+      <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
+      <div class="library-health" id="library-health" role="group" aria-label="音乐资料完整情况"></div>
     </div>
-    <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
-    <div class="library-health" id="library-health" role="group" aria-label="音乐资料完整情况"></div>
 
     <details class="card scan-options" id="scan-options">
       <summary><span class="disclosure-icon" aria-hidden="true">↻</span><span>扫描与导入</span><span class="hint">将新收藏加入音乐库</span><span class="disclosure-chevron" aria-hidden="true">⌄</span></summary>

@@ -1,0 +1,94 @@
+/* Storage diagnostics and persistent settings drafts. Theme tokens are shared. */
+.storage-panel > .card-body { padding: 22px; }
+.storage-intro { color: var(--fg-2); font-size: 13px; margin-bottom: 20px; }
+.storage-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.storage-card { min-width: 0; padding: 21px; border: 1px solid var(--line); border-radius: 13px; background: var(--bg-1); animation: storage-appear 240ms var(--ease-out) both; }
+.storage-card-featured { background: var(--accent-grad-soft); border-color: var(--accent-line); }
+.storage-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 17px; }
+.storage-icon { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 11px; background: var(--bg-2); color: var(--accent-2); }
+.storage-card-featured .storage-icon { border-color: var(--accent-line); background: var(--bg-1); }
+.storage-card h3 { font-size: 15px; letter-spacing: -.2px; margin-bottom: 13px; }
+.storage-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 20px; color: var(--fg-3); font-size: 10px; line-height: 1.4; white-space: nowrap; }
+.storage-pill::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.storage-pill-ok { color: var(--ok-fg); border-color: var(--ok-line); background: var(--ok-soft); }
+.storage-pill-warn { color: var(--warn-fg); border-color: var(--warn-line); background: var(--warn-soft); }
+.storage-pill-accent { color: var(--accent-2); border-color: var(--accent-line); background: var(--bg-1); }
+.storage-path { display: flex; flex-direction: column; gap: 5px; }
+.storage-path-label { color: var(--fg-3); font-size: 10px; }
+.storage-path code { font: 12px/1.65 var(--mono); color: var(--fg); overflow-wrap: anywhere; }
+.storage-card-copy { font-size: 11px; line-height: 1.85; color: var(--fg-2); margin-top: 15px; }
+.storage-metric { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 17px; }
+.storage-metric strong { font-size: clamp(23px,2vw,31px); line-height: 1.2; font-weight: 650; color: var(--accent-2); letter-spacing: -.6px; font-variant-numeric: tabular-nums; }
+.storage-metric > span { color: var(--fg-2); font-size: 11px; }
+.storage-database-name { margin: 4px 0 15px; font: 600 22px/1.3 var(--font); letter-spacing: -.6px; }
+.storage-store-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 17px; }
+.storage-store-tags > span { color: var(--fg-3); padding: 3px 7px; font-size: 10px; border: 1px solid var(--line); border-radius: 5px; }
+.storage-breakdown { margin-top: 15px; border-radius: 10px; overflow: hidden; background: var(--bg-2); }
+.storage-breakdown:empty { display: none; }
+.storage-cache-row { display: grid; grid-template-columns: minmax(170px,1fr) minmax(150px,1fr) auto; gap: 10px 20px; align-items: center; padding: 15px 18px; }
+.storage-cache-row + .storage-cache-row { border-top: 1px solid var(--line); }
+.storage-cache-row > div:first-child { display: flex; flex-direction: column; gap: 3px; }
+.storage-cache-row strong { font-size: 12px; font-weight: 550; }
+.storage-cache-row code { font: 11px/1.6 var(--mono); overflow-wrap: anywhere; color: var(--fg-2); }
+.storage-cache-size { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.storage-cache-error,.storage-cache-note { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.storage-cache-error { font-size: 11px; color: var(--warn-fg); }
+.storage-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 22px; }
+.storage-action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.storage-actions .btn { min-height: 40px; }
+.storage-probe-note { max-width: 720px; line-height: 1.75; margin-top: 10px; }
+.storage-feedback { margin-top: 14px; }
+.storage-feedback:empty { display: none; }
+.storage-check-summary { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; padding: 10px 12px; background: var(--ok-soft); border: 1px solid var(--ok-line); border-radius: 8px; color: var(--ok-fg); }
+.storage-check-summary.has-errors { color: var(--warn-fg); background: var(--warn-soft); border-color: var(--warn-line); }
+.storage-check-summary strong { font-size: 12px; font-weight: 550; }
+.storage-check-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 7px 0; }
+.storage-check-row code { font: 11px/1.7 var(--mono); overflow-wrap: anywhere; min-width: 0; }
+.storage-check-row > .hint { flex-basis: 100%; padding-left: 3px; overflow-wrap: anywhere; }
+.storage-check-help { margin-top: 6px; }
+.storage-host-note { padding: 14px 0 0; margin-top: 15px; border-top: 1px solid var(--line); line-height: 1.85; }
+.storage-service-details { margin-top: 14px; }
+.storage-service-details > summary { display: inline-flex; align-items: center; gap: 7px; color: var(--fg-2); font-size: 11px; cursor: pointer; list-style: none; padding: 4px 0; }
+.storage-service-details > summary::-webkit-details-marker { display: none; }
+.storage-service-details > summary::before { content: "›"; font-size: 18px; line-height: 1; transition: transform var(--t); }
+.storage-service-details[open] > summary::before { transform: rotate(90deg); }
+.storage-service-details .kv { margin: 12px 0 0; padding: 16px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; }
+.storage-service-details dd { overflow-wrap: anywhere; }
+.storage-report-text { min-height: 260px; height: auto; resize: vertical; font: 11px/1.65 var(--mono); }
+.settings-save-bar { padding-top: 17px; border-top: 1px solid var(--line); }
+.settings-draft { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
+.settings-draft.is-dirty::before { content: ""; width: 5px; height: 5px; flex: none; border-radius: 50%; background: var(--warn); }
+.alias-draft-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 14px; margin-top: 8px; border-top: 1px solid var(--line); }
+.settings-alias-card .alias-table input[aria-invalid="true"] { border-color: var(--warn); box-shadow: 0 0 0 2px var(--warn-soft); }
+.settings-alias-card .card-head h2 { font-size: 14px; }
+@keyframes storage-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (max-width: 1180px) {
+  .storage-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .storage-card:last-child { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(180px,.7fr) minmax(0,1fr); column-gap: 24px; }
+  .storage-card:last-child .storage-card-head { grid-column: 1 / -1; margin-bottom: 13px; }
+  .storage-card:last-child h3 { grid-column: 1; }
+  .storage-card:last-child .storage-database-name { grid-column: 1; margin-bottom: 0; }
+  .storage-card:last-child .storage-card-copy { grid-column: 2; grid-row: 2 / 4; margin-top: 0; }
+  .storage-card:last-child .storage-store-tags { grid-column: 1 / -1; margin-top: 14px; }
+}
+@media (max-width: 700px) {
+  .storage-panel > .card-body { padding: 16px; }
+  .storage-grid { grid-template-columns: minmax(0,1fr); gap: 10px; }
+  .storage-card { padding: 17px; }
+  .storage-card:last-child { display: block; }
+  .storage-card:last-child .storage-card-copy { margin-top: 14px; }
+  .storage-card-head { margin-bottom: 12px; }
+  .storage-cache-row { grid-template-columns: 1fr auto; gap: 6px 12px; padding: 14px; }
+  .storage-cache-row > code { grid-column: 1 / -1; grid-row: 2; }
+  .storage-cache-size { grid-row: 1; grid-column: 2; text-align: right; }
+  .storage-actions { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .storage-action-buttons { width: 100%; }
+  .storage-action-buttons > button { flex: 1; }
+  .settings-save-bar .settings-draft { flex-basis: 100%; }
+  .settings-alias-card .card-head { flex-wrap: wrap; }
+  .settings-alias-card .card-head .grow { gap: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .storage-card { animation: none; }
+  .storage-service-details > summary::before { transition: none; }
+}

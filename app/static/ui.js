@@ -73,6 +73,7 @@ const ICON_PATHS = {
   empty: "M2.6 9.4l2-4.4h6.8l2 4.4v3H2.6zM2.6 9.4h3l.8 1.4h3.2l.8-1.4h3",
   plus: "M8 3.5v9M3.5 8h9",
   disk: "M4 3.5h8A1.5 1.5 0 0 1 13.5 5v6A1.5 1.5 0 0 1 12 12.5H4A1.5 1.5 0 0 1 2.5 11V5A1.5 1.5 0 0 1 4 3.5zM2.5 9.2h11M11.3 10.8h.01",
+  copy: "M5.5 5.5h7v8h-7zM10.5 5.5v-3h-8v8h3",
 };
 
 export function icon(name, { size = 16, cls = "" } = {}) {
@@ -201,8 +202,21 @@ export function truncatedPath(text) {
   return String(text === null || text === undefined ? "" : text);
 }
 
+/** Finite artwork reveal, shared by list, grid and candidate covers. */
+export function enhanceArtwork(wrap, img) {
+  if (!wrap || !img) return wrap;
+  wrap.classList.add("artwork");
+  wrap.dataset.imageState = "loading";
+  const settle = () => { wrap.dataset.imageState = img.naturalWidth > 0 ? "loaded" : "failed"; };
+  img.addEventListener("load", settle, { once: true });
+  img.addEventListener("error", settle, { once: true });
+  // Cached images can finish before their DOM is attached.
+  if (img.complete) settle();
+  return wrap;
+}
+
 /** 封面缩略图：只有 has_cover 为真时才请求接口，避免满屏 404。 */
-export function coverThumb(row, { size = 48, big = false } = {}) {
+export function coverThumb(row, { size = 48, big = false, reveal = true } = {}) {
   const cls = big ? "thumb thumb-lg" : "thumb";
   const seed = String(row?.album || row?.artist || row?.title || row?.id || "music");
   let tone = 0;
@@ -220,6 +234,7 @@ export function coverThumb(row, { size = 48, big = false } = {}) {
     height: size,
   });
   const wrap = el("span", { class: cls, dataset: { tone }, title: `${row.title || row.filename || "封面"}` }, [img]);
+  if (reveal) enhanceArtwork(wrap, img);
   img.addEventListener(
     "error",
     () => {
@@ -248,6 +263,7 @@ export function remoteCover(url, { size = 64, label = "数据源封面" } = {}) 
     { once: true },
   );
   wrap.append(img);
+  enhanceArtwork(wrap, img);
   void size;
   return wrap;
 }

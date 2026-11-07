@@ -32,6 +32,7 @@ use crate::AppState;
 mod moves;
 mod scrape;
 mod status;
+mod storage;
 mod tracks;
 
 pub(crate) use moves::start_scan_job;
@@ -783,6 +784,8 @@ pub fn bad_kind() -> ApiError {
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/status", get(status::api_status))
+        .route("/api/storage", get(storage::info))
+        .route("/api/storage/check", post(storage::check))
         .route(
             "/api/settings",
             get(status::get_settings).put(status::put_settings),

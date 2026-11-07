@@ -20,6 +20,7 @@ import {
   selectionRows,
   selectionCount,
   removeFromSelection,
+  setCurrentTrack,
 } from "./store.js";
 
 const EDIT_FIELDS = [
@@ -99,6 +100,7 @@ export function init() {
     dlLanguages: ui.byId("dl-languages"),
     dlAlbumtypes: ui.byId("dl-albumtypes"),
   };
+  initLibraryViews();
 
   const debouncedSearch = ui.debounce(() => {
     state.tracks.q = nodes.q.value.trim();
@@ -168,6 +170,11 @@ export function init() {
       const checkbox = row.querySelector('input[type="checkbox"]');
       if (checkbox) checkbox.checked = selected;
     });
+    nodes.grid.querySelectorAll(".track-card[data-id]").forEach((card) => {
+      const selected = isSelected(card.dataset.id);
+      card.dataset.selected = String(selected);
+      card.querySelector('input[type="checkbox"]').checked = selected;
+    });
     syncPageCheckbox();
     renderSelectionBar();
   });
@@ -234,8 +241,6 @@ export function init() {
 
   nodes.checkPage.addEventListener("change", () => {
     selectRows(state.tracks.items, nodes.checkPage.checked);
-    renderTable();
-    renderSelectionBar();
   });
 
   document.querySelectorAll("th[data-sort-col] .th-sort").forEach((button) => {
@@ -285,6 +290,94 @@ export function init() {
   syncControls();
 }
 
+/** 视图只改变当前页的呈现；筛选、分页和跨页勾选继续共用原状态。 */
+function initLibraryViews() {
+  nodes.libraryCard = nodes.tableWrap.closest(".library-card");
+  nodes.viewControls = ui.el("div", { id: "library-view-controls", class: "library-view-controls" });
+  const views = ui.el("div", { class: "library-segment", role: "group", "aria-label": "曲目视图" });
+  for (const [value, label, icon] of [["list", "列表", "music"], ["cards", "封面", "cover"]]) {
+    views.append(ui.el("button", {
+      id: `view-${value}`, type: "button", "aria-pressed": String(value === "list"),
+      "aria-controls": value === "list" ? "tracks-table-wrap" : "tracks-grid",
+      "aria-label": `${label}视图`, title: value === "cards" ? "按曲目浏览封面卡片" : "以列表浏览曲目",
+      onClick: () => {
+        if (state.tracks.view === value) return;
+        state.tracks.view = value;
+        syncViewControls();
+        renderTableStatus();
+        renderCollection({ animate: false });
+        savePrefs();
+      },
+    }, [ui.icon(icon, { size: 14 }), ui.el("span", { text: label })]));
+  }
+  nodes.densityControls = ui.el("div", {
+    id: "library-density-controls", class: "library-segment library-density", role: "group", "aria-label": "列表密度",
+  });
+  for (const [value, label] of [["comfortable", "舒适"], ["compact", "紧凑"]]) {
+    nodes.densityControls.append(ui.el("button", {
+      id: `density-${value}`, type: "button", text: label,
+      "aria-pressed": String(value === "comfortable"), "aria-label": `${label}密度`,
+      onClick: () => {
+        state.tracks.density = value;
+        syncViewControls();
+        savePrefs();
+      },
+    }));
+  }
+  nodes.viewControls.append(views, nodes.densityControls);
+  const toolbar = nodes.quickFilters?.closest(".filter-toolbar") || nodes.q.closest(".library-toolbar");
+  toolbar.append(nodes.viewControls);
+
+  nodes.recentIndexed = ui.el("button", {
+    id: "quick-recent-indexed", type: "button", text: "最近索引", "aria-pressed": "false",
+    title: "按最近一次索引时间倒序排列，保留当前筛选。全量重扫也会更新索引时间。",
+    onClick: () => {
+      state.tracks.sort = "indexed";
+      state.tracks.order = "desc";
+      state.tracks.page = 1;
+      syncControls();
+      refresh();
+    },
+  });
+  nodes.quickFilters?.append(nodes.recentIndexed);
+
+  nodes.checkGridPage = ui.el("input", { id: "check-grid-page", type: "checkbox", "aria-label": "选择本页全部曲目" });
+  nodes.checkGridPage.addEventListener("change", () => selectRows(state.tracks.items, nodes.checkGridPage.checked));
+  nodes.gridControls = ui.el("div", { id: "tracks-grid-controls", class: "tracks-grid-controls", hidden: true }, [
+    ui.el("label", { class: "check" }, [nodes.checkGridPage, ui.el("span", { text: "选择本页" })]),
+    ui.el("span", { class: "hint", text: "每张封面代表一首曲目" }),
+  ]);
+  nodes.grid = ui.el("ul", { id: "tracks-grid", class: "tracks-grid", "aria-label": "曲目封面卡片", hidden: true });
+  nodes.tableWrap.after(nodes.gridControls, nodes.grid);
+  nodes.grid.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-edit-id], button[data-scrape-id]");
+    if (!button) return;
+    const id = button.dataset.editId || button.dataset.scrapeId;
+    const row = state.tracks.items.find((item) => String(item.id) === id);
+    if (!row) return;
+    if (button.dataset.editId) openEdit([row]);
+    else {
+      setCurrentTrack(row);
+      location.hash = "#scrape";
+    }
+  });
+}
+
+function syncViewControls() {
+  nodes.libraryCard.dataset.libraryView = state.tracks.view;
+  nodes.libraryCard.dataset.libraryDensity = state.tracks.density;
+  for (const view of ["list", "cards"]) ui.byId(`view-${view}`).setAttribute("aria-pressed", String(state.tracks.view === view));
+  for (const density of ["comfortable", "compact"]) ui.byId(`density-${density}`).setAttribute("aria-pressed", String(state.tracks.density === density));
+  nodes.densityControls.hidden = state.tracks.view !== "list";
+}
+
+function showCollection(visible) {
+  const cards = state.tracks.view === "cards";
+  nodes.tableWrap.hidden = !visible || cards;
+  nodes.grid.hidden = !visible || !cards;
+  nodes.gridControls.hidden = !visible || !cards || !state.tracks.items.length;
+}
+
 function applyFilter(key, value) {
   state.tracks.filters[key] = value;
   syncFilterShortcuts();
@@ -314,6 +407,7 @@ function syncControls() {
   nodes.fLyrics.checked = state.tracks.filters.missing_lyrics;
   nodes.fNoArtist.checked = state.tracks.filters.no_artist;
   nodes.fNoAlbum.checked = state.tracks.filters.no_album;
+  syncViewControls();
   syncFilterShortcuts();
 }
 
@@ -330,6 +424,7 @@ function syncFilterShortcuts() {
   nodes.health?.querySelectorAll("button[data-health-filter]").forEach((button) => {
     button.setAttribute("aria-pressed", String(Boolean(filters[button.dataset.healthFilter])));
   });
+  nodes.recentIndexed.setAttribute("aria-pressed", String(state.tracks.sort === "indexed" && state.tracks.order === "desc"));
 }
 
 /* ------------------------------------------------- 筛选 chips / 偏好 / 键盘 */
@@ -385,6 +480,8 @@ function savePrefs() {
         sort: state.tracks.sort,
         order: state.tracks.order,
         page_size: state.tracks.page_size,
+        view: state.tracks.view,
+        density: state.tracks.density,
         filters: state.tracks.filters,
       }),
     );
@@ -402,6 +499,8 @@ function loadPrefs() {
       if (typeof saved.sort === "string") state.tracks.sort = saved.sort;
       if (saved.order === "asc" || saved.order === "desc") state.tracks.order = saved.order;
       if ([50, 100, 200].includes(Number(saved.page_size))) state.tracks.page_size = Number(saved.page_size);
+      if (saved.view === "list" || saved.view === "cards") state.tracks.view = saved.view;
+      if (saved.density === "comfortable" || saved.density === "compact") state.tracks.density = saved.density;
       FILTER_KEYS.forEach((key) => {
         const value = saved.filters ? saved.filters[key] : undefined;
         if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = value;
@@ -416,7 +515,7 @@ function loadPrefs() {
 /** 键盘导航：`/` 聚焦搜索、`↑↓` 选行、`Enter` 打开编辑、空格勾选、`Esc` 取消。 */
 function wireTableKeys() {
   let activeRow = null;
-  const rows = () => [...nodes.tbody.querySelectorAll("tr[data-id]")];
+  const rows = () => [...(state.tracks.view === "cards" ? nodes.grid.querySelectorAll(".track-card[data-id]") : nodes.tbody.querySelectorAll("tr[data-id]"))];
 
   function setActive(row) {
     rows().forEach((r) => r.classList.remove("is-active"));
@@ -424,6 +523,7 @@ function wireTableKeys() {
     if (activeRow) {
       activeRow.classList.add("is-active");
       activeRow.scrollIntoView({ block: "nearest" });
+      if (state.tracks.view === "cards") activeRow.focus({ preventScroll: true });
     }
   }
 
@@ -443,12 +543,15 @@ function wireTableKeys() {
   document.addEventListener("keydown", (event) => {
     // 隐藏的曲库与浮层不抢别的工作区的键盘操作。
     if (state.tab !== "tracks" || state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
-    if (activeRow && !activeRow.isConnected) activeRow = null;
+    if (activeRow && (!activeRow.isConnected || !rows().includes(activeRow))) activeRow = null;
     const target = event.target;
+    if (target?.closest?.("#jobs-pop")) return;
+    const focusedCard = target?.closest?.(".track-card[data-id]");
+    if (focusedCard && target === focusedCard) activeRow = focusedCard;
     const tag = (target && target.tagName) || "";
     const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || Boolean(target && target.isContentEditable);
-    // 已聚焦按钮/链接时不抢方向键与空格，让它们保持原生行为
-    const interactive = typing || tag === "BUTTON" || tag === "A";
+    // 按钮、链接和原生展开控件保留自己的键盘行为。
+    const interactive = typing || tag === "BUTTON" || tag === "A" || tag === "SUMMARY";
 
     if (event.key === "/" && !typing) {
       event.preventDefault();
@@ -461,18 +564,23 @@ function wireTableKeys() {
       return;
     }
     if (interactive) return;
+    const cards = state.tracks.view === "cards";
+    const columns = cards ? Math.max(1, getComputedStyle(nodes.grid).gridTemplateColumns.split(" ").length) : 1;
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      move(1);
+      move(columns);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      move(-1);
+      move(-columns);
+    } else if (cards && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      move(event.key === "ArrowRight" ? 1 : -1);
     } else if (event.key === " " && activeRow) {
       event.preventDefault();
       activeRow.querySelector('input[type="checkbox"]')?.click();
     } else if (event.key === "Enter" && activeRow) {
       event.preventDefault();
-      const btn = activeRow.querySelector("td:last-child button") || activeRow.querySelector("button");
+      const btn = activeRow.querySelector("button[data-edit-id]");
       btn?.click();
     }
   });
@@ -488,8 +596,8 @@ export async function refresh({ background = false, canApply = () => true } = {}
     syncFilterShortcuts();
     renderFilterChips();
     renderTableStatus();
-    // 后台更新保留现有行，直到结果就绪且编辑操作结束。
-    renderTable();
+    // 首屏才需要骨架；已有内容等回包后再替换，避免重播封面和行入场。
+    if (!state.tracks.items.length) renderCollection();
   }
   const params = {
     q: state.tracks.q,
@@ -522,7 +630,7 @@ export async function refresh({ background = false, canApply = () => true } = {}
   }
   if (sequence !== refreshSequence) return;
   renderTableStatus();
-  renderTable({ animate: !background });
+  renderCollection({ animate: !background });
   renderPager();
   renderSelectionBar();
   renderFilterChips();
@@ -627,16 +735,18 @@ function fillDatalist(list, values) {
 function renderTableStatus() {
   ui.clear(nodes.tableStatus);
   nodes.tableWrap.setAttribute("aria-busy", String(state.tracks.loading));
+  nodes.grid.setAttribute("aria-busy", String(state.tracks.loading));
   nodes.reload.disabled = state.tracks.loading;
   if (state.tracks.loading && !state.tracks.items.length) {
     nodes.tableStatus.append(ui.loadingLine("正在读取索引…"));
+    showCollection(true);
     return;
   }
   if (state.tracks.error) {
     nodes.tableStatus.append(ui.emptyState("warn", "暂时无法读取曲库", state.tracks.error, [
       ui.el("button", { type: "button", class: "btn", text: "重新加载", onClick: () => refresh() }),
     ]));
-    nodes.tableWrap.hidden = true;
+    showCollection(false);
     return;
   }
   const stats = (state.status && state.status.stats) || {};
@@ -651,7 +761,7 @@ function renderTableStatus() {
         }),
       ]),
     );
-    nodes.tableWrap.hidden = true;
+    showCollection(false);
     return;
   }
   if (!state.tracks.total) {
@@ -668,10 +778,99 @@ function renderTableStatus() {
         }),
       ]),
     );
-    nodes.tableWrap.hidden = true;
+    showCollection(false);
     return;
   }
-  nodes.tableWrap.hidden = false;
+  showCollection(true);
+}
+
+function renderCollection({ animate = true } = {}) {
+  const focused = document.activeElement;
+  const oldRow = focused?.closest("tr[data-id], .track-card[data-id]");
+  const action = focused?.matches('input[type="checkbox"]') ? 'input[type="checkbox"]'
+    : focused?.matches("button[data-edit-id]") ? "button[data-edit-id]"
+      : focused?.matches("button[data-scrape-id]") ? "button[data-scrape-id]" : null;
+  if (state.tracks.view === "cards") {
+    ui.clear(nodes.tbody);
+    renderCards({ animate });
+  } else {
+    ui.clear(nodes.grid);
+    renderTable({ animate });
+  }
+  syncPageCheckbox();
+  ui.setText(nodes.total, `共 ${ui.fmtNum(state.tracks.total)} 首`);
+  if (state.tracks.loadedAt) ui.setText(nodes.updated, `列表更新于 ${ui.fmtTime(state.tracks.loadedAt / 1000)}`);
+  // 后台更新后仍能继续 Tab/空格操作当前曲目，不让焦点掉回页面顶部。
+  if (!animate && oldRow) {
+    const host = state.tracks.view === "cards" ? nodes.grid : nodes.tbody;
+    const replacement = [...host.querySelectorAll("[data-id]")].find((row) => row.dataset.id === oldRow.dataset.id);
+    if (action) replacement?.querySelector(action)?.focus({ preventScroll: true });
+    else if (focused === oldRow && state.tracks.view === "cards") replacement?.focus({ preventScroll: true });
+  }
+}
+
+function cardArtwork(row, reveal = true) {
+  let tone = 0;
+  for (const char of String(row.album || row.artist || row.title || row.id)) tone = (tone * 31 + char.codePointAt(0)) % 6;
+  const art = ui.el("div", { class: "track-card-art", dataset: { tone } });
+  const fallback = (failed = false) => {
+    art.classList.add("is-placeholder");
+    art.title = failed ? "封面暂时无法读取" : "暂无内嵌封面";
+    art.append(ui.icon("music", { size: 38 }), ui.el("span", { text: failed ? "封面暂不可用" : "等待一张封面" }));
+  };
+  if (row.has_cover) {
+    const img = ui.el("img", { src: coverUrl(row.id, 256), width: 256, height: 256, alt: "", loading: "lazy", decoding: "async" });
+    img.addEventListener("error", () => { img.remove(); fallback(true); }, { once: true });
+    art.append(img);
+    if (reveal) ui.enhanceArtwork?.(art, img);
+  } else fallback();
+  return art;
+}
+
+function renderCards({ animate = true } = {}) {
+  ui.clear(nodes.grid);
+  if (state.tracks.loading && !state.tracks.items.length) {
+    for (let index = 0; index < 8; index += 1) nodes.grid.append(ui.el("li", { class: "track-card card-skeleton", "aria-hidden": "true" }, [
+      ui.el("div", { class: "track-card-art" }), ui.el("div", { class: "card-skeleton-line" }), ui.el("div", { class: "card-skeleton-line short" }),
+    ]));
+    showCollection(true);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  state.tracks.items.forEach((row, index) => {
+    const title = row.title || row.filename || "（无标题）";
+    const format = String(row.ext || (row.filename || "").match(/\.([^./\\]+)$/)?.[1] || "").replace(/^\./, "").toUpperCase();
+    const card = ui.el("li", {
+      class: `track-card${animate && index < 8 ? " card-enter" : ""}`,
+      dataset: { id: row.id, selected: String(isSelected(row.id)) }, tabindex: "-1", "aria-labelledby": `card-title-${row.id}`,
+      style: animate && index < 8 ? { animationDelay: `${index * 18}ms` } : null,
+    });
+    const checkbox = ui.el("input", { type: "checkbox", checked: isSelected(row.id), "aria-label": `选择曲目 ${title}` });
+    checkbox.addEventListener("change", () => toggleSelect(row, checkbox.checked));
+    const art = cardArtwork(row, animate);
+    card.append(
+      ui.el("div", { class: "track-card-top" }, [
+        art,
+        ui.el("label", { class: "track-card-select", title: `选择 ${title}` }, [checkbox]),
+        !row.has_lyrics ? ui.el("span", { class: "card-missing-lyrics", text: "待补歌词" }) : null,
+      ]),
+      ui.el("div", { class: "track-card-body" }, [
+        ui.el("h3", { id: `card-title-${row.id}`, class: "track-card-title truncate", title: row.path || title, text: title }),
+        ui.el("p", { class: "track-card-artist truncate", title: row.artist || "未知艺术家", text: row.artist || "未知艺术家" }),
+        ui.el("p", { class: "track-card-album truncate", title: row.album || "尚未填写专辑", text: row.album || "尚未填写专辑" }),
+        ui.el("div", { class: "track-card-meta" }, [
+          format ? ui.el("span", { class: "format-tag", text: format }) : null,
+          ui.el("span", { text: [ui.fmtDuration(row.duration), row.year].filter(Boolean).join(" · ") || "待完善资料" }),
+        ]),
+        ui.el("div", { class: "track-card-actions" }, [
+          ui.el("button", { type: "button", class: "btn btn-sm card-edit", dataset: { editId: String(row.id) }, "aria-label": `编辑 ${title} 的元数据` }, [ui.icon("edit", { size: 13 }), "编辑"]),
+          ui.el("button", { type: "button", class: "btn btn-sm btn-ghost card-scrape", dataset: { scrapeId: String(row.id) }, "aria-label": `为 ${title} 查找元数据` }, [ui.icon("search", { size: 13 }), "刮削"]),
+        ]),
+      ]),
+    );
+    fragment.append(card);
+  });
+  nodes.grid.append(fragment);
 }
 
 function renderTable({ animate = true } = {}) {
@@ -683,7 +882,7 @@ function renderTable({ animate = true } = {}) {
   if (state.tracks.loading && !rows.length) {
     ui.skeletonRows(8).forEach((tr) => fragment.append(tr));
     nodes.tbody.append(fragment);
-    nodes.tableWrap.hidden = false; // 骨架行得看得见（空结果时容器本来是收起的）
+    showCollection(true); // 骨架行得看得见（空结果时容器本来是收起的）
     return;
   }
 
@@ -713,7 +912,7 @@ function renderTable({ animate = true } = {}) {
 
     tr.append(
       ui.el("td", { class: "col-check" }, [checkbox]),
-      ui.el("td", {}, [ui.coverThumb(row, { size: 48 })]),
+      ui.el("td", {}, [ui.coverThumb(row, { size: 48, reveal: animate })]),
       ui.el("td", {}, [
         ui.el("span", {
           class: "truncate cell-title",
@@ -779,9 +978,11 @@ function renderTable({ animate = true } = {}) {
 function syncPageCheckbox() {
   const rows = state.tracks.items;
   const selected = rows.filter((row) => isSelected(row.id)).length;
-  nodes.checkPage.checked = rows.length > 0 && selected === rows.length;
-  nodes.checkPage.indeterminate = selected > 0 && selected < rows.length;
-  nodes.checkPage.disabled = rows.length === 0;
+  for (const checkbox of [nodes.checkPage, nodes.checkGridPage]) {
+    checkbox.checked = rows.length > 0 && selected === rows.length;
+    checkbox.indeterminate = selected > 0 && selected < rows.length;
+    checkbox.disabled = rows.length === 0;
+  }
 }
 
 function renderSelectionBar() {

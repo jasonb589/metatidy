@@ -46,6 +46,8 @@ export const state = {
     q: "",
     sort: "artist",
     order: "asc",
+    view: "list",
+    density: "comfortable",
     filters: {
       language: "",
       albumtype: "",
