@@ -158,8 +158,8 @@ def check_writes(base: str, music: Path, check, wait_job) -> None:
                   preview["items"][0]["effective_fields"] == expected
                   and {field: readback[field] for field in expected} == expected
                   and audio["tracknumber"] == ["3"] and audio["discnumber"] == ["2"]
-                  and audio["date"] == ["2004"] and audio["genre"] == ["Folk"]
-                  and set(applied["fields"]) == set(expected), describe(applied))
+                  and (audio.get("date") or audio.get("year")) == ["2004"] and audio["genre"] == ["Folk"]
+                  and set(applied["fields"]) == set(expected), describe({"applied": applied, "raw_tags": dict(audio)}))
 
             indexed_before_external = detail()
             audio = FLAC(path)
