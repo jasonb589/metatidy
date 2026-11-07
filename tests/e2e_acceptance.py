@@ -253,6 +253,11 @@ def main() -> int:
             }, timeout=180).json()
             check("写歌词：后端回报 lyrics=true", wrote.get("lyrics") is True,
                   json.dumps(wrote, ensure_ascii=False)[:160])
+            # 回归守卫：fields 显式给了空数组 = 一个字段都不写。这里曾被当成「没指定」
+            # 而回退成 7 个默认字段，于是用户没勾的 title/artist/album/... 被改掉了。
+            check("写歌词：没有顺手写别的字段（空 fields = 不写字段）",
+                  wrote.get("written") == [],
+                  f"written={wrote.get('written')!r}（应为空数组）")
             back = FLAC(song["path"])
             lyric_keys = [key for key in back.keys() if "lyric" in key.lower()]
             check("写歌词：磁盘上真的有歌词", bool(lyric_keys) and bool(back.get(lyric_keys[0])),

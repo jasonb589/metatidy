@@ -129,6 +129,18 @@ pub async fn search(State(state): State<AppState>, body: Bytes) -> ApiResult {
     Ok(Json(body))
 }
 
+/// 解析 `fields`：**显式给的空数组 = 一个字段都不写**，只有键完全缺失才回退默认字段全集。
+///
+/// 这里曾经把「空数组」也当成「没指定」，于是界面里一个字段都不勾、只勾「写封面 / 写歌词」时，
+/// 后端会默默写入 title / artist / album / albumartist / genre / year / albumtype 七个字段 ——
+/// 用户明确没勾的字段被改掉了（真机复现：fields=[] 时这七个字段全被覆盖）。
+fn resolve_write_fields(payload: &Map<String, Value>) -> Result<Vec<String>, ApiError> {
+    if payload.contains_key("fields") {
+        return super::body_str_list(payload, "fields");
+    }
+    Ok(DEFAULT_WRITE_FIELDS.iter().map(|s| (*s).to_string()).collect())
+}
+
 /// `POST /api/scrape/apply`：单首，把候选字段写进文件。
 pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let payload = parse_body(&body)?;
@@ -147,10 +159,7 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
             None,
         ));
     }
-    let mut fields = super::body_str_list(&payload, "fields")?;
-    if fields.is_empty() {
-        fields = DEFAULT_WRITE_FIELDS.iter().map(|s| (*s).to_string()).collect();
-    }
+    let fields = resolve_write_fields(&payload)?;
     let write_cover = super::body_bool(&payload, "write_cover", false)?;
     let write_lyrics = super::body_bool(&payload, "write_lyrics", false)?;
     let normalize_artist = super::body_bool(&payload, "normalize_artist", true)?;
@@ -185,10 +194,7 @@ pub async fn batch(State(state): State<AppState>, body: Bytes) -> ApiResult {
     if ids.is_empty() {
         return Err(ApiError::bad_request("至少选择一首"));
     }
-    let mut fields = super::body_str_list(&payload, "fields")?;
-    if fields.is_empty() {
-        fields = DEFAULT_WRITE_FIELDS.iter().map(|s| (*s).to_string()).collect();
-    }
+    let fields = resolve_write_fields(&payload)?;
     let requested = super::body_str_list(&payload, "sources")?;
     let sources = if requested.is_empty() {
         enabled_sources(&state).await
@@ -625,4 +631,35 @@ fn is_blank(value: &Value) -> bool {
 /// 取字符串字段（局部小工具，避免把 `Map` 拆开传）。
 fn body_str_of(payload: &Map<String, Value>, key: &str) -> String {
     super::body_str(payload, key, "").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn explicit_empty_fields_means_write_no_field() {
+        // 界面里一个字段都不勾、只勾「写封面 / 写歌词」时，前端发来的就是空数组。
+        // 这里曾被当成「没指定」而回退成 7 个默认字段 —— 用户明确没勾的字段被改了。
+        let got = resolve_write_fields(&payload(json!({"fields": []}))).unwrap();
+        assert!(got.is_empty(), "显式空数组必须解析成 0 个字段，实际 {got:?}");
+    }
+
+    #[test]
+    fn missing_fields_key_still_falls_back_to_defaults() {
+        // 只有键完全缺失（老的 API 客户端）才回退默认字段全集
+        let got = resolve_write_fields(&payload(json!({"track_id": 1}))).unwrap();
+        let want: Vec<String> = DEFAULT_WRITE_FIELDS.iter().map(|s| (*s).to_string()).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn given_fields_are_kept_as_is() {
+        let got = resolve_write_fields(&payload(json!({"fields": ["title", "genre"]}))).unwrap();
+        assert_eq!(got, vec!["title".to_string(), "genre".to_string()]);
+    }
 }
