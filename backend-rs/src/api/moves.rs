@@ -58,6 +58,7 @@ pub async fn move_preview(State(state): State<AppState>, body: Bytes) -> ApiResu
             year: filter_text(&filters, "year"),
             artist: filter_text(&filters, "artist"),
             album: filter_text(&filters, "album"),
+            album_group: None,
             missing_cover: filter_bool(&filters, "missing_cover"),
             missing_lyrics: filter_bool(&filters, "missing_lyrics"),
             no_artist: filter_bool(&filters, "no_artist"),

@@ -7,6 +7,7 @@ import { api, ApiError } from "./api.js";
 import * as ui from "./ui.js";
 import { state, on } from "./store.js";
 import * as tracks from "./tracks.js";
+import * as albums from "./albums.js";
 import * as scrape from "./scrape.js";
 import * as move from "./move.js";
 import * as settings from "./settings.js";
@@ -16,9 +17,10 @@ import * as palette from "./palette.js";
 import { renderJobs, parseResult } from "./jobs-panel.js";
 import { initKeyboardHelp } from "./keyboard-help.js";
 
-const TABS = ["tracks", "scrape", "move", "settings"];
+const TABS = ["tracks", "albums", "scrape", "move", "settings"];
 const PAGE_COPY = {
   tracks: { eyebrow: "YOUR MUSIC ARCHIVE", title: "我的音乐库", description: "收藏有序，热爱如初。" },
+  albums: { eyebrow: "THE ALBUM COLLECTION", title: "专辑收藏", description: "让散落的曲目，在专辑里重逢。" },
   scrape: { eyebrow: "METADATA DISCOVERY", title: "元数据刮削", description: "找到每首歌的完整故事。" },
   move: { eyebrow: "LIBRARY ORGANIZATION", title: "整理音乐库", description: "让每一份收藏，都有自己的位置。" },
   settings: { eyebrow: "MAKE IT YOURS", title: "工作台设置", description: "按照你的习惯，打理你的音乐。" },
@@ -37,11 +39,15 @@ const completedWatchJobs = new Set();
 let pendingLibraryRefresh = false;
 let libraryRefreshRunning = false;
 let libraryRefreshTimer = 0;
+let pendingAlbumsRefresh = false;
+let albumsRefreshRunning = false;
+let albumsRefreshTimer = 0;
 
 function boot() {
   if (booted) return;
   booted = true;
   tracks.init();
+  albums.init();
   scrape.init();
   move.init();
   settings.init();
@@ -61,10 +67,12 @@ function boot() {
 
   on("status:refresh", () => {
     if (!canUseWorkspace()) return;
+    invalidateAlbums();
     loadStatus().catch(() => {});
   });
   on("tracks:refresh", () => {
     if (!canUseWorkspace()) return;
+    invalidateAlbums();
     tracks.refresh().catch(() => {});
   });
   on("settings:saved", () => {
@@ -83,6 +91,15 @@ function boot() {
       document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
     }).catch(reportNavigationError);
   });
+  on("albums:open", (group) => {
+    if (!canUseWorkspace() || !tracks.setAlbumScope(group)) return;
+    void showScopedTracks();
+  });
+  on("albums:all-tracks", (options = {}) => {
+    if (!canUseWorkspace()) return;
+    tracks.setAllTracksScope(options);
+    void showScopedTracks();
+  });
 
   window.addEventListener("error", (event) => {
     ui.toast("err", "界面脚本出错", event.message || String(event.error || ""));
@@ -96,6 +113,15 @@ function boot() {
   startGuarded().catch((err) => {
     ui.toast("err", "初始化失败", err && err.message ? err.message : String(err));
   });
+}
+
+async function showScopedTracks() {
+  try {
+    const needsLoad = !loadedTabs.has("tracks");
+    await activateTab("tracks", { focus: false });
+    if (!needsLoad) await tracks.refresh();
+    if (state.tab === "tracks" && canUseWorkspace()) ui.byId("tracks-q")?.focus({ preventScroll: true });
+  } catch (error) { reportNavigationError(error); }
 }
 
 /**
@@ -139,6 +165,7 @@ async function pollBackgroundState() {
   if (!canUseWorkspace()) return;
   await Promise.allSettled([loadStatus({ lightweight: true }), refreshJobs()]);
   scheduleLibraryRefresh();
+  scheduleAlbumsRefresh();
 }
 
 function canRefreshLibrary({ allowLoading = false } = {}) {
@@ -181,10 +208,40 @@ function wireLibraryUpdates() {
   on("edit:closed", scheduleLibraryRefresh);
   for (const event of ["focusout", "click", "keyup", "close"]) {
     document.addEventListener(event, scheduleLibraryRefresh, true);
+    document.addEventListener(event, scheduleAlbumsRefresh, true);
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void pollBackgroundState();
   });
+}
+
+function invalidateAlbums() {
+  albums.invalidate();
+  pendingAlbumsRefresh = true;
+  scheduleAlbumsRefresh();
+}
+
+function canRefreshAlbums() {
+  return state.tab === "albums" && canUseWorkspace() && document.visibilityState === "visible"
+    && !hasForegroundOverlay() && !document.activeElement?.closest(".albums-toolbar, #albums-pager");
+}
+
+function scheduleAlbumsRefresh() {
+  if (!pendingAlbumsRefresh || albumsRefreshTimer || state.tab !== "albums") return;
+  albumsRefreshTimer = window.setTimeout(() => {
+    albumsRefreshTimer = 0;
+    void flushAlbumsRefresh();
+  }, 150);
+}
+
+async function flushAlbumsRefresh() {
+  if (!pendingAlbumsRefresh || albumsRefreshRunning || albums.isLoading() || !canRefreshAlbums()) return;
+  pendingAlbumsRefresh = false;
+  albumsRefreshRunning = true;
+  try {
+    if (await albums.refresh({ background: true, canApply: canRefreshAlbums }) === false) pendingAlbumsRefresh = true;
+  } catch { pendingAlbumsRefresh = true; }
+  finally { albumsRefreshRunning = false; }
 }
 
 /* ------------------------------------------------------------------ 页签 */
@@ -222,6 +279,7 @@ function reportNavigationError(err) {
 async function activateTab(name, { focus = true, dismissSidebar = true, scroll = true } = {}) {
   if (!TABS.includes(name) || !canUseWorkspace()) return;
   const changed = name !== state.tab;
+  if (state.tab === "albums" && name !== "albums") albums.leave();
   state.tab = name;
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.tab === name;
@@ -253,6 +311,10 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
   if (name === "tracks" && !loadedTabs.has("tracks")) {
     loadedTabs.add("tracks");
     await tracks.refresh();
+  } else if (name === "albums") {
+    pendingAlbumsRefresh = false;
+    await albums.activate();
+    loadedTabs.add("albums");
   } else if (name === "scrape") {
     await scrape.refreshAll();
     loadedTabs.add("scrape");
@@ -280,6 +342,7 @@ function setWorkspaceLocked(locked) {
     closeSidebar({ restoreFocus: false });
     closeJobs({ restoreFocus: false });
     palette.closePalette();
+    albums.leave();
     // 原生 dialog 位于浏览器顶层，会遮住登录框；失效会话下按取消处理。
     document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
     const drawer = ui.byId("edit-drawer");
@@ -632,7 +695,10 @@ async function loadJobs() {
   const list = data.jobs || [];
   for (const job of list) {
     if (job.state !== "done" || !isAutomaticScan(job)) continue;
-    if (watchJobsReady && !completedWatchJobs.has(job.id)) pendingLibraryRefresh = true;
+    if (watchJobsReady && !completedWatchJobs.has(job.id)) {
+      pendingLibraryRefresh = true;
+      invalidateAlbums();
+    }
     completedWatchJobs.add(job.id);
   }
   watchJobsReady = true;

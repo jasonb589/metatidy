@@ -18,6 +18,9 @@
 .keyboard-shortcuts dt, .keyboard-shortcuts dd { margin: 0; }
 .keyboard-shortcuts dd { color: var(--fg-2); font-size: 12px; }
 .keyboard-shortcuts kbd { padding: 4px 7px; color: var(--fg); }
+.filter-chip { max-width: 100%; }
+.filter-chip > b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-chip > .x { flex: none; }
 
 /* One stable toolbar across selection changes; entry motion only on its first appearance. */
 #selection-bar { flex-wrap: wrap; animation: none; gap: 10px; padding: 11px 14px; }

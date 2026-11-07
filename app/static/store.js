@@ -49,6 +49,7 @@ export const state = {
     view: "list",
     density: "comfortable",
     filters: {
+      album_group: "",
       artist: "",
       album: "",
       language: "",

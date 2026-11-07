@@ -29,6 +29,7 @@ use crate::models::{FieldChange, Track};
 use crate::repo;
 use crate::AppState;
 
+mod albums;
 mod moves;
 mod scrape;
 mod status;
@@ -792,6 +793,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/sources", get(status::api_sources))
         .route("/api/tracks", get(tracks::list_tracks))
+        .route("/api/albums", get(albums::list_albums))
         .route("/api/tracks/preview", post(tracks::preview))
         .route("/api/tracks/apply", post(tracks::apply))
         .route("/api/tracks/:track_id", get(tracks::detail))

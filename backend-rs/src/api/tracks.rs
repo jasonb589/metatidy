@@ -66,6 +66,7 @@ pub async fn list_tracks(
         year: query.str("year", ""),
         artist: query.str("artist", ""),
         album: query.str("album", ""),
+        album_group: super::albums::parse_album_group(query.0.get("album_group"))?,
         missing_cover: query.bool("missing_cover", false)?,
         missing_lyrics: query.bool("missing_lyrics", false)?,
         no_artist: query.bool("no_artist", false)?,

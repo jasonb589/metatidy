@@ -12,6 +12,7 @@ import * as ui from "./ui.js";
 import { openTrackDetails } from "./track-inspector.js";
 import { initSavedFilters } from "./saved-filters.js";
 import { showKeyboardHelp } from "./keyboard-help.js";
+import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
 import {
   state,
   emit,
@@ -48,8 +49,8 @@ const EDIT_FIELDS = [
 /** 打开面板时从文件里读回来的歌词基线：只有改动过才带进预览 / 写入。 */
 let lyricsBase = "";
 
-const FILTER_KEYS = ["artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
-const SORT_KEYS = ["artist", "album", "title", "year", "track", "path", "indexed", "edited"];
+const FILTER_KEYS = ["album_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
+const SORT_KEYS = ["artist", "album", "title", "year", "track", "disc_track", "path", "indexed", "edited"];
 
 let nodes = null;
 let editTrigger = null;
@@ -57,6 +58,7 @@ let refreshSequence = 0;
 let editRevision = 0;
 let lyricsInputRevision = 0;
 let savedFilters = null;
+let cancelPendingSearch = () => {};
 
 export function init() {
   nodes = {
@@ -115,6 +117,7 @@ export function init() {
     state.tracks.page = 1;
     refresh();
   }, 300);
+  cancelPendingSearch = debouncedSearch.cancel;
 
   nodes.q.addEventListener("input", () => {
     // 先保存文字，避免防抖期间点击快捷筛选时被旧 query 覆盖。
@@ -445,11 +448,30 @@ function applyFilter(key, value) {
 }
 
 function resetFilters() {
+  cancelPendingSearch();
   FILTER_KEYS.forEach((key) => {
     state.tracks.filters[key] = typeof state.tracks.filters[key] === "boolean" ? false : "";
   });
   state.tracks.q = "";
   state.tracks.page = 1;
+  syncControls();
+}
+
+/** Prepare an exact album scope before app.js navigates and loads the track page. */
+export function setAlbumScope(group) {
+  const encoded = normalizeAlbumGroup(JSON.stringify([group?.album, group?.album_artist]));
+  if (!encoded) return false;
+  resetFilters();
+  state.tracks.filters.album_group = encoded;
+  state.tracks.sort = "disc_track";
+  state.tracks.order = "asc";
+  syncControls();
+  return true;
+}
+
+export function setAllTracksScope({ no_album = false } = {}) {
+  resetFilters();
+  state.tracks.filters.no_album = Boolean(no_album);
   syncControls();
 }
 
@@ -494,6 +516,7 @@ function syncFilterShortcuts() {
 
 /** 筛选键 → 中文名（chips 上显示）。 */
 const FILTER_LABELS = {
+  album_group: "专辑分组",
   artist: "艺术家",
   album: "专辑",
   language: "语言",
@@ -524,7 +547,7 @@ function renderFilterChips() {
     const text =
       typeof value === "boolean"
         ? FILTER_LABELS[key] || key
-        : `${FILTER_LABELS[key] || key}：${value}`;
+        : `${FILTER_LABELS[key] || key}：${key === "album_group" ? albumGroupLabel(value) : value}`;
     const x = ui.el("button", { class: "x", type: "button", title: "移除这个条件", "aria-label": `移除筛选：${text}`, text: "×" });
     x.addEventListener("click", () => {
       state.tracks.filters[key] = typeof value === "boolean" ? false : "";
@@ -532,7 +555,7 @@ function renderFilterChips() {
       state.tracks.page = 1;
       refresh();
     });
-    box.append(ui.el("span", { class: "filter-chip" }, [ui.el("b", { text }), x]));
+    box.append(ui.el("span", { class: "filter-chip", dataset: { filterKey: key } }, [ui.el("b", { text }), x]));
   });
 }
 
@@ -569,6 +592,7 @@ function loadPrefs() {
       if (saved.density === "comfortable" || saved.density === "compact") state.tracks.density = saved.density;
       FILTER_KEYS.forEach((key) => {
         const value = saved.filters ? saved.filters[key] : undefined;
+        if (key === "album_group") { state.tracks.filters[key] = normalizeAlbumGroup(value); return; }
         if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = typeof value === "string" ? value.slice(0, 1000) : value;
       });
     }

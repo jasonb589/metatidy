@@ -242,12 +242,14 @@ pub struct TrackQuery {
     pub year: String,
     pub artist: String,
     pub album: String,
+    /// Exact normalized album group from the album browser, including blank artists.
+    pub album_group: Option<(String, String)>,
     pub missing_cover: bool,
     pub missing_lyrics: bool,
     pub no_artist: bool,
     pub no_album: bool,
     /// Rust 侧新增：只取「还没读过标签」的索引（快速扫描的产物）。
-    /// Python 版没有这个查询参数，前端也没有对应控件，纯属增量能力。
+    /// Python 版没有这个查询参数；用于曲库的「待读标签」筛选。
     pub not_loaded: bool,
     /// 只取这些 id（空 = 不限制）。用于移动预览的 `ids` 分支与批量预览。
     pub ids: Vec<i64>,
@@ -302,6 +304,12 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
             clauses.push(format!("{column} = ${}", placeholder(&params)));
         }
     }
+    if let Some((album, artist)) = &query.album_group {
+        params.push(Param::Text(album.clone()));
+        clauses.push(format!("{ALBUM_NAME_EXPR} = ${}", placeholder(&params)));
+        params.push(Param::Text(artist.clone()));
+        clauses.push(format!("{ALBUM_ARTIST_EXPR} = ${}", placeholder(&params)));
+    }
     if query.missing_cover {
         clauses.push("has_cover = false".to_string());
     }
@@ -312,7 +320,7 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         clauses.push("artist = ''".to_string());
     }
     if query.no_album {
-        clauses.push("album = ''".to_string());
+        clauses.push(format!("{ALBUM_NAME_EXPR} = ''"));
     }
     if query.not_loaded {
         clauses.push("tags_loaded = false".to_string());
@@ -344,7 +352,7 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     let direction = if query.order_desc { "DESC" } else { "ASC" };
     let page_size = query.page_size.clamp(1, 1000);
     let page = query.page.max(1);
-    let offset = (page - 1) * page_size;
+    let offset = (page - 1).saturating_mul(page_size);
 
     let count_sql = format!("SELECT count(*) FROM tracks{where_sql}");
     let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
@@ -356,8 +364,25 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     }
     let total = count_query.fetch_one(pool).await?;
 
+    let order_sql = if query.sort == "disc_track" {
+        // Tag strings can contain totals ("2/12"), blanks or arbitrary text.
+        // Cast only bounded ASCII digits so one malformed tag cannot fail a page.
+        let numeric = |column: &str, fallback: &str| {
+            format!(
+                "CASE WHEN BTRIM(split_part({column}, '/', 1)) ~ '^[0-9]{{1,9}}$' \
+                 THEN BTRIM(split_part({column}, '/', 1))::bigint ELSE {fallback} END"
+            )
+        };
+        format!(
+            "{} {direction}, {} {direction} NULLS LAST, id ASC",
+            numeric("disc", "1"),
+            numeric("track", "NULL")
+        )
+    } else {
+        format!("{sort_expr} {direction}, id ASC")
+    };
     let list_sql = format!(
-        "SELECT {TRACK_COLUMNS} FROM tracks{where_sql} ORDER BY {sort_expr} {direction}, id ASC LIMIT ${} OFFSET ${}",
+        "SELECT {TRACK_COLUMNS} FROM tracks{where_sql} ORDER BY {order_sql} LIMIT ${} OFFSET ${}",
         params.len() + 1,
         params.len() + 2
     );
@@ -379,6 +404,124 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         page,
         page_size,
         pages: if total == 0 { 0 } else { (total + page_size - 1) / page_size },
+        items,
+    })
+}
+
+/// These expressions are shared by album grouping and its exact track filter.
+/// Album-artist tags keep compilations together; track artist is the fallback.
+const ALBUM_NAME_EXPR: &str = "BTRIM(album)";
+const ALBUM_ARTIST_EXPR: &str = "COALESCE(NULLIF(BTRIM(albumartist), ''), BTRIM(artist))";
+
+#[derive(Debug, Clone)]
+pub struct AlbumQuery {
+    pub q: String,
+    pub page: i64,
+    pub page_size: i64,
+    pub sort: String,
+    pub incomplete: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct AlbumSummary {
+    pub album: String,
+    pub album_artist: String,
+    pub track_count: i64,
+    pub disc_count: i64,
+    pub duration: f64,
+    pub bytes: i64,
+    pub missing_cover: i64,
+    pub missing_lyrics: i64,
+    pub not_loaded: i64,
+    pub cover_track_id: Option<i64>,
+    pub year: String,
+    pub indexed_at: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PagedAlbums {
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub pages: i64,
+    pub items: Vec<AlbumSummary>,
+}
+
+/// Literal substring search: user-entered percent/underscore are not wildcards.
+fn album_search_pattern(query: &str) -> String {
+    format!(
+        "%{}%",
+        query.trim().replace('!', "!!").replace('%', "!%").replace('_', "!_")
+    )
+}
+
+/// Album browsing never stats paths or opens audio files. Count and page share a
+/// short repeatable-read snapshot so scans cannot change the page between queries.
+pub async fn list_albums(pool: &PgPool, query: &AlbumQuery) -> anyhow::Result<PagedAlbums> {
+    let pattern = album_search_pattern(&query.q);
+    let where_sql = format!(
+        "{ALBUM_NAME_EXPR} <> '' AND \
+         ({ALBUM_NAME_EXPR} ILIKE $1 ESCAPE '!' OR {ALBUM_ARTIST_EXPR} ILIKE $1 ESCAPE '!')"
+    );
+    let having_sql = if query.incomplete {
+        " HAVING bool_or(NOT has_cover OR NOT has_lyrics OR NOT tags_loaded)"
+    } else {
+        ""
+    };
+    let grouped_sql = format!(
+        "SELECT {ALBUM_NAME_EXPR} AS album, {ALBUM_ARTIST_EXPR} AS album_artist, \
+         count(*) AS track_count, \
+         count(DISTINCT COALESCE(NULLIF(BTRIM(disc), ''), '1')) AS disc_count, \
+         COALESCE(sum(duration), 0)::double precision AS duration, \
+         COALESCE(sum(size), 0)::bigint AS bytes, \
+         count(*) FILTER (WHERE NOT has_cover) AS missing_cover, \
+         count(*) FILTER (WHERE NOT has_lyrics) AS missing_lyrics, \
+         count(*) FILTER (WHERE NOT tags_loaded) AS not_loaded, \
+         min(id) FILTER (WHERE has_cover) AS cover_track_id, \
+         CASE WHEN count(DISTINCT NULLIF(BTRIM(year), '')) = 1 \
+              THEN min(NULLIF(BTRIM(year), '')) ELSE '' END AS year, \
+         extract(epoch from max(indexed_at))::double precision AS indexed_at \
+         FROM tracks WHERE {where_sql} \
+         GROUP BY {ALBUM_NAME_EXPR}, {ALBUM_ARTIST_EXPR}{having_sql}"
+    );
+    // Sort expressions are constants; query values are always bound parameters.
+    let order_sql = match query.sort.as_str() {
+        "artist" => "album_artist ASC, album ASC",
+        "recent" => "indexed_at DESC, album ASC, album_artist ASC",
+        _ => "album ASC, album_artist ASC",
+    };
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let count_sql = format!("SELECT count(*) FROM ({grouped_sql}) AS albums");
+    let total = sqlx::query_scalar::<_, i64>(&count_sql)
+        .bind(&pattern)
+        .fetch_one(&mut *transaction)
+        .await?;
+    let page_size = query.page_size.clamp(1, 100);
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / page_size + 1
+    };
+    let page = query.page.clamp(1, pages.max(1));
+    let offset = (page - 1) * page_size;
+    let list_sql = format!(
+        "SELECT * FROM ({grouped_sql}) AS albums ORDER BY {order_sql} LIMIT $2 OFFSET $3"
+    );
+    let items = sqlx::query_as::<_, AlbumSummary>(&list_sql)
+        .bind(&pattern)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(PagedAlbums {
+        total,
+        page,
+        page_size,
+        pages,
         items,
     })
 }
@@ -406,11 +549,11 @@ pub async fn library_stats(pool: &PgPool) -> anyhow::Result<LibraryStats> {
         "SELECT
             count(*),
             count(DISTINCT NULLIF(artist, '')),
-            count(DISTINCT NULLIF(album, '')),
+            count(DISTINCT NULLIF(BTRIM(album), '')),
             count(*) FILTER (WHERE NOT has_cover),
             count(*) FILTER (WHERE NOT has_lyrics),
             count(*) FILTER (WHERE artist = ''),
-            count(*) FILTER (WHERE album = ''),
+            count(*) FILTER (WHERE BTRIM(album) = ''),
             count(*) FILTER (WHERE NOT tags_loaded),
             COALESCE(sum(size), 0)::bigint
          FROM tracks",

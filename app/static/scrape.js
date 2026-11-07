@@ -49,6 +49,80 @@ let fetchedLyrics = null;
 let panelTouched = false;
 // 用户对「写封面」的意愿（null = 还没表达过）；候选没有封面时会临时取消勾选
 let coverWanted = null;
+// A search result belongs to the current-track identity captured at its start.
+// Object identity also rejects A → B → A and same-track replacement searches.
+let activeSearchScope = null;
+let candidateScope = null;
+let observedTrackId = null;
+let choiceRevision = 0;
+let lyricsRevision = 0;
+let lyricsBusy = false;
+let pendingWrite = null;
+let pickRevision = 0;
+
+function currentTrackId() {
+  const id = Number(state.currentTrackId);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function isCurrentScope(scope) {
+  return Boolean(scope && scope === activeSearchScope && scope.currentId === currentTrackId());
+}
+
+function chosenCandidate() {
+  return isCurrentScope(candidateScope) ? state.scrape.candidates[state.scrape.chosenIndex] : null;
+}
+
+function captureChoice() {
+  const candidate = chosenCandidate();
+  return candidate ? { scope: candidateScope, candidate, revision: choiceRevision } : null;
+}
+
+function isCurrentChoice(choice) {
+  if (!choice || !isCurrentScope(choice.scope) || choice.scope !== candidateScope
+      || choice.revision !== choiceRevision || choice.candidate !== chosenCandidate()) return false;
+  const row = currentTrackRow();
+  return Boolean(row && choice.scope.trackId !== null && Number(row.id) === choice.scope.trackId);
+}
+
+function syncSingleControls() {
+  const choice = captureChoice();
+  const writable = isCurrentChoice(choice);
+  nodes.searchBtn.disabled = state.scrape.searching;
+  nodes.searchBtn.textContent = state.scrape.searching ? "搜索中…" : "搜索候选";
+  nodes.applyBtn.disabled = !writable || lyricsBusy || Boolean(pendingWrite);
+  nodes.applyBtn.textContent = pendingWrite
+    ? pendingWrite.submitted ? "正在写入…" : "预览中…"
+    : "预览差异并写入";
+  nodes.applyBtn.title = writable ? "" : "请为当前曲目重新搜索并选择候选后再写入";
+  nodes.lyricsTry.disabled = !writable || lyricsBusy || Boolean(pendingWrite);
+  nodes.lyricsTry.textContent = lyricsBusy ? "试抓中…" : "试抓歌词";
+}
+
+function invalidateCandidates(message = "") {
+  activeSearchScope = null;
+  candidateScope = null;
+  choiceRevision += 1;
+  lyricsRevision += 1;
+  lyricsBusy = false;
+  fetchedLyrics = null;
+  // Submitted writes must finish against their captured target. An obsolete
+  // preview can be discarded immediately so the new track remains usable.
+  if (pendingWrite && !pendingWrite.submitted) pendingWrite = null;
+  state.scrape.searching = false;
+  state.scrape.searched = false;
+  state.scrape.candidates = [];
+  state.scrape.sourceStatus = [];
+  state.scrape.chosenIndex = -1;
+  state.scrape.chosenFields = new Set();
+  state.scrape.error = "";
+  ui.clear(nodes.searchState);
+  ui.clear(nodes.result);
+  if (message) nodes.searchState.append(ui.notice("info", message));
+  renderCandidates();
+  renderSourceStatus();
+  renderWritePanel();
+}
 
 export function init() {
   nodes = {
@@ -184,9 +258,16 @@ export function init() {
     renderPick();
   });
   on("current:changed", () => {
+    const nextId = currentTrackId();
+    if (nextId !== observedTrackId) {
+      observedTrackId = nextId;
+      invalidateCandidates("当前曲目已切换，请重新搜索并选择候选。");
+    }
     renderPick();
     syncSearchFields();
   });
+  observedTrackId = currentTrackId();
+  window.addEventListener("metatidy:unauthorized", () => invalidateCandidates());
 }
 
 /* ------------------------------------------------------------- 数据源 */
@@ -247,6 +328,7 @@ function renderSources() {
 /* ------------------------------------------------------------- 选曲 */
 
 export async function refreshPick() {
+  const revision = ++pickRevision;
   state.scrape.loadingPick = true;
   const params = {
     q: state.scrape.pickQ,
@@ -257,19 +339,23 @@ export async function refreshPick() {
   };
   try {
     const data = await api.tracks(params);
+    if (revision !== pickRevision) return;
     state.scrape.pickItems = data.items || [];
     state.scrape.pickTotal = data.total || 0;
     state.scrape.pickPages = data.pages || 1;
     state.scrape.pickPage = data.page || 1;
   } catch (err) {
+    if (revision !== pickRevision) return;
     state.scrape.pickItems = [];
     state.scrape.pickTotal = 0;
     state.scrape.pickPages = 1;
     ui.toast("err", "读取曲目失败", err.message);
   } finally {
-    state.scrape.loadingPick = false;
+    if (revision === pickRevision) state.scrape.loadingPick = false;
   }
   renderPick();
+  syncSearchFields();
+  syncSingleControls();
 }
 
 function renderPick() {
@@ -377,15 +463,14 @@ async function runSearch() {
     return;
   }
   const limit = Math.max(1, Math.min(10, Number(nodes.limit.value) || 3));
-  nodes.searchBtn.disabled = true;
-  nodes.searchBtn.textContent = "搜索中…";
-  ui.clear(nodes.searchState);
+  invalidateCandidates();
+  const scope = { currentId: currentTrackId(), trackId: row ? Number(row.id) : null };
+  activeSearchScope = scope;
+  state.scrape.searching = true;
+  syncSingleControls();
   nodes.searchState.append(
     ui.loadingLine(`正在并发查询 ${state.sourceChoice.size} 个数据源（每源最多 ${limit} 条，慢源最多等 20 秒）…`),
   );
-  state.scrape.chosenIndex = -1;
-  state.scrape.chosenFields = new Set();
-  renderWritePanel();
   try {
     const result = await api.search({
       track_id: row ? Number(row.id) : null,
@@ -394,6 +479,8 @@ async function runSearch() {
       sources: [...state.sourceChoice],
       limit,
     });
+    if (!isCurrentScope(scope)) return;
+    candidateScope = scope;
     state.scrape.candidates = result.candidates || [];
     state.scrape.sourceStatus = result.source_status || [];
     state.scrape.searched = true;
@@ -409,16 +496,19 @@ async function runSearch() {
       ),
     );
   } catch (err) {
+    if (!isCurrentScope(scope)) return;
     state.scrape.candidates = [];
     state.scrape.sourceStatus = [];
     state.scrape.error = err.message;
     ui.clear(nodes.searchState);
     nodes.searchState.append(ui.notice("err", `搜索失败：${err.message}`));
   } finally {
-    nodes.searchBtn.disabled = false;
-    nodes.searchBtn.textContent = "搜索候选";
-    renderCandidates();
-    renderSourceStatus();
+    if (isCurrentScope(scope)) {
+      state.scrape.searching = false;
+      renderCandidates();
+      renderSourceStatus();
+      renderWritePanel();
+    }
   }
 }
 
@@ -497,6 +587,12 @@ function renderCandidates() {
 }
 
 function chooseCandidate(index) {
+  if (!isCurrentScope(candidateScope) || !state.scrape.candidates[index]) return;
+  choiceRevision += 1;
+  lyricsRevision += 1;
+  lyricsBusy = false;
+  if (pendingWrite && !pendingWrite.submitted) pendingWrite = null;
+  ui.clear(nodes.result);
   state.scrape.chosenIndex = index;
   fetchedLyrics = null; // 换了候选，之前试抓的那一份就不能再用了
   const cand = state.scrape.candidates[index] || {};
@@ -517,7 +613,7 @@ function chooseCandidate(index) {
  *
  * - 候选自带歌词 → 直接展示（行数 / 字数 + 全文）；
  * - 候选不带歌词 → 说明可以点「试抓歌词」让后端按标题/歌手去查（不假装有）；
- * - 写入完成后 → 用后端返回的**真实写入内容**刷新（`written: true`）。 */
+ * - 写入完成后 → 有本次提交的歌词正文时展示；只有写入标志时提示到曲目详情读取。 */
 function renderLyricsPreview(cand, { written = false, source = "" } = {}) {
   const box = nodes.lyricsBox;
   if (!box) return;
@@ -548,40 +644,39 @@ function setLyricsBody(text, meta) {
 
 /** 「试抓歌词」：不写文件，只按当前候选的标题/歌手去链路上查一次。 */
 async function tryFetchLyrics() {
-  const row = currentTrackRow();
-  const cand = state.scrape.candidates[state.scrape.chosenIndex];
-  if (!row || !cand) {
+  const choice = captureChoice();
+  if (!isCurrentChoice(choice)) {
     ui.toast("warn", "先选一个候选", "试抓用的是当前候选的标题/歌手（和写入时同一组关键词）。");
     return;
   }
-  const btn = nodes.lyricsTry;
-  btn.disabled = true;
-  btn.textContent = "试抓中…";
+  const cand = choice.candidate;
+  const revision = ++lyricsRevision;
+  lyricsBusy = true;
+  fetchedLyrics = null;
+  syncSingleControls();
   nodes.lyricsBox.hidden = false;
   nodes.lyricsBox.style.display = "";
   setLyricsBody("", "正在试抓…（网易云 → QQ → LRCLIB → 酷狗）");
   try {
     const res = await api.lyricsPreview({
-      track_id: Number(row.id),
+      track_id: choice.scope.trackId,
       title: cand.title || "",
       artist: cand.artist || "",
       album: cand.album || "",
       duration: Number(cand.duration) || 0,
     });
+    if (revision !== lyricsRevision || !isCurrentChoice(choice)) return;
     if (res.lyrics) {
       fetchedLyrics = {
-        index: state.scrape.chosenIndex,
+        choice,
         text: res.lyrics,
-        source: res.source || "",
+        source: res.used === "曲目标签" ? `${res.source || "未知来源"}（按曲目标签查的）` : res.source || "",
       };
       // 候选的关键词查不到时后端会退回用曲目标签再查一次，这里把这件事说明白
       renderLyricsPreview(
         { lyrics: res.lyrics },
         {
-          source:
-            res.used === "曲目标签"
-              ? `${res.source || "未知来源"}（按曲目标签查的）`
-              : res.source || "",
+          source: fetchedLyrics.source,
         },
       );
       ui.toast("ok", "抓到歌词（还没写入）", `${res.source || "未知来源"} · ${res.lines} 行 ${res.chars} 字`);
@@ -590,24 +685,32 @@ async function tryFetchLyrics() {
       ui.toast("warn", "没抓到歌词", res.detail || "四个源都没有结果");
     }
   } catch (err) {
+    if (revision !== lyricsRevision || !isCurrentChoice(choice)) return;
     setLyricsBody("", (err && err.message) || "试抓失败");
     ui.toast("err", "试抓歌词失败", (err && err.message) || "");
   } finally {
-    btn.disabled = false;
-    btn.textContent = "试抓歌词";
+    if (revision === lyricsRevision) {
+      lyricsBusy = false;
+      syncSingleControls();
+    }
   }
 }
 
 function renderWritePanel() {
   const row = currentTrackRow();
-  const cand = state.scrape.candidates[state.scrape.chosenIndex];
+  const cand = chosenCandidate();
   ui.clear(nodes.writeFields);
 
   if (!cand) {
     ui.setText(nodes.writeTarget, "未选候选");
     ui.clear(nodes.writeCandidate);
     nodes.writeCandidate.append(document.createTextNode("在中间列表里点一个候选，再勾选要写入的字段。"));
-    nodes.applyBtn.disabled = true;
+    nodes.writeCandidate.className = "hint";
+    nodes.writeCover.disabled = true;
+    nodes.lyricsBox.hidden = true;
+    nodes.lyricsBox.style.display = "none";
+    setLyricsBody("", "");
+    syncSingleControls();
     return;
   }
 
@@ -638,7 +741,11 @@ function renderWritePanel() {
     nodes.writeLyrics.parentElement.title = "候选没有内嵌歌词，勾选后后端会按标题/歌手再查一次";
   }
 
-  renderLyricsPreview(cand);
+  if (fetchedLyrics && isCurrentChoice(fetchedLyrics.choice)) {
+    renderLyricsPreview({ lyrics: fetchedLyrics.text }, { source: fetchedLyrics.source });
+  } else if (lyricsBusy) {
+    setLyricsBody("", "正在试抓…（网易云 → QQ → LRCLIB → 酷狗）");
+  } else renderLyricsPreview(cand);
 
   WRITE_FIELDS.forEach((field) => {
     const value = cand[field];
@@ -663,8 +770,7 @@ function renderWritePanel() {
     );
   });
 
-  nodes.applyBtn.disabled = !row;
-  nodes.applyBtn.title = row ? "" : "先选中一首「当前曲目」才能写入";
+  syncSingleControls();
 }
 
 function syncChosenFieldsFromDom() {
@@ -678,13 +784,18 @@ function syncChosenFieldsFromDom() {
 /* ------------------------------------------------------- 单首写入（预览确认） */
 
 async function previewAndWrite() {
+  if (pendingWrite || lyricsBusy) return;
+  const choice = captureChoice();
   const row = currentTrackRow();
-  const cand = state.scrape.candidates[state.scrape.chosenIndex];
-  if (!row || !cand) return;
+  if (!isCurrentChoice(choice) || !row) {
+    ui.toast("warn", "候选已失效", "请为当前曲目重新搜索并选择候选。");
+    syncSingleControls();
+    return;
+  }
+  const cand = choice.candidate;
   // 「试抓歌词」抓到的那一份原样带进写入：后端优先用候选里的歌词，这样「你看到的」和
   // 「写进去的」是同一份（否则写入时后端会再抓一次，可能换一个版本）。
-  const fetched =
-    fetchedLyrics && fetchedLyrics.index === state.scrape.chosenIndex ? fetchedLyrics : null;
+  const fetched = fetchedLyrics && isCurrentChoice(fetchedLyrics.choice) ? fetchedLyrics : null;
   const writeCand = fetched ? { ...cand, lyrics: fetched.text } : cand;
   syncChosenFieldsFromDom();
 
@@ -703,8 +814,10 @@ async function previewAndWrite() {
     return;
   }
 
-  nodes.applyBtn.disabled = true;
-  nodes.applyBtn.textContent = "预览中…";
+  const operation = { choice, submitted: false };
+  pendingWrite = operation;
+  const canContinue = () => pendingWrite === operation && isCurrentChoice(choice);
+  syncSingleControls();
   ui.clear(nodes.result);
   try {
     const withCoverLyrics = [];
@@ -730,8 +843,14 @@ async function previewAndWrite() {
     let body = [];
     let answer = "apply";
     if (Object.keys(values).length) {
-      const preview = await api.previewTracks({ ids: [Number(row.id)], fields: values, normalize_artist: normalize });
-      body = ui.diffView(preview.items || []);
+      const preview = await api.previewTracks({ ids: [choice.scope.trackId], fields: values, normalize_artist: normalize });
+      if (!canContinue()) return;
+      const target = Array.isArray(preview.items)
+        ? preview.items.find((item) => Number(item?.track_id) === choice.scope.trackId) : null;
+      if (!target) throw new Error("预览未包含当前曲目，可能已从曲库移除。请刷新曲库后重试；本次未写入。");
+      if (target.file_exists === false) throw new Error("当前音乐文件不存在，请检查挂载或刷新曲库后重试；本次未写入。");
+      if (target.current?.error) throw new Error(`无法读取当前文件的标签：${target.current.error}。本次未写入。`);
+      body = ui.diffView([target]);
       const changed = preview.changed_fields || 0;
       ui.clear(nodes.result);
       nodes.result.append(ui.notice("info", `差异预览完成，共 ${changed} 处变更；尚未写入文件。`));
@@ -768,14 +887,22 @@ async function previewAndWrite() {
         ? "apply"
         : "";
     }
+    // A modal can outlive its search, selected candidate, track, or session.
+    // Revalidate immediately before sending the irreversible write request.
+    if (!canContinue()) {
+      if (answer === "apply") ui.toast("info", "确认已过期", "曲目或候选已改变，本次确认未写入。请重新预览后确认。");
+      return;
+    }
     if (answer !== "apply") {
       ui.clear(nodes.result);
       nodes.result.append(ui.notice("info", "已取消，未写入任何文件。"));
       return;
     }
 
+    operation.submitted = true;
+    syncSingleControls();
     const result = await api.scrapeApply({
-      track_id: Number(row.id),
+      track_id: choice.scope.trackId,
       candidate: writeCand,
       fields: Object.keys(values),
       write_cover: writeCover,
@@ -785,30 +912,39 @@ async function previewAndWrite() {
     });
     const writtenFields = result.written || [];
     const changeCount = Object.keys(result.changes || {}).length;
-    ui.clear(nodes.result);
-    nodes.result.append(
-      ui.notice("ok", `已写入：${writtenFields.map(ui.fieldLabel).join("、") || "（无字段）"}；实际变更 ${changeCount} 处。`),
-      ui.resultBlock({
-        summary: [
-          { label: "字段", value: writtenFields.length },
-          { label: "差异", value: changeCount },
-          { label: "封面", value: result.cover ? "已写" : "未写" },
-          { label: "歌词", value: result.lyrics ? "已写" : "未写" },
-        ],
-      }),
-    );
-    renderLyricsPreview({ lyrics: result.lyrics }, { written: true });
+    if (canContinue()) {
+      ui.clear(nodes.result);
+      nodes.result.append(
+        ui.notice("ok", `已写入：${writtenFields.map(ui.fieldLabel).join("、") || "（无字段）"}；实际变更 ${changeCount} 处。`),
+        ui.resultBlock({
+          summary: [
+            { label: "字段", value: writtenFields.length },
+            { label: "差异", value: changeCount },
+            { label: "封面", value: result.cover ? "已写" : "未写" },
+            { label: "歌词", value: result.lyrics ? "已写" : "未写" },
+          ],
+        }),
+      );
+      const writtenLyrics = typeof result.lyrics === "string" ? result.lyrics
+        : result.lyrics && typeof writeCand.lyrics === "string" ? writeCand.lyrics : "";
+      if (writtenLyrics) renderLyricsPreview({ lyrics: writtenLyrics }, { written: true });
+      else setLyricsBody("", result.lyrics ? "歌词已写入，可在曲目详情中读取文件里的歌词。" : "本次没有写入歌词。");
+    }
     ui.toast("ok", "刮削写入完成", `${row.title || row.filename}：${writtenFields.map(ui.fieldLabel).join("、") || "无字段"}`);
     emit("status:refresh");
     emit("tracks:refresh");
     await refreshPick();
   } catch (err) {
-    ui.clear(nodes.result);
-    nodes.result.append(ui.notice("err", `写入失败：${err.message}`));
-    ui.toast("err", "刮削写入失败", err.message);
+    if (canContinue()) {
+      ui.clear(nodes.result);
+      nodes.result.append(ui.notice("err", `写入失败：${err.message}`));
+    }
+    if (canContinue() || operation.submitted) ui.toast("err", "刮削写入失败", `${row.title || row.filename}：${err.message}`);
   } finally {
-    nodes.applyBtn.disabled = !currentTrackRow();
-    nodes.applyBtn.textContent = "预览差异并写入";
+    if (pendingWrite === operation) {
+      pendingWrite = null;
+      syncSingleControls();
+    }
   }
 }
 

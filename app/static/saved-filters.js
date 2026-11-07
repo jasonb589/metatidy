@@ -1,12 +1,13 @@
 /** Named library views, stored only in this browser. No server or file writes. */
 import * as ui from "./ui.js";
+import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
 
 const STORAGE_KEY = "metatidy.saved-filters.v1";
 const MAX_ITEMS = 12;
 const MAX_NAME = 36;
 const TEXT_FILTERS = ["language", "albumtype", "genre", "year", "artist", "album"];
 const FLAG_FILTERS = ["missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
-const SORTS = ["artist", "album", "title", "year", "track", "path", "indexed", "edited"];
+const SORTS = ["artist", "album", "title", "year", "track", "disc_track", "path", "indexed", "edited"];
 const LABELS = {
   language: "语言", albumtype: "专辑类型", genre: "流派", year: "年份", artist: "艺术家", album: "专辑",
   missing_cover: "待补封面", missing_lyrics: "待补歌词", no_artist: "缺少艺术家", no_album: "缺少专辑", not_loaded: "待读标签",
@@ -25,6 +26,7 @@ function snapshotOf(value) {
   const filters = {};
   for (const key of TEXT_FILTERS) filters[key] = text(incoming[key]);
   for (const key of FLAG_FILTERS) filters[key] = incoming[key] === true;
+  filters.album_group = normalizeAlbumGroup(incoming.album_group);
   return {
     q: text(source.q, 4000),
     sort: SORTS.includes(source.sort) ? source.sort : "artist",
@@ -39,10 +41,11 @@ function snapshotOf(value) {
 function describe(snapshot) {
   const parts = [];
   if (snapshot.q) parts.push(`搜索：${snapshot.q}`);
+  if (snapshot.filters.album_group) parts.push(`专辑分组：${albumGroupLabel(snapshot.filters.album_group)}`);
   for (const key of TEXT_FILTERS) if (snapshot.filters[key]) parts.push(`${LABELS[key]}：${snapshot.filters[key]}`);
   for (const key of FLAG_FILTERS) if (snapshot.filters[key]) parts.push(LABELS[key]);
   if (!parts.length) parts.push("全部曲目");
-  const sortLabel = { artist: "艺术家", album: "专辑", title: "标题", year: "年份", track: "轨号", path: "路径", indexed: "索引时间", edited: "编辑时间" }[snapshot.sort];
+  const sortLabel = { artist: "艺术家", album: "专辑", title: "标题", year: "年份", track: "轨号", disc_track: "碟号与曲序", path: "路径", indexed: "索引时间", edited: "编辑时间" }[snapshot.sort];
   parts.push(`${sortLabel}${snapshot.order === "desc" ? "降序" : "升序"}`);
   parts.push(snapshot.view === "cards" ? "封面视图" : `${snapshot.density === "compact" ? "紧凑" : "舒适"}列表`);
   return parts.join(" · ");
@@ -206,7 +209,7 @@ export function initSavedFilters({ host, getSnapshot, applySnapshot }) {
     const sheet = dialog("保存常用筛选", "保存搜索条件、排序和显示方式。收藏仅保存在当前浏览器，不会同步到其他设备。");
     if (!sheet) return;
     const summary = describe(captured);
-    const defaultName = captured.q || [...TEXT_FILTERS.map((key) => captured.filters[key]), ...FLAG_FILTERS.filter((key) => captured.filters[key]).map((key) => LABELS[key])].filter(Boolean).join(" · ") || "我的曲库";
+    const defaultName = captured.q || albumGroupLabel(captured.filters.album_group) || [...TEXT_FILTERS.map((key) => captured.filters[key]), ...FLAG_FILTERS.filter((key) => captured.filters[key]).map((key) => LABELS[key])].filter(Boolean).join(" · ") || "我的曲库";
     const input = ui.el("input", { id: "saved-filter-name", type: "text", value: shortened(defaultName, MAX_NAME), autocomplete: "off", "aria-describedby": "saved-filter-name-hint saved-filter-form-error" });
     const error = ui.el("p", { id: "saved-filter-form-error", class: "saved-filter-form-error", role: "alert", hidden: true });
     const form = ui.el("form", { class: "saved-filter-form" }, [

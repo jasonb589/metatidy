@@ -34,6 +34,7 @@ from tests.audiofix import make_flac  # noqa: E402
 from tests.cover_acceptance import check_covers, seed_cover_fixtures  # noqa: E402
 from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
 from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: E402
+from tests.albums_acceptance import check_albums  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -412,6 +413,8 @@ def main() -> int:
             anon = requests.get(f"{auth_base}/api/tracks", params={"page_size": 1}, timeout=20)
             check("未登录读曲库被拒（401）", anon.status_code == 401,
                   f"HTTP {anon.status_code} {anon.text[:120]}")
+            check("未登录不能浏览专辑（401）",
+                  requests.get(f"{auth_base}/api/albums", timeout=20).status_code == 401)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -467,6 +470,8 @@ def main() -> int:
         auto_port = PORT + 2
         auto_argv = [token.replace(str(PORT), str(auto_port)) for token in argv]
         check_auto_scan(REPO, WORK, music, auto_argv, env, auto_port, check)
+        print("\n=== 10. 专辑浏览与精确分组 ===")
+        check_albums(BASE, music, check, wait_job)
     finally:
         proc.terminate()
         try:

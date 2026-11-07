@@ -78,13 +78,14 @@ const jobs = empty ? [] : [{
   result: JSON.stringify({ scanned: tracks.length, added: tracks.length, updated: 0, skipped: 0, removed: 0 }),
 }];
 const plans = new Map();
+const albumText = value => String(value || '').replace(/^ +| +$/g, '');
 
 function stats() {
   return {
     tracks: tracks.length, artists: new Set(tracks.map(t => t.artist).filter(Boolean)).size,
-    albums: new Set(tracks.map(t => t.album).filter(Boolean)).size,
+    albums: new Set(tracks.map(t => albumText(t.album)).filter(Boolean)).size,
     missing_cover: tracks.filter(t => !t.has_cover).length, missing_lyrics: tracks.filter(t => !t.has_lyrics).length,
-    no_artist: tracks.filter(t => !t.artist).length, no_album: tracks.filter(t => !t.album).length,
+    no_artist: tracks.filter(t => !t.artist).length, no_album: tracks.filter(t => !albumText(t.album)).length,
     bytes: tracks.reduce((total, t) => total + t.size, 0), not_loaded: 0,
     languages: [...new Set(tracks.map(t => t.language))], albumtypes: [...new Set(tracks.map(t => t.albumtype))],
   };
@@ -92,19 +93,76 @@ function stats() {
 
 function filterTracks(params) {
   let result = [...tracks];
+  if (params.has('album_group')) {
+    const group = JSON.parse(params.get('album_group'));
+    if (!Array.isArray(group) || group.length !== 2 || group.some(value => typeof value !== 'string')) throw new Error('album_group must contain an album and album artist');
+    result = result.filter(t => albumText(t.album) === albumText(group[0]) && (albumText(t.albumartist) || albumText(t.artist)) === albumText(group[1]));
+  }
   const q = (params.get('q') || '').toLowerCase();
   if (q) result = result.filter(t => [t.title, t.artist, t.album, t.filename, t.path, t.genre, t.year].some(v => v.toLowerCase().includes(q)));
   for (const field of ['language', 'albumtype', 'genre', 'year', 'artist', 'album']) {
     if (params.get(field)) result = result.filter(t => t[field] === params.get(field));
   }
   for (const [flag, field] of [['missing_cover', 'has_cover'], ['missing_lyrics', 'has_lyrics'], ['no_artist', 'artist'], ['no_album', 'album']]) {
-    if (['1', 'true'].includes(params.get(flag))) result = result.filter(t => !t[field]);
+    if (['1', 'true'].includes(params.get(flag))) result = result.filter(t => !(field === 'album' ? albumText(t[field]) : t[field]));
   }
   if (['1', 'true'].includes(params.get('not_loaded'))) result = result.filter(t => !t.tags_loaded);
+  if (params.get('sort') === 'disc_track') {
+    const number = value => {
+      const part = albumText(String(value || '').split('/')[0]);
+      return /^[0-9]{1,9}$/.test(part) ? Number(part) : null;
+    };
+    const direction = params.get('order') === 'desc' ? -1 : 1;
+    result.sort((a, b) => {
+      const disc = ((number(a.disc) ?? 1) - (number(b.disc) ?? 1)) * direction;
+      const aTrack = number(a.track), bTrack = number(b.track);
+      return disc || (aTrack === null ? bTrack === null ? 0 : 1 : bTrack === null ? -1 : (aTrack - bTrack) * direction) || a.id - b.id;
+    });
+    return result;
+  }
   const key = { indexed: 'indexed_at', edited: 'edited_at' }[params.get('sort')] || params.get('sort') || 'artist';
   result.sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''), 'zh-CN', { numeric: true }));
   if (params.get('order') === 'desc') result.reverse();
   return result;
+}
+
+function albumPage(params) {
+  const grouped = new Map();
+  for (const track of tracks) {
+    const album = albumText(track.album);
+    if (!album) continue;
+    const albumArtist = albumText(track.albumartist) || albumText(track.artist);
+    const key = JSON.stringify([album, albumArtist]);
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(track);
+  }
+  let items = [...grouped].map(([key, rows]) => {
+    const [album, album_artist] = JSON.parse(key);
+    const covers = rows.filter(t => t.has_cover).map(t => t.id);
+    const years = [...new Set(rows.map(t => albumText(t.year)).filter(Boolean))].sort();
+    return {
+      album, album_artist, track_count: rows.length,
+      disc_count: new Set(rows.map(t => albumText(t.disc) || '1')).size,
+      duration: rows.reduce((total, t) => total + Math.max(0, Number(t.duration) || 0), 0),
+      bytes: rows.reduce((total, t) => total + Math.max(0, Number(t.size) || 0), 0),
+      missing_cover: rows.filter(t => !t.has_cover).length,
+      missing_lyrics: rows.filter(t => !t.has_lyrics).length,
+      not_loaded: rows.filter(t => !t.tags_loaded).length,
+      cover_track_id: covers.length ? Math.min(...covers) : null,
+      year: years.length === 1 ? years[0] : '',
+      indexed_at: Math.max(...rows.map(t => Number(t.indexed_at) || 0)),
+    };
+  });
+  const query = (params.get('q') || '').trim().toLowerCase();
+  if (query) items = items.filter(item => [item.album, item.album_artist].some(value => value.toLowerCase().includes(query)));
+  if (['1', 'true'].includes(params.get('incomplete'))) items = items.filter(item => item.missing_cover || item.missing_lyrics || item.not_loaded);
+  const compare = (a, b) => a.localeCompare(b, 'zh-CN', { numeric: true });
+  const order = params.get('sort');
+  items.sort((a, b) => (order === 'recent' ? b.indexed_at - a.indexed_at : order === 'artist' ? compare(a.album_artist, b.album_artist) : 0) || compare(a.album, b.album) || compare(a.album_artist, b.album_artist));
+  const pageSize = Math.min(100, Math.max(1, Number(params.get('page_size')) || 24));
+  const pages = Math.ceil(items.length / pageSize);
+  const page = Math.min(Math.max(1, pages), Math.max(1, Number(params.get('page')) || 1));
+  return { total: items.length, page, page_size: pageSize, pages, items: items.slice((page - 1) * pageSize, page * pageSize) };
 }
 
 function json(res, data, code = 200) {
@@ -185,6 +243,7 @@ async function handleApi(req, res, url) {
     return json(res, { values, placeholders });
   }
   if (route === '/api/sources') return json(res, { sources });
+  if (route === '/api/albums') return json(res, albumPage(url.searchParams));
   if (route === '/api/tracks') {
     const filtered = filterTracks(url.searchParams);
     const pageSize = Math.min(1000, Math.max(1, Number(url.searchParams.get('page_size')) || 100));
@@ -234,6 +293,18 @@ async function handleApi(req, res, url) {
     return json(res, { candidates, source_status: chosenSources.map(source => ({ source, count: track ? 1 : 0 })) });
   }
   if (route === '/api/lyrics/preview') return json(res, { lyrics: '[00:00.00] UI 测试歌词\n[00:03.00] 此内容仅用于排版验收。', source: 'fixture' });
+  if (route === '/api/scrape/apply') {
+    const track = tracks.find(t => t.id === payload.track_id);
+    if (!track) return json(res, { detail: '没有这条测试曲目' }, 404);
+    const fields = Object.fromEntries((payload.fields || []).filter(field => payload.candidate?.[field] !== undefined && payload.candidate[field] !== '').map(field => [field, payload.candidate[field]]));
+    const changes = Object.fromEntries(Object.entries(fields).filter(([field, value]) => track[field] !== value).map(([field, value]) => [field, { old: track[field] || '', new: value }]));
+    Object.assign(track, fields);
+    const cover = Boolean(payload.write_cover && payload.candidate?.cover);
+    const lyrics = Boolean(payload.write_lyrics && payload.candidate?.lyrics);
+    if (cover) track.has_cover = 1;
+    if (lyrics) track.has_lyrics = 1;
+    return json(res, { written: Object.keys(fields), changes, cover, lyrics });
+  }
   if (route === '/api/scrape/batch') return json(res, makeJob('scrape', { applied: 0, skipped: (payload.ids || []).length, failed: 0, details: [] }));
   if (route === '/api/template/test') {
     const track = tracks.find(t => t.id === Number(url.searchParams.get('track_id'))) || tracks[0];
