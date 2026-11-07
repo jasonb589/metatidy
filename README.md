@@ -416,8 +416,9 @@ CI 会用固定版本 Playwright 在 Chromium 中运行这两组浏览器验收�
 依赖版本由 `backend-rs/Cargo.lock` 固定，构建可复现。
 
 标签规则：`latest`（默认分支）、`sha-xxxxx`、以及打 tag 时的语义化版本号。
-源码仓库和 GHCR 包的可见性分别管理。当前源码仓库为私有，已公开的镜像仍支持匿名拉取；
+源码仓库和 GHCR 包的可见性分别管理。当前仓库和镜像都公开可访问，镜像支持匿名拉取；
 新建的包可能默认私有，需要在 Package settings 中单独设置。
+公开访问不改变本项目的专有许可与保留所有权利声明。
 
 想同时发 Docker Hub，在 `.github/workflows/ci.yml` 里加一次 `docker/login-action` +
 把 `images:` 换成多行即可，其余不变。

@@ -1,7 +1,7 @@
 name: CI & Image
 
 # 流程：先跑测试，测试过了才构建镜像；镜像推送到 GHCR。
-# 私有仓库的副作用：GHCR 包默认也是私有的，别人拉取需要先 docker login（见 README）。
+# 当前 GHCR 包公开；包可见性单独管理，新建包可能默认私有（见 README）。
 
 on:
   push:

@@ -2,8 +2,7 @@
 #
 # 用法：
 #   1) 改下面的 volumes 路径，把左侧换成你自己的音乐目录
-#   2) 如果是私有镜像（默认就是），先登录一次：
-#        echo <你的PAT> | docker login ghcr.io -u jasonb589 --password-stdin
+#   2) 当前镜像公开，可直接拉取；如果自行改为私有，需要先 docker login ghcr.io
 #   3) docker compose up -d
 #   4) 打开 http://<主机IP>:8080/
 #
