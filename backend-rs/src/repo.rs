@@ -306,9 +306,9 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     }
     if let Some((album, artist)) = &query.album_group {
         params.push(Param::Text(album.clone()));
-        clauses.push(format!("{ALBUM_NAME_EXPR} = ${}", placeholder(&params)));
+        let album_bind = placeholder(&params);
         params.push(Param::Text(artist.clone()));
-        clauses.push(format!("{ALBUM_ARTIST_EXPR} = ${}", placeholder(&params)));
+        clauses.push(album_group_predicate(album_bind, placeholder(&params)));
     }
     if query.missing_cover {
         clauses.push("has_cover = false".to_string());
@@ -365,19 +365,7 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
     let total = count_query.fetch_one(pool).await?;
 
     let order_sql = if query.sort == "disc_track" {
-        // Tag strings can contain totals ("2/12"), blanks or arbitrary text.
-        // Cast only bounded ASCII digits so one malformed tag cannot fail a page.
-        let numeric = |column: &str, fallback: &str| {
-            format!(
-                "CASE WHEN BTRIM(split_part({column}, '/', 1)) ~ '^[0-9]{{1,9}}$' \
-                 THEN BTRIM(split_part({column}, '/', 1))::bigint ELSE {fallback} END"
-            )
-        };
-        format!(
-            "{} {direction}, {} {direction} NULLS LAST, id ASC",
-            numeric("disc", "1"),
-            numeric("track", "NULL")
-        )
+        disc_track_order(query.order_desc)
     } else {
         format!("{sort_expr} {direction}, id ASC")
     };
@@ -413,6 +401,64 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
 const ALBUM_NAME_EXPR: &str = "BTRIM(album)";
 const ALBUM_ARTIST_EXPR: &str = "COALESCE(NULLIF(BTRIM(albumartist), ''), BTRIM(artist))";
 
+/// Hashes make the exact-group index safe for long text tags. The original
+/// expressions remain mandatory residual checks; hash equality is not identity.
+fn album_group_predicate(album_bind: usize, artist_bind: usize) -> String {
+    format!(
+        "{ALBUM_NAME_EXPR} <> '' AND \
+        md5({ALBUM_NAME_EXPR}) = md5(${album_bind}::text) AND \
+        md5({ALBUM_ARTIST_EXPR}) = md5(${artist_bind}::text) AND \
+        {ALBUM_NAME_EXPR} = ${album_bind} AND {ALBUM_ARTIST_EXPR} = ${artist_bind}"
+    )
+}
+
+/// All album pages and whole-album selections use the track list's numeric
+/// order, including totals, malformed values and deterministic ID ties.
+fn disc_track_order(descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    let numeric = |column: &str, fallback: &str| {
+        format!(
+            "CASE WHEN BTRIM(split_part({column}, '/', 1)) ~ '^[0-9]{{1,9}}$' \
+            THEN BTRIM(split_part({column}, '/', 1))::bigint ELSE {fallback} END"
+        )
+    };
+    format!(
+        "{} {direction}, {} {direction} NULLS LAST, id ASC",
+        numeric("disc", "1"),
+        numeric("track", "NULL")
+    )
+}
+
+const ALBUM_SUMMARY_FIELDS: &str = "count(*) AS track_count, \
+    count(DISTINCT COALESCE(NULLIF(BTRIM(disc), ''), '1')) AS disc_count, \
+    COALESCE(sum(duration), 0)::double precision AS duration, \
+    COALESCE(sum(size), 0)::bigint AS bytes, \
+    count(*) FILTER (WHERE NOT has_cover) AS missing_cover, \
+    count(*) FILTER (WHERE NOT has_lyrics) AS missing_lyrics, \
+    count(*) FILTER (WHERE NOT tags_loaded) AS not_loaded, \
+    min(id) FILTER (WHERE has_cover) AS cover_track_id, \
+    CASE WHEN count(DISTINCT NULLIF(BTRIM(year), '')) = 1 \
+         THEN min(NULLIF(BTRIM(year), '')) ELSE '' END AS year, \
+    extract(epoch from max(indexed_at))::double precision AS indexed_at";
+
+// JSON tuples avoid delimiter ambiguity in arbitrary tag text. This is a
+// membership/order revision, not an authorization token or a file lock.
+const ALBUM_REVISION_EXPR: &str = "md5(COALESCE(string_agg(\
+    jsonb_build_array(id, disc, track)::text, ',' ORDER BY id), ''))";
+
+fn album_summary_sql(where_sql: &str, having_sql: &str, with_revision: bool) -> String {
+    let revision = if with_revision {
+        format!(", {ALBUM_REVISION_EXPR} AS revision")
+    } else {
+        String::new()
+    };
+    format!(
+        "SELECT {ALBUM_NAME_EXPR} AS album, {ALBUM_ARTIST_EXPR} AS album_artist, \
+        {ALBUM_SUMMARY_FIELDS}{revision} FROM tracks WHERE {where_sql} \
+        GROUP BY {ALBUM_NAME_EXPR}, {ALBUM_ARTIST_EXPR}{having_sql}"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct AlbumQuery {
     pub q: String,
@@ -447,6 +493,116 @@ pub struct PagedAlbums {
     pub items: Vec<AlbumSummary>,
 }
 
+#[derive(sqlx::FromRow)]
+struct AlbumHeader {
+    #[sqlx(flatten)]
+    summary: AlbumSummary,
+    revision: String,
+}
+
+pub struct AlbumDetail {
+    pub summary: AlbumSummary,
+    pub revision: String,
+    pub page: i64,
+    pub page_size: i64,
+    pub pages: i64,
+    pub items: Vec<Track>,
+}
+
+pub enum AlbumSelection {
+    Missing,
+    Changed,
+    Ready { revision: String, ids: Vec<i64> },
+}
+
+fn album_page(total: i64, requested: i64, page_size: i64) -> (i64, i64, i64) {
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / page_size + 1
+    };
+    let page = requested.clamp(1, pages.max(1));
+    (page, pages, (page - 1) * page_size)
+}
+
+pub async fn album_detail(
+    pool: &PgPool,
+    group: &(String, String),
+    requested: i64,
+    page_size: i64,
+) -> anyhow::Result<Option<AlbumDetail>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let predicate = album_group_predicate(1, 2);
+    let header: Option<AlbumHeader> = sqlx::query_as(&album_summary_sql(&predicate, "", true))
+        .bind(&group.0)
+        .bind(&group.1)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(header) = header else {
+        return Ok(None);
+    };
+    let (page, pages, offset) = album_page(header.summary.track_count, requested, page_size);
+    let items = sqlx::query_as::<_, Track>(&format!(
+        "SELECT {TRACK_COLUMNS} FROM tracks WHERE {predicate} ORDER BY {} LIMIT $3 OFFSET $4",
+        disc_track_order(false),
+    ))
+    .bind(&group.0)
+    .bind(&group.1)
+    .bind(page_size)
+    .bind(offset)
+    .fetch_all(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(AlbumDetail {
+        summary: header.summary,
+        revision: header.revision,
+        page,
+        page_size,
+        pages,
+        items,
+    }))
+}
+
+/// Select all IDs in one snapshot, independent of track-list page caps. The
+/// caller receives a fixed set; subsequent group edits cannot extend that set.
+pub async fn album_selection(
+    pool: &PgPool,
+    group: &(String, String),
+    expected_revision: &str,
+) -> anyhow::Result<AlbumSelection> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let predicate = album_group_predicate(1, 2);
+    let (total, revision): (i64, String) = sqlx::query_as(&format!(
+        "SELECT count(*), {ALBUM_REVISION_EXPR} FROM tracks WHERE {predicate}",
+    ))
+    .bind(&group.0)
+    .bind(&group.1)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if total == 0 {
+        return Ok(AlbumSelection::Missing);
+    }
+    if revision != expected_revision {
+        return Ok(AlbumSelection::Changed);
+    }
+    let ids: Vec<i64> = sqlx::query_scalar(&format!(
+        "SELECT id FROM tracks WHERE {predicate} ORDER BY {}",
+        disc_track_order(false),
+    ))
+    .bind(&group.0)
+    .bind(&group.1)
+    .fetch_all(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(AlbumSelection::Ready { revision, ids })
+}
+
 /// Literal substring search: user-entered percent/underscore are not wildcards.
 fn album_search_pattern(query: &str) -> String {
     format!(
@@ -468,22 +624,7 @@ pub async fn list_albums(pool: &PgPool, query: &AlbumQuery) -> anyhow::Result<Pa
     } else {
         ""
     };
-    let grouped_sql = format!(
-        "SELECT {ALBUM_NAME_EXPR} AS album, {ALBUM_ARTIST_EXPR} AS album_artist, \
-         count(*) AS track_count, \
-         count(DISTINCT COALESCE(NULLIF(BTRIM(disc), ''), '1')) AS disc_count, \
-         COALESCE(sum(duration), 0)::double precision AS duration, \
-         COALESCE(sum(size), 0)::bigint AS bytes, \
-         count(*) FILTER (WHERE NOT has_cover) AS missing_cover, \
-         count(*) FILTER (WHERE NOT has_lyrics) AS missing_lyrics, \
-         count(*) FILTER (WHERE NOT tags_loaded) AS not_loaded, \
-         min(id) FILTER (WHERE has_cover) AS cover_track_id, \
-         CASE WHEN count(DISTINCT NULLIF(BTRIM(year), '')) = 1 \
-              THEN min(NULLIF(BTRIM(year), '')) ELSE '' END AS year, \
-         extract(epoch from max(indexed_at))::double precision AS indexed_at \
-         FROM tracks WHERE {where_sql} \
-         GROUP BY {ALBUM_NAME_EXPR}, {ALBUM_ARTIST_EXPR}{having_sql}"
-    );
+    let grouped_sql = album_summary_sql(&where_sql, having_sql, false);
     // Sort expressions are constants; query values are always bound parameters.
     let order_sql = match query.sort.as_str() {
         "artist" => "album_artist ASC, album ASC",
@@ -500,13 +641,7 @@ pub async fn list_albums(pool: &PgPool, query: &AlbumQuery) -> anyhow::Result<Pa
         .fetch_one(&mut *transaction)
         .await?;
     let page_size = query.page_size.clamp(1, 100);
-    let pages = if total == 0 {
-        0
-    } else {
-        (total - 1) / page_size + 1
-    };
-    let page = query.page.clamp(1, pages.max(1));
-    let offset = (page - 1) * page_size;
+    let (page, pages, offset) = album_page(total, query.page, page_size);
     let list_sql = format!(
         "SELECT * FROM ({grouped_sql}) AS albums ORDER BY {order_sql} LIMIT $2 OFFSET $3"
     );
@@ -763,3 +898,19 @@ pub async fn sync_after_write(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::album_page;
+
+    #[test]
+    fn album_pages_cover_large_groups_and_clamp_without_overflow() {
+        assert_eq!(album_page(1005, 1, 200), (1, 6, 0));
+        assert_eq!(album_page(1005, i64::MAX, 200), (6, 6, 1000));
+        assert_eq!(album_page(1005, -10, 200), (1, 6, 0));
+        assert_eq!(album_page(0, 50, 100), (1, 0, 0));
+        assert_eq!(
+            album_page(i64::MAX, i64::MAX, 100),
+            (92233720368547759, 92233720368547759, 9223372036854775800)
+        );
+    }
+}

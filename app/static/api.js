@@ -108,6 +108,8 @@ export const api = {
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
+  albumDetail: (params, options = {}) => request(`${API}/albums/detail?${qs(params)}`, options),
+  albumSelection: (payload, options = {}) => request(`${API}/albums/selection`, { ...options, method: "POST", body: payload }),
   trackSelection: (payload, options = {}) => request(`${API}/tracks/selection`, { ...options, method: "POST", body: payload }),
   track: (id) => request(`${API}/tracks/${id}`),
   trackLyrics: (id) => request(`${API}/tracks/${id}/lyrics`),

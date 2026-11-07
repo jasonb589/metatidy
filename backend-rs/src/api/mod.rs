@@ -802,6 +802,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tracks", get(tracks::list_tracks))
         .route("/api/tracks/selection", post(tracks::selection))
         .route("/api/albums", get(albums::list_albums))
+        .route("/api/albums/detail", get(albums::detail))
+        .route("/api/albums/selection", post(albums::selection))
         .route("/api/tracks/preview", post(tracks::preview))
         .route("/api/tracks/apply", post(tracks::apply))
         .route("/api/tracks/:track_id", get(tracks::detail))

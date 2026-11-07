@@ -2,6 +2,7 @@
 import { request, qs, coverUrl } from "./api.js";
 import { emit } from "./store.js";
 import * as ui from "./ui.js";
+import { openAlbumDetail } from "./album-detail.js";
 
 const PAGE_SIZE = 24;
 const SORTS = ["album", "artist", "recent"];
@@ -280,10 +281,10 @@ function createCard(item, index, animate) {
   ].filter(([field]) => count(item[field]) > 0);
   const card = ui.el("li", { class: `album-card${animate && index < 8 ? " album-card-enter" : ""}`, dataset: { albumKey: key }, style: animate && index < 8 ? { animationDelay: `${index * 22}ms` } : null });
   card.append(
-    ui.el("button", { type: "button", class: "album-art-open", dataset: { action: "art" }, "aria-label": `查看 ${artist} · ${albumName} 的曲目`, onClick: open }, [
+    ui.el("button", { type: "button", class: "album-art-open", dataset: { action: "art" }, "aria-label": `查看 ${artist} · ${albumName} 的专辑详情`, onClick: () => openAlbumDetail(item) }, [
       artwork(item, animate),
       ui.el("span", { class: "album-count", "aria-hidden": "true", text: `${ui.fmtNum(count(item.track_count))} 首` }),
-      ui.el("span", { class: "album-art-hint", "aria-hidden": "true" }, [ui.icon("music", { size: 15 }), "打开专辑"]),
+      ui.el("span", { class: "album-art-hint", "aria-hidden": "true" }, [ui.icon("album", { size: 15 }), "专辑详情"]),
     ]),
     ui.el("div", { class: "album-card-content" }, [
       ui.el("h3", { class: "album-title truncate", title: albumName, text: albumName }),

@@ -5,6 +5,7 @@
  * This is development/test tooling and is never loaded by the production UI.
  */
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -80,6 +81,71 @@ const jobs = empty ? [] : [{
 const plans = new Map();
 const albumText = value => String(value || '').replace(/^ +| +$/g, '');
 
+function discTrackSort(rows, descending = false) {
+  const number = value => {
+    const part = albumText(String(value || '').split('/')[0]);
+    return /^[0-9]{1,9}$/.test(part) ? Number(part) : null;
+  };
+  const direction = descending ? -1 : 1;
+  return rows.sort((a, b) => {
+    const disc = ((number(a.disc) ?? 1) - (number(b.disc) ?? 1)) * direction;
+    const aTrack = number(a.track), bTrack = number(b.track);
+    return disc || (aTrack === null ? bTrack === null ? 0 : 1 : bTrack === null ? -1 : (aTrack - bTrack) * direction) || a.id - b.id;
+  });
+}
+
+function albumSummary([album, album_artist], rows) {
+  const covers = rows.filter(t => t.has_cover).map(t => t.id);
+  const years = [...new Set(rows.map(t => albumText(t.year)).filter(Boolean))].sort();
+  return {
+    album, album_artist, track_count: rows.length,
+    disc_count: new Set(rows.map(t => albumText(t.disc) || '1')).size,
+    duration: rows.reduce((total, t) => total + Math.max(0, Number(t.duration) || 0), 0),
+    bytes: rows.reduce((total, t) => total + Math.max(0, Number(t.size) || 0), 0),
+    missing_cover: rows.filter(t => !t.has_cover).length,
+    missing_lyrics: rows.filter(t => !t.has_lyrics).length,
+    not_loaded: rows.filter(t => !t.tags_loaded).length,
+    cover_track_id: covers.length ? Math.min(...covers) : null,
+    year: years.length === 1 ? years[0] : '',
+    indexed_at: Math.max(...rows.map(t => Number(t.indexed_at) || 0)),
+  };
+}
+
+function normalizedAlbumGroup(raw) {
+  if (!Array.isArray(raw) || raw.length !== 2 || raw.some(value => typeof value !== 'string')) throw fixtureError('专辑分组须为数组 [专辑名, 专辑艺术家]');
+  const group = raw.map(albumText);
+  if (!group[0] || group.some(value => [...value].length > 4000)) throw fixtureError('专辑名不能为空且每项最多4000字');
+  return group;
+}
+
+function albumMembers(raw) {
+  const group = normalizedAlbumGroup(raw);
+  const rows = tracks.filter(track => albumText(track.album) === group[0] && (albumText(track.albumartist) || albumText(track.artist)) === group[1]);
+  if (!rows.length) throw fixtureError('专辑分组已不存在，请刷新专辑收藏', 404);
+  const revision = createHash('md5').update(JSON.stringify([...rows].sort((a, b) => a.id - b.id).map(track => [track.id, track.disc, track.track]))).digest('hex');
+  return { group, revision, rows: discTrackSort(rows) };
+}
+
+function albumDetail(params) {
+  let raw;
+  try { raw = JSON.parse(params.get('album_group')); } catch { throw fixtureError('专辑分组须为JSON数组'); }
+  const { group, revision, rows } = albumMembers(raw);
+  const size = integerBody(params.get('page_size'), 100), requested = integerBody(params.get('page'), 1);
+  if (size < 1n || size > 200n) throw fixtureError('每页专辑曲目数须为1–200');
+  const pageSize = Number(size), pages = Math.ceil(rows.length / pageSize);
+  const page = requested < 1n ? 1 : requested > BigInt(pages) ? pages : Number(requested);
+  return { group, summary: albumSummary(group, rows), revision, total: rows.length, page, page_size: pageSize, pages,
+    items: rows.slice((page - 1) * pageSize, page * pageSize).map(lightTrack) };
+}
+
+function albumSelection(payload) {
+  const group = normalizedAlbumGroup(payload.album_group);
+  if (typeof payload.revision !== 'string' || !/^[a-f\d]{32}$/i.test(payload.revision)) throw fixtureError('请提供专辑详情返回的32位版本标识');
+  const { revision, rows } = albumMembers(group);
+  if (revision !== payload.revision.toLowerCase()) throw fixtureError('专辑成员或曲序已变化，请刷新详情后重新加入已选', 409);
+  return { group, revision, total: rows.length, ids: rows.map(track => track.id), selected_at: Date.now() / 1000 };
+}
+
 function stats() {
   return {
     tracks: tracks.length, artists: new Set(tracks.map(t => t.artist).filter(Boolean)).size,
@@ -108,17 +174,7 @@ function filterTracks(params) {
   }
   if (['1', 'true'].includes(params.get('not_loaded'))) result = result.filter(t => !t.tags_loaded);
   if (params.get('sort') === 'disc_track') {
-    const number = value => {
-      const part = albumText(String(value || '').split('/')[0]);
-      return /^[0-9]{1,9}$/.test(part) ? Number(part) : null;
-    };
-    const direction = params.get('order') === 'desc' ? -1 : 1;
-    result.sort((a, b) => {
-      const disc = ((number(a.disc) ?? 1) - (number(b.disc) ?? 1)) * direction;
-      const aTrack = number(a.track), bTrack = number(b.track);
-      return disc || (aTrack === null ? bTrack === null ? 0 : 1 : bTrack === null ? -1 : (aTrack - bTrack) * direction) || a.id - b.id;
-    });
-    return result;
+    return discTrackSort(result, params.get('order') === 'desc');
   }
   const key = { indexed: 'indexed_at', edited: 'edited_at' }[params.get('sort')] || params.get('sort') || 'artist';
   result.sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''), 'zh-CN', { numeric: true }));
@@ -136,23 +192,7 @@ function albumPage(params) {
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(track);
   }
-  let items = [...grouped].map(([key, rows]) => {
-    const [album, album_artist] = JSON.parse(key);
-    const covers = rows.filter(t => t.has_cover).map(t => t.id);
-    const years = [...new Set(rows.map(t => albumText(t.year)).filter(Boolean))].sort();
-    return {
-      album, album_artist, track_count: rows.length,
-      disc_count: new Set(rows.map(t => albumText(t.disc) || '1')).size,
-      duration: rows.reduce((total, t) => total + Math.max(0, Number(t.duration) || 0), 0),
-      bytes: rows.reduce((total, t) => total + Math.max(0, Number(t.size) || 0), 0),
-      missing_cover: rows.filter(t => !t.has_cover).length,
-      missing_lyrics: rows.filter(t => !t.has_lyrics).length,
-      not_loaded: rows.filter(t => !t.tags_loaded).length,
-      cover_track_id: covers.length ? Math.min(...covers) : null,
-      year: years.length === 1 ? years[0] : '',
-      indexed_at: Math.max(...rows.map(t => Number(t.indexed_at) || 0)),
-    };
-  });
+  let items = [...grouped].map(([key, rows]) => albumSummary(JSON.parse(key), rows));
   const query = (params.get('q') || '').trim().toLowerCase();
   if (query) items = items.filter(item => [item.album, item.album_artist].some(value => value.toLowerCase().includes(query)));
   if (['1', 'true'].includes(params.get('incomplete'))) items = items.filter(item => item.missing_cover || item.missing_lyrics || item.not_loaded);
@@ -209,6 +249,12 @@ function selectionIds(payload) {
   return [...ids.values()];
 }
 
+function lightTrack(track) {
+  const keys = ['id', 'path', 'dir', 'filename', 'ext', 'title', 'artist', 'album', 'albumartist', 'genre', 'year', 'track', 'disc',
+    'language', 'albumtype', 'has_cover', 'has_lyrics', 'duration', 'indexed_at', 'edited_at', 'scraped_at', 'mtime', 'size', 'tags_loaded', 'path_derived'];
+  return Object.fromEntries(keys.map(key => [key, track[key]]));
+}
+
 function selectionPage(payload) {
   const ids = selectionIds(payload);
   const size = integerBody(payload.page_size, 100);
@@ -219,11 +265,9 @@ function selectionPage(payload) {
   const page = requested < 1n ? 1 : requested > BigInt(pages || 1) ? pages || 1 : Number(requested);
   const indexed = new Map(tracks.filter(track => track.id > 0).map(track => [track.id, track]));
   const found = ids.filter(id => indexed.has(id)).length;
-  const lightKeys = ['id', 'path', 'dir', 'filename', 'ext', 'title', 'artist', 'album', 'albumartist', 'genre', 'year', 'track', 'disc',
-    'language', 'albumtype', 'has_cover', 'has_lyrics', 'duration', 'indexed_at', 'edited_at', 'scraped_at', 'mtime', 'size', 'tags_loaded', 'path_derived'];
   const items = ids.slice((page - 1) * pageSize, page * pageSize).map(id => {
     const track = indexed.get(id);
-    return { id, status: track ? 'found' : 'missing', track: track ? Object.fromEntries(lightKeys.map(key => [key, track[key]])) : null };
+    return { id, status: track ? 'found' : 'missing', track: track ? lightTrack(track) : null };
   });
   return { total: ids.length, selected_total: ids.length, found_total: found, missing_total: ids.length - found, page, page_size: pageSize, pages, items };
 }
@@ -371,6 +415,8 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/sources') return json(res, { sources });
   if (route === '/api/albums') return json(res, albumPage(url.searchParams));
+  if (route === '/api/albums/detail') return json(res, albumDetail(url.searchParams));
+  if (route === '/api/albums/selection') return json(res, albumSelection(payload));
   if (route === '/api/tracks') {
     const filtered = filterTracks(url.searchParams);
     const pageSize = Math.min(1000, Math.max(1, Number(url.searchParams.get('page_size')) || 100));
