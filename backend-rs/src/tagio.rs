@@ -138,8 +138,8 @@ pub fn read_tags(path: &Path) -> RawTags {
         out.album = tag.album().map(|v| v.to_string()).unwrap_or_default();
         out.genre = tag.genre().map(|v| v.to_string()).unwrap_or_default();
         out.year = tag.year().map(|v| v.to_string()).unwrap_or_default();
-        out.track = tag.track().map(|v| v.to_string()).unwrap_or_default();
-        out.disc = tag.disk().map(|v| v.to_string()).unwrap_or_default();
+        out.track = read_tag_number(tag, ItemKey::TrackNumber, tag.track());
+        out.disc = read_tag_number(tag, ItemKey::DiscNumber, tag.disk());
         out.comment = tag.comment().map(|v| v.to_string()).unwrap_or_default();
 
         out.albumartist = tag
@@ -180,6 +180,23 @@ pub fn read_tags(path: &Path) -> RawTags {
     }
 
     out
+}
+
+/// Vorbis comments may store "2/12" verbatim, which lofty's generic numeric
+/// accessor cannot parse. Keep its standard result first, then read the number
+/// before the total without changing the original file or accepting bad values.
+fn read_tag_number(tag: &Tag, key: ItemKey, parsed: Option<u32>) -> String {
+    parsed
+        .or_else(|| {
+            let raw = tag.get_string(&key)?;
+            let number = raw.split('/').next()?.trim();
+            if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            number.parse::<u32>().ok()
+        })
+        .map(|number| number.to_string())
+        .unwrap_or_default()
 }
 
 /// 取内嵌封面原图。
@@ -398,6 +415,61 @@ mod tests {
         let tags = read_tags(&path);
         assert!(tags.error.is_none(), "合成 FLAC 应能被解析：{:?}", tags.error);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tag_numbers_handle_totals_and_reject_invalid_prefixes() {
+        let mut tag = Tag::new(TagType::VorbisComments);
+        for (raw, expected) in [
+            ("3", "3"),
+            ("10/12", "10"),
+            (" 02 / 12 ", "2"),
+            ("", ""),
+            ("/12", ""),
+            ("side A/2", ""),
+            ("-1/12", ""),
+            ("4294967296/12", ""),
+        ] {
+            tag.insert_text(ItemKey::TrackNumber, raw.to_string());
+            assert_eq!(
+                read_tag_number(&tag, ItemKey::TrackNumber, tag.track()),
+                expected,
+                "raw track number: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flac_slash_numbers_are_read_without_rewriting_audio() {
+        let path = std::env::temp_dir().join(format!(
+            "metatidy-slash-numbers-{}.flac",
+            uuid::Uuid::new_v4()
+        ));
+        fixtures::make_flac(&path).unwrap();
+        let audio = std::fs::read(&path).unwrap();
+        // Add raw Vorbis comments before the audio frame. This exercises the
+        // exact on-disk "number/total" encoding, independently of lofty setters.
+        let mut comments = Vec::new();
+        comments.extend_from_slice(&0u32.to_le_bytes()); // Empty vendor string.
+        comments.extend_from_slice(&2u32.to_le_bytes());
+        for item in ["TRACKNUMBER=10/12", "DISCNUMBER= 1 / 2 "] {
+            comments.extend_from_slice(&(item.len() as u32).to_le_bytes());
+            comments.extend_from_slice(item.as_bytes());
+        }
+        let mut tagged = audio[..42].to_vec();
+        tagged[4] = 0; // STREAMINFO is no longer the final metadata block.
+        tagged.push(0x84); // Final metadata block: VORBIS_COMMENT.
+        tagged.extend_from_slice(&(comments.len() as u32).to_be_bytes()[1..]);
+        tagged.extend_from_slice(&comments);
+        tagged.extend_from_slice(&audio[42..]);
+        std::fs::write(&path, &tagged).unwrap();
+
+        let read = read_tags(&path);
+        assert!(read.error.is_none(), "read failed: {:?}", read.error);
+        assert_eq!(read.track, "10");
+        assert_eq!(read.disc, "1");
+        assert_eq!(std::fs::read(&path).unwrap(), tagged);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

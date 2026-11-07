@@ -169,6 +169,10 @@ def check_albums(base: str, music: Path, check, wait_job) -> None:
             missing = group(compilation, "Various Artists", missing_cover=1)
             ordered = group(compilation, "Various Artists", sort="disc_track")["items"]
             reversed_tracks = group(compilation, "Various Artists", sort="disc_track", order="desc")["items"]
+            check("带总数的碟号和音轨从真实FLAC完整读回索引",
+                  {row["title"]: (row["disc"], row["track"]) for row in comp_tracks} == {
+                      "comp-two": ("1", "2"), "comp-ten": ("1", "10"), "comp-disc-two": ("2", "1"),
+                  }, json.dumps([{key: row[key] for key in ("title", "disc", "track")} for row in comp_tracks], ensure_ascii=False))
             check("专辑精确钻取包括合辑全员且可叠加缺封面筛选",
                   normalized["total"] == 3 and missing["total"] == 1
                   and missing["items"][0]["title"] == "comp-disc-two"
@@ -176,7 +180,8 @@ def check_albums(base: str, music: Path, check, wait_job) -> None:
                   and group(shared, "甲艺人")["total"] == 1)
             check("专辑曲序按碟号与数字音轨排序，避免1/10/2错序",
                   [row["title"] for row in ordered] == ["comp-two", "comp-ten", "comp-disc-two"]
-                  and [row["title"] for row in reversed_tracks] == ["comp-disc-two", "comp-ten", "comp-two"])
+                  and [row["title"] for row in reversed_tracks] == ["comp-disc-two", "comp-ten", "comp-two"],
+                  json.dumps({"asc": [row["title"] for row in ordered], "desc": [row["title"] for row in reversed_tracks]}, ensure_ascii=False))
             bad_groups = ["", "null", "{}", "[]", '["A"]', '["A",1]', '["A","B","C"]', '[" ",""]', json.dumps(["x" * 4001, ""]) ]
             check("专辑分组参数拒绝错误形状与超长输入",
                   all(client.get(f"{base}/api/tracks", params={"album_group": value}, timeout=20).status_code == 422 for value in bad_groups))
