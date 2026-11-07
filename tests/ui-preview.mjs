@@ -159,10 +159,12 @@ async function handleApi(req, res, url) {
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
   if (route === '/api/status') return json(res, {
-    version: '0.4.0-ui-fixture', engine: 'fixture', postgres: true, redis: true, music_dir_exists: true,
+    version: '0.4.1-ui-fixture', engine: 'fixture', postgres: true, redis: true, music_dir_exists: true,
     music_dir: '/fixture-music', library_root: '/fixture-music', data_dir: '/fixture-data', db_path: 'memory-only',
     supported_formats: ['flac', 'mp3', 'm4a', 'ogg', 'opus'], docker: false, stats: stats(), tracks: tracks.length,
     scraper: { available: true, sources: sources.map(s => s.name), count: sources.length },
+    auto_scan: { enabled: true, watching: true, fast: false, debounce_secs: 10, pending_scopes: 0,
+      state: 'watching', error: '', last_job_id: null, last_scan_at: now - 3600, overflow_count: 0 },
   });
   if (route === '/api/settings') {
     if (method === 'PUT') { values = { ...values, ...payload.values }; return json(res, { saved: payload.values, warnings: [] }); }

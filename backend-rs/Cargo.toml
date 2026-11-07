@@ -1,6 +1,6 @@
 [package]
 name = "metatidy-server"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.85"
 description = "metatidy Rust 后端：索引优先的音乐元数据工作台"
@@ -28,6 +28,11 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # 音频标签：唯一能全格式读写的编译型库
 lofty = "0.21"
+
+# 真正的 AVIF 缩略图：纯 Rust 编码，不启用系统 AVIF 解码器、NASM 或编码线程池。
+# 0.25.6 的 MSRV 为 1.70，保持项目现有 Rust 1.85 工具链可用。
+image = { version = "=0.25.6", default-features = false, features = ["jpeg", "png", "webp", "gif", "avif"] }
+sha2 = "0.10"
 
 # 其它
 serde = { version = "1", features = ["derive"] }

@@ -134,7 +134,8 @@ export const api = {
   saveAliases: (kind, items) => request(`${API}/aliases/${kind}`, { method: "PUT", body: { items } }),
 };
 
-export function coverUrl(trackId, size = 64) {
+/** 列表统一复用 128px 缩略图；视觉尺寸由调用处独立决定。 */
+export function coverUrl(trackId, size = 128) {
   return `${API}/tracks/${trackId}/cover?size=${size}`;
 }
 

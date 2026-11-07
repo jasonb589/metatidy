@@ -52,6 +52,54 @@ async function noPageOverflow(page) {
   assert.ok(dimensions.width <= dimensions.viewport + 1, `Page overflows horizontally: ${dimensions.width}px > ${dimensions.viewport}px`);
 }
 
+/** Controlled API snapshots keep polling assertions separate from other UI checks. */
+async function withPollingPage(base, fn) {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' });
+  const page = await context.newPage();
+  page.setDefaultTimeout(10000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const model = {};
+  await Promise.all(['status', 'tracks', 'jobs'].map(async key => {
+    model[key] = await (await context.request.get(`${base}/api/${key}`)).json();
+  }));
+  const calls = { status: 0, tracks: 0, jobs: 0 };
+  await page.route('**/api/**', async route => {
+    const key = new URL(route.request().url()).pathname.slice('/api/'.length);
+    if (!(key in calls)) return route.continue();
+    calls[key] += 1;
+    await route.fulfill({ json: model[key] });
+  });
+  await page.clock.install();
+
+  async function pollJobs() {
+    const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/jobs');
+    await page.evaluate(async () => { (await import('/store.js')).emit('jobs:refresh'); });
+    await (await response).finished();
+    await page.waitForFunction(id => document.querySelector('#jobs-list')?.textContent.includes(id), model.jobs.jobs[0].id);
+    // Allow the response body and the scheduled background refresh to settle.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.clock.runFor(250);
+  }
+
+  function completeWatch(id, title) {
+    model.tracks.items[0].title = title;
+    model.jobs.jobs.unshift({ id, kind: 'scan', state: 'done', total: 1, done: 1, error: '',
+      message: '自动增量验收', created_at: Math.floor(Date.now() / 1000),
+      result: JSON.stringify({ trigger: 'watch', scanned: 1, added: 0, updated: 1, skipped: 0, removed: 0 }) });
+  }
+
+  try {
+    await page.goto(base);
+    await waitRows(page, 18);
+    await page.waitForFunction(() => document.querySelector('#jobs-list')?.textContent.includes('fixture-scan-001'));
+    await fn({ page, model, calls, pollJobs, completeWatch });
+    assert.deepEqual(errors, [], 'Background updates must not raise browser errors');
+  } finally {
+    await context.close();
+  }
+}
+
 try {
   await mkdir(outputDir, { recursive: true });
   const base = await startFixture(18765);
@@ -86,6 +134,26 @@ try {
     await page.screenshot({ path: path.join(outputDir, 'desktop-light.png'), fullPage: true });
     await page.screenshot({ path: path.join(outputDir, 'desktop-light-viewport.png') });
     console.log(`Desktop first track row starts at y=${Math.round((await page.locator('#tracks-tbody tr').first().boundingBox()).y)}px`);
+  });
+
+  await check('Compact artwork requests the shared 128px thumbnail bucket', async () => {
+    const art = page.locator('#tracks-tbody .thumb img').first();
+    assert.equal(new URL(await art.getAttribute('src'), base).searchParams.get('size'), '128');
+    assert.equal(await art.getAttribute('width'), '48');
+    assert.equal(await art.getAttribute('height'), '48');
+    const box = await art.boundingBox();
+    assert.ok(box.width <= 48 && box.height <= 48, 'Encoded thumbnail size must not enlarge the compact row artwork');
+    await art.locator('xpath=ancestor::tr').locator('.row-edit').click();
+    assert.match(await page.locator('#edit-drawer').evaluate(node => node.style.getPropertyValue('--art')), /cover\?size=128/);
+    await page.locator('#edit-close').click();
+  });
+
+  await check('Automatic update status explains incremental scanning and retained records', async () => {
+    assert.equal(await page.locator('#sidebar-auto-scan').innerText(), '自动更新已开启');
+    assert.equal(await page.locator('#sidebar-auto-scan').getAttribute('aria-live'), 'polite');
+    await page.locator('#btn-scan-shortcut').click();
+    assert.match(await page.locator('#scan-auto-status').innerText(), /自动增量入库/);
+    assert.match(await page.locator('#scan-auto-status').innerText(), /不会自动删除/);
   });
 
   await check('Search and clear filters return the expected tracks', async () => {
@@ -296,6 +364,80 @@ try {
     assert.ok(dataRequests.length >= 4);
     await authPage.close();
   });
+
+  await check('Routine 15-second polling preserves library rows and unsaved settings', () => withPollingPage(base, async ({ page, model, calls }) => {
+    await page.locator('#tab-settings').click();
+    const draft = '未保存的歌手名称';
+    await page.locator('#set-unknown-artist').fill(draft);
+    const source = page.locator('#set-sources input[data-source="netease"]');
+    const sourceBefore = await source.isChecked();
+    await source.setChecked(!sourceBefore);
+    const row = await page.locator('#tracks-tbody tr').first().elementHandle();
+    const sourceNode = await source.elementHandle();
+    const before = { ...calls };
+    model.status.auto_scan = { ...model.status.auto_scan, state: 'scanning', last_job_id: 'fixture-watch-running' };
+    await page.clock.runFor(15050);
+    await page.waitForFunction(() => document.querySelector('#sidebar-auto-scan')?.textContent === '正在更新曲库');
+    assert.equal(calls.status, before.status + 1);
+    assert.equal(calls.jobs, before.jobs + 1);
+    assert.equal(calls.tracks, before.tracks, 'Routine polling must not request the track list');
+    assert.equal(await row.evaluate(node => node.isConnected), true, 'Routine polling must retain row DOM');
+    assert.equal(await sourceNode.evaluate(node => node.isConnected), true, 'Routine status must retain source controls');
+    assert.equal(await source.isChecked(), !sourceBefore);
+    assert.equal(await page.locator('#set-unknown-artist').inputValue(), draft);
+  }));
+
+  await check('A newly completed automatic job refreshes once without resetting settings', () => withPollingPage(base, async ({ page, model, calls, pollJobs, completeWatch }) => {
+    await page.locator('#tab-settings').click();
+    await page.locator('#set-unknown-artist').fill('自动刷新期间的草稿');
+    const source = page.locator('#set-sources input[data-source="netease"]');
+    await source.uncheck();
+    const before = { ...calls };
+    const title = '自动任务完成后出现的新标题';
+    const row = page.locator(`#tracks-tbody tr[data-id="${model.tracks.items[0].id}"] .cell-title`);
+    completeWatch('fixture-watch-done-001', title);
+    await pollJobs();
+    await page.waitForFunction(({ id, title }) => document.querySelector(`#tracks-tbody tr[data-id="${id}"] .cell-title`)?.textContent === title,
+      { id: model.tracks.items[0].id, title });
+    assert.equal(await row.textContent(), title);
+    assert.equal(calls.status, before.status + 1);
+    assert.equal(calls.tracks, before.tracks + 1);
+    assert.equal(await source.isChecked(), false, 'Full status refresh must preserve unsaved source selection');
+    assert.equal(await page.locator('#set-unknown-artist').inputValue(), '自动刷新期间的草稿');
+    await pollJobs();
+    assert.equal(calls.status, before.status + 1, 'Repeated observation of the same completed job must not refresh again');
+    assert.equal(calls.tracks, before.tracks + 1);
+  }));
+
+  await check('Automatic refresh waits until a metadata drawer or dialog closes', () => withPollingPage(base, async ({ page, model, calls, pollJobs, completeWatch }) => {
+    const id = model.tracks.items[0].id;
+    await page.locator(`#tracks-tbody tr[data-id="${id}"] .row-edit`).click();
+    await page.locator('#edit-title').fill('正在编辑的标题');
+    let before = { ...calls };
+    completeWatch('fixture-watch-drawer', '关闭抽屉后显示');
+    await pollJobs();
+    assert.equal(calls.status, before.status, 'Do not start a full status refresh during metadata editing');
+    assert.equal(calls.tracks, before.tracks);
+    assert.equal(await page.locator('#edit-title').inputValue(), '正在编辑的标题');
+    await page.locator('#edit-close').click();
+    await page.waitForFunction(id => document.querySelector(`#tracks-tbody tr[data-id="${id}"] .cell-title`)?.textContent === '关闭抽屉后显示', id);
+    assert.equal(calls.tracks, before.tracks + 1);
+
+    await page.evaluate(async () => {
+      const ui = await import('/ui.js');
+      void ui.confirmDialog({ title: '后台刷新验收', message: '保持此对话框打开以检查后台刷新。' });
+    });
+    await page.locator('dialog.modal[open]').waitFor();
+    before = { ...calls };
+    completeWatch('fixture-watch-dialog', '关闭对话框后显示');
+    await pollJobs();
+    assert.equal(calls.status, before.status, 'Do not start a full status refresh behind a confirmation dialog');
+    assert.equal(calls.tracks, before.tracks);
+    assert.equal(await page.locator('dialog.modal[open]').count(), 1);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(id => document.querySelector(`#tracks-tbody tr[data-id="${id}"] .cell-title`)?.textContent === '关闭对话框后显示', id);
+    assert.equal(calls.tracks, before.tracks + 1);
+  }));
 
   console.log(`\n${checks.length} checks passed; ${failures.length} failed. Screenshots: ${outputDir}`);
   if (injectedRequests.length) console.log(`Observed ${injectedRequests.length} known local AdGuard injection requests; all other external requests were checked.`);

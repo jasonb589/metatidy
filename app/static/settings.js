@@ -117,7 +117,6 @@ export function onStatus(status) {
       ]),
     );
   }
-  renderSourceDefaults();
 }
 
 function renderSourceDefaults() {

@@ -65,8 +65,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装验收脚本依赖（requests + mutagen）
-        run: python -m pip install --quiet --disable-pip-version-check requests mutagen
+      - name: 安装验收脚本依赖（Pillow 用于真实解码 AVIF 缩略图）
+        run: python -m pip install --quiet --disable-pip-version-check requests mutagen "pillow>=11.3,<12"
 
       - name: 准备音乐目录
         run: mkdir -p /tmp/metatidy-music

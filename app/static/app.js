@@ -29,6 +29,13 @@ let started = false;
 let sessionReady = false;
 let closeSidebar = () => {};
 let closeJobs = () => {};
+let jobsRequest = null;
+let jobsSnapshot = "";
+let watchJobsReady = false;
+const completedWatchJobs = new Set();
+let pendingLibraryRefresh = false;
+let libraryRefreshRunning = false;
+let libraryRefreshTimer = 0;
 
 function boot() {
   if (booted) return;
@@ -47,6 +54,7 @@ function boot() {
   wireJobs();
   wireShortcuts();
   wireSessionGuard();
+  wireLibraryUpdates();
   decorateCardHeads();
 
   on("status:refresh", () => {
@@ -102,6 +110,8 @@ async function start() {
   started = true;
   sessionReady = true;
   setWorkspaceLocked(false);
+  // 先建立历史任务基线，再读曲库；初始化期间完成的自动扫描不会被漏掉。
+  await refreshJobs().catch(() => {});
   await Promise.all([loadStatus(), loadSettings(), loadSources()]);
   // 读取最新地址：认证/初始化期间可能通过浏览器前进后退切换了目标页面。
   const hash = (location.hash || "").replace("#", "");
@@ -109,8 +119,61 @@ async function start() {
   await activateTab(initial, { focus: false, scroll: false });
   refreshJobs().catch(() => {});
   window.setInterval(() => {
-    if (document.visibilityState === "visible") refreshJobs().catch(() => {});
+    if (document.visibilityState === "visible") pollBackgroundState();
   }, 15000);
+}
+
+/** 定时轮询只更新监听状态与任务；曲目和表单仅在确有新结果时更新。 */
+async function pollBackgroundState() {
+  if (!canUseWorkspace()) return;
+  await Promise.allSettled([loadStatus({ lightweight: true }), refreshJobs()]);
+  scheduleLibraryRefresh();
+}
+
+function canRefreshLibrary({ allowLoading = false } = {}) {
+  if (!canUseWorkspace() || document.visibilityState !== "visible" || state.edit.open || state.edit.busy || hasForegroundOverlay()) return false;
+  if (!allowLoading && state.tracks.loading) return false;
+  const focused = document.activeElement;
+  // 统计会更新筛选候选值，等用户结束输入/选择再刷新这些控件。
+  return !focused?.closest(".library-toolbar input, .library-toolbar select, #tracks-pager, #filter-chips");
+}
+
+function scheduleLibraryRefresh() {
+  if (!pendingLibraryRefresh || libraryRefreshTimer) return;
+  libraryRefreshTimer = window.setTimeout(() => {
+    libraryRefreshTimer = 0;
+    void flushLibraryRefresh();
+  }, 120);
+}
+
+async function flushLibraryRefresh() {
+  if (!pendingLibraryRefresh || libraryRefreshRunning || !canRefreshLibrary()) return;
+  pendingLibraryRefresh = false;
+  libraryRefreshRunning = true;
+  try {
+    await loadStatus({ canApply: canRefreshLibrary });
+    if (!canRefreshLibrary()) {
+      pendingLibraryRefresh = true;
+      return;
+    }
+    const applied = await tracks.refresh({ background: true, canApply: () => canRefreshLibrary({ allowLoading: true }) });
+    if (applied === false) pendingLibraryRefresh = true;
+  } catch {
+    // 保留现有曲目；下一轮轮询或结束编辑后再尝试，不反复弹错误通知。
+    pendingLibraryRefresh = true;
+  } finally {
+    libraryRefreshRunning = false;
+  }
+}
+
+function wireLibraryUpdates() {
+  on("edit:closed", scheduleLibraryRefresh);
+  for (const event of ["focusout", "click", "keyup", "close"]) {
+    document.addEventListener(event, scheduleLibraryRefresh, true);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void pollBackgroundState();
+  });
 }
 
 /* ------------------------------------------------------------------ 页签 */
@@ -364,9 +427,13 @@ function wireShortcuts() {
 
 /* ------------------------------------------------------------- 全局数据 */
 
-async function loadStatus() {
+async function loadStatus({ lightweight = false, canApply = () => true } = {}) {
   const status = await api.status();
+  if (!canUseWorkspace()) return status;
+  const previous = state.status;
   state.status = status;
+  renderAutoScanStatus(status.auto_scan);
+  if (lightweight || !canApply()) return status;
   const chip = ui.byId("header-version");
   if (chip) {
     const scraper = status.scraper || {};
@@ -395,7 +462,7 @@ async function loadStatus() {
   }
   const sourceCount = status.scraper?.count;
   if (Number.isFinite(Number(sourceCount))) ui.setText(ui.byId("sidebar-source-count"), ui.fmtNum(sourceCount));
-  if (!status.music_dir_exists) {
+  if (!status.music_dir_exists && (!previous || previous.music_dir_exists || previous.music_dir !== status.music_dir)) {
     ui.toast("err", "音乐目录不存在", `${status.music_dir} —— 扫描会失败，请检查挂载或环境变量。`, { timeout: 12000 });
   }
   tracks.onStatus(status);
@@ -403,6 +470,45 @@ async function loadStatus() {
   move.onStatus(status);
   settings.onStatus(status);
   return status;
+}
+
+function renderAutoScanStatus(auto) {
+  const sidebar = ui.byId("sidebar-auto-scan");
+  const hint = ui.byId("scan-auto-status");
+  if (!sidebar || !hint) return;
+  sidebar.hidden = hint.hidden = !auto;
+  if (!auto) return;
+
+  let label = "自动更新已开启";
+  let tone = "ready";
+  let description = "新增或修改的音乐会自动增量入库，文件写入完成后再扫描；已有记录不会自动删除。";
+  if (!auto.enabled) {
+    label = "自动更新未开启";
+    tone = "muted";
+    description = "自动更新未开启。导入新歌后，可在此手动增量扫描；无需勾选全量重扫。";
+  } else if (auto.state === "retrying" || auto.state === "error" || auto.error) {
+    label = "自动更新正在重试";
+    tone = "warn";
+    description = "自动更新暂不可用，服务将自动重试。已有曲库记录会保留。";
+  } else if (auto.state === "scanning") {
+    label = "正在更新曲库";
+    tone = "busy";
+  } else if (auto.pending_scopes > 0) {
+    label = "等待文件写入完成";
+    tone = "busy";
+  } else if (!auto.watching) {
+    label = "正在连接自动更新";
+    tone = "muted";
+  }
+  if (auto.enabled && auto.fast) description += "当前使用快速扫描，按路径建立索引。";
+  const detail = [description, auto.last_scan_at ? `上次完成：${ui.fmtTime(auto.last_scan_at)}` : "", auto.error || ""].filter(Boolean).join("\n");
+  if (sidebar.textContent !== label) sidebar.textContent = label;
+  sidebar.dataset.tone = tone;
+  sidebar.title = detail;
+  const text = `${label} · ${description}`;
+  if (hint.textContent !== text) hint.textContent = text;
+  hint.title = detail;
+  hint.classList.toggle("hint-warn", tone === "warn");
 }
 
 async function loadSettings() {
@@ -500,16 +606,45 @@ function decorateCardHeads() {
   });
 }
 
-async function refreshJobs() {
+function refreshJobs() {
+  if (jobsRequest) return jobsRequest;
+  jobsRequest = loadJobs().finally(() => { jobsRequest = null; });
+  return jobsRequest;
+}
+
+function jobResult(job) {
+  if (job.result && typeof job.result === "object") return job.result;
+  try { return JSON.parse(job.result || "{}"); } catch { return {}; }
+}
+
+function isAutomaticScan(job) {
+  return job.kind === "scan" && (jobResult(job)?.trigger === "watch" || state.status?.auto_scan?.last_job_id === job.id);
+}
+
+async function loadJobs() {
   if (!canUseWorkspace()) return;
   const data = await api.jobs();
+  if (!canUseWorkspace()) return;
   const list = data.jobs || [];
+  for (const job of list) {
+    if (job.state !== "done" || !isAutomaticScan(job)) continue;
+    if (watchJobsReady && !completedWatchJobs.has(job.id)) pendingLibraryRefresh = true;
+    completedWatchJobs.add(job.id);
+  }
+  watchJobsReady = true;
+  // 任务接口只返回最近记录，保留足够的去重窗口即可。
+  while (completedWatchJobs.size > 256) completedWatchJobs.delete(completedWatchJobs.values().next().value);
+  scheduleLibraryRefresh();
   const running = list.filter((job) => job.state === "running").length;
   const badge = ui.byId("jobs-running");
   // 同时设内联样式：反代可能缓存着没有 [hidden] 规则的旧 CSS，否则「任务 0」会一直挂着
   badge.hidden = running === 0;
   badge.style.display = running === 0 ? "none" : "";
-  badge.textContent = String(running);
+  if (badge.textContent !== String(running)) badge.textContent = String(running);
+
+  const snapshot = JSON.stringify(list);
+  if (snapshot === jobsSnapshot) return;
+  jobsSnapshot = snapshot;
 
   const host = ui.byId("jobs-list");
   ui.clear(host);
@@ -521,7 +656,7 @@ async function refreshJobs() {
     const percent = job.total ? Math.round((job.done / job.total) * 100) : null;
     host.append(
       ui.el("div", { class: "row", style: { gap: "var(--s2)", alignItems: "baseline" } }, [
-          ui.el("span", { class: "badge" }, [ui.icon(JOB_KIND_ICONS[job.kind], { size: 12 }), ui.el("span", { text: ui.jobKindLabel(job.kind) })]),
+          ui.el("span", { class: "badge" }, [ui.icon(JOB_KIND_ICONS[job.kind], { size: 12 }), ui.el("span", { text: isAutomaticScan(job) ? "自动增量扫描" : ui.jobKindLabel(job.kind) })]),
         ui.jobStateBadge(job.state),
         ui.el("span", { class: "hint mono", text: job.id }),
         ui.el("span", {

@@ -7,7 +7,7 @@
  * - 封面只在该行 has_cover 为真时才请求 /cover，避免满屏 404
  */
 
-import { api, pollJob } from "./api.js";
+import { api, coverUrl, pollJob } from "./api.js";
 import * as ui from "./ui.js";
 import {
   state,
@@ -480,15 +480,17 @@ function wireTableKeys() {
 
 /* --------------------------------------------------------------- 数据 */
 
-export async function refresh() {
+export async function refresh({ background = false, canApply = () => true } = {}) {
   const sequence = ++refreshSequence;
   state.tracks.loading = true;
-  state.tracks.error = "";
-  syncFilterShortcuts();
-  renderFilterChips();
-  renderTableStatus();
-  // 加载中先把骨架行铺上（已有旧数据时保持旧行，避免闪一下）
-  renderTable();
+  if (!background) {
+    state.tracks.error = "";
+    syncFilterShortcuts();
+    renderFilterChips();
+    renderTableStatus();
+    // 后台更新保留现有行，直到结果就绪且编辑操作结束。
+    renderTable();
+  }
   const params = {
     q: state.tracks.q,
     page: state.tracks.page,
@@ -500,6 +502,8 @@ export async function refresh() {
   try {
     const data = await api.tracks(params);
     if (sequence !== refreshSequence) return;
+    if (background && !canApply()) return false;
+    state.tracks.error = "";
     state.tracks.items = data.items || [];
     state.tracks.total = data.total || 0;
     state.tracks.page = data.page || 1;
@@ -507,6 +511,7 @@ export async function refresh() {
     state.tracks.loadedAt = Date.now();
   } catch (err) {
     if (sequence !== refreshSequence) return;
+    if (background) return false;
     state.tracks.error = err.message;
     state.tracks.items = [];
     state.tracks.total = 0;
@@ -517,11 +522,12 @@ export async function refresh() {
   }
   if (sequence !== refreshSequence) return;
   renderTableStatus();
-  renderTable();
+  renderTable({ animate: !background });
   renderPager();
   renderSelectionBar();
   renderFilterChips();
   savePrefs();
+  return true;
 }
 
 /** 库统计条 + 语言/类型下拉选项（依赖 /api/status）。 */
@@ -668,7 +674,7 @@ function renderTableStatus() {
   nodes.tableWrap.hidden = false;
 }
 
-function renderTable() {
+function renderTable({ animate = true } = {}) {
   ui.clear(nodes.tbody);
   const rows = state.tracks.items;
   const fragment = document.createDocumentFragment();
@@ -687,7 +693,7 @@ function renderTable() {
     const duration = ui.fmtDuration(row.duration);
     const mobileMeta = [row.artist || "未知艺术家", row.album].filter(Boolean).join(" · ");
     if (isSelected(row.id)) tr.setAttribute("aria-selected", "true");
-    if (index < 12) {
+    if (animate && index < 12) {
       tr.classList.add("enter");
       tr.style.animationDelay = `${index * 12}ms`;
     }
@@ -977,7 +983,7 @@ function openEdit(rows) {
   // 抽屉头也用这张封面做色晕（.drawer-head::before 读 --art）
   nodes.drawer.style.setProperty(
     "--art",
-    first.has_cover ? `url("/api/tracks/${first.id}/cover?size=64")` : "none",
+    first.has_cover ? `url("${coverUrl(first.id)}")` : "none",
   );
   nodes.drawer.setAttribute("aria-hidden", "false");
   nodes.drawer.inert = false;
@@ -999,6 +1005,7 @@ function closeEdit() {
   nodes.drawer.setAttribute("aria-hidden", "true");
   nodes.drawer.inert = true;
   editTrigger = null;
+  emit("edit:closed");
 }
 
 function collectFields() {

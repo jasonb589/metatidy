@@ -34,6 +34,8 @@ mod scrape;
 mod status;
 mod tracks;
 
+pub(crate) use moves::start_scan_job;
+
 /// 刮削层用的公共 HTTP 客户端（连接池复用；UA 与 `scrapers.rs` 保持一致）。
 pub static HTTP: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()

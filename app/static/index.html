@@ -58,6 +58,7 @@
   <div class="sidebar-library">
     <div class="nav-label">当前音乐库</div>
     <div class="library-location"><span class="location-dot"></span><span id="sidebar-library-path" title="音乐库目录">等待连接…</span></div>
+    <div class="sidebar-auto-scan" id="sidebar-auto-scan" role="status" aria-live="polite" hidden></div>
     <div class="sidebar-source"><span id="sidebar-source-count">—</span> 个元数据源，为收藏补全细节</div>
   </div>
 
@@ -114,6 +115,7 @@
     <details class="card scan-options" id="scan-options">
       <summary><span class="disclosure-icon" aria-hidden="true">↻</span><span>扫描与导入</span><span class="hint">将新收藏加入音乐库</span><span class="disclosure-chevron" aria-hidden="true">⌄</span></summary>
       <div class="card-body">
+        <p class="hint scan-auto-status" id="scan-auto-status" role="status" hidden></p>
         <div class="row scan-modes">
           <label class="check"><input type="checkbox" id="scan-fast"><span>快速扫描</span><span class="badge badge-accent">云盘推荐</span></label>
           <label class="check"><input type="checkbox" id="scan-full"><span>全量重扫</span></label>

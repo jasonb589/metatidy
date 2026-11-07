@@ -11,7 +11,10 @@
 
 mod api;
 mod auth;
+mod auto_scan;
 mod config;
+mod cover_cache;
+mod cover_images;
 mod db;
 mod error;
 mod jobs;
@@ -137,10 +140,7 @@ async fn main() -> anyhow::Result<()> {
              设置该环境变量即可启用登录"
         ),
     }
-
-
-
-
+    let _auto_scan = auto_scan::start(state.clone());
     let app = build_router(state, &config);
 
     let addr = format!("{}:{}", config.host, config.port);

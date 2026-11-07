@@ -82,6 +82,11 @@ input:focus-visible,select:focus-visible,textarea:focus-visible { outline: none;
 .location-dot { width: 6px; height: 6px; border-radius: 50%; background: #afc993; box-shadow: 0 0 0 4px #a1c4870a; flex: none; }
 #sidebar-library-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-source { margin: 12px 13px 0; font-size: 10px; line-height: 1.7; color: var(--sidebar-muted); }
+.sidebar-auto-scan { display: flex; align-items: center; gap: 8px; margin: 12px 13px 0; color: #c1d2bb; font-size: 10px; line-height: 1.7; }
+.sidebar-auto-scan::before { content: ""; width: 5px; height: 5px; flex: none; border-radius: 50%; background: currentColor; }
+.sidebar-auto-scan[data-tone="muted"] { color: var(--sidebar-muted); }
+.sidebar-auto-scan[data-tone="busy"] { color: var(--lime); }
+.sidebar-auto-scan[data-tone="warn"] { color: #e4b39a; }
 .sidebar-bottom { margin-top: auto; padding-top: 54px; }
 .sidebar-note { display: flex; gap: 12px; align-items: center; margin: 0 10px 30px; color: var(--sidebar-muted); font-size: 11px; line-height: 1.8; }
 .sidebar-note strong { font-weight: 400; color: #c3d2bf; }
@@ -252,6 +257,7 @@ summary::-webkit-details-marker { display: none; }
 .scan-options[open] .disclosure-chevron { transform: rotate(180deg); }
 .scan-options[open] { background: var(--bg-1); } .scan-options[open] > summary { border-bottom: 1px solid var(--line); }
 .scan-options .card-body { padding-top: 16px; }
+.scan-auto-status { margin: 0 0 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 #scan-progress:not([hidden]) { padding: 20px; border-radius: var(--r3); border: 1px solid var(--accent-line); background: var(--bg-1); }
 
 /* Collection controls and table */

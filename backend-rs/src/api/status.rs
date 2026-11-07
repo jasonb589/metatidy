@@ -25,6 +25,10 @@ use crate::templates::validate_template;
 /// `/api/status`
 pub async fn api_status(State(state): State<AppState>) -> ApiResult {
     let stats = repo::library_stats(&state.db).await?;
+    let music_dir = state.config.music_dir.clone();
+    let music_dir_exists = tokio::task::spawn_blocking(move || music_dir.is_dir())
+        .await
+        .unwrap_or(false);
     let sources = scrapers::known_sources();
     let redis_ok = match state.redis.clone() {
         Some(mut conn) => {
@@ -52,7 +56,7 @@ pub async fn api_status(State(state): State<AppState>) -> ApiResult {
         "version": env!("CARGO_PKG_VERSION"),
         "engine": "rust",
         "music_dir": state.config.music_dir.to_string_lossy(),
-        "music_dir_exists": state.config.music_dir.exists(),
+        "music_dir_exists": music_dir_exists,
         "library_root": super::library_root(&state.db, &state.config).await?,
         "data_dir": data_dir,
         "db_path": db_path,
@@ -80,6 +84,7 @@ pub async fn api_status(State(state): State<AppState>) -> ApiResult {
         "tracks": stats.tracks,
         "postgres": true,
         "redis": redis_ok,
+        "auto_scan": crate::auto_scan::status(),
     });
     Ok(Json(body))
 }

@@ -4,6 +4,8 @@
  * 所以标签里带引号、尖括号、emoji 都不会破坏结构。
  */
 
+import { coverUrl } from "./api.js";
+
 export function el(tag, props = null, children = null) {
   const node = document.createElement(tag);
   if (props) {
@@ -210,7 +212,7 @@ export function coverThumb(row, { size = 48, big = false } = {}) {
     return el("span", { class: `${cls} ph`, dataset: { tone }, "aria-hidden": "true", title: "暂无内嵌封面" }, [fallback()]);
   }
   const img = el("img", {
-    src: `/api/tracks/${row.id}/cover?size=${size}`,
+    src: coverUrl(row.id),
     alt: "",
     loading: "lazy",
     decoding: "async",

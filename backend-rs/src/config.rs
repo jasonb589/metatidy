@@ -21,6 +21,12 @@ pub struct Config {
     pub port: u16,
     /// 扫描并发：云盘/机械盘场景调大更有用（IO 延迟占主导）
     pub scan_workers: usize,
+    /// 新增/变更音乐自动增量入库；默认开启，始终保留暂时离线文件的索引。
+    pub auto_scan: bool,
+    /// 自动扫描是否只按路径建索引（云盘可开；默认读取真实标签）。
+    pub auto_scan_fast: bool,
+    /// 文件事件静默多少秒后合并扫描，再检查文件大小与修改时间稳定。
+    pub auto_scan_debounce_secs: u64,
     /// 单文件标签读取超时（秒），防止卡在慢存储上
     pub read_timeout_secs: u64,
 
@@ -82,7 +88,9 @@ fn env_flag(key: &str) -> bool {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let music_dir = PathBuf::from(env_or("METATIDY_MUSIC_DIR", "/music"));
+        // Manual scans and the filesystem watcher must index identical paths,
+        // including when a local setup uses a relative music directory.
+        let music_dir = std::path::absolute(env_or("METATIDY_MUSIC_DIR", "/music"))?;
         let library_root = PathBuf::from(env_or(
             "METATIDY_LIBRARY_ROOT",
             music_dir.to_string_lossy().as_ref(),
@@ -120,6 +128,17 @@ impl Config {
             host: env_or("METATIDY_HOST", "0.0.0.0"),
             port,
             scan_workers: scan_workers.max(1),
+            auto_scan: matches!(
+                env_or("METATIDY_AUTO_SCAN", "1")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            auto_scan_fast: env_flag("METATIDY_AUTO_SCAN_FAST"),
+            auto_scan_debounce_secs: env_or("METATIDY_AUTO_SCAN_DEBOUNCE_SECS", "10")
+                .parse::<u64>()
+                .unwrap_or(10)
+                .clamp(1, 3600),
             read_timeout_secs,
             auth_password,
             auth_session_days: auth_session_days.max(1),

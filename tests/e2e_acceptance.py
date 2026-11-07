@@ -31,6 +31,8 @@ AUTH_PASSWORD = "e2e-secret-8f3a"
 
 sys.path.insert(0, str(REPO))
 from tests.audiofix import make_flac  # noqa: E402
+from tests.cover_acceptance import check_covers, seed_cover_fixtures  # noqa: E402
+from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -57,6 +59,7 @@ def seed(music: Path) -> None:
         for k, v in tags.items():
             audio[k] = [v]
         audio.save()
+    seed_cover_fixtures(music)
 
 
 def wait_job(job_id: str, timeout: float = 180.0) -> dict:
@@ -86,6 +89,8 @@ def main() -> int:
         "METATIDY_LIBRARY_ROOT": str(music),
         # 端口必须和脚本轮询的 PORT 一致：Rust 版读 METATIDY_PORT，不认命令行 --port
         "METATIDY_PORT": str(PORT),
+        # 手动流程的计数断言不应与后台监听竞争；最后另起实例专测真实文件事件。
+        "METATIDY_AUTO_SCAN": "0",
         "PYTHONIOENCODING": "utf-8",
     }
     # 服务端启动命令：默认就用仓库里的 Rust 二进制（Python 版已删除）；可用 E2E_SERVER_CMD 覆盖
@@ -141,6 +146,9 @@ def main() -> int:
         res2 = wait_job(job2["job_id"])
         skipped = json.loads(res2["result"])["skipped"] if res2.get("result") else -1
         check("增量扫描跳过未变动文件", skipped == 5, f"skipped={skipped}")
+
+        print("\n=== 1.1. AVIF 封面缩略图 ===")
+        check_covers(BASE, listing["items"], data, check, wait_job)
 
         print("\n=== 2. 功能一：元数据编辑 ===")
         target = next(i for i in listing["items"] if i["title"] == "七里香")
@@ -448,6 +456,11 @@ def main() -> int:
                 auth_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 auth_proc.kill()
+
+        print("\n=== 9. 自动监听与增量扫描 ===")
+        auto_port = PORT + 2
+        auto_argv = [token.replace(str(PORT), str(auto_port)) for token in argv]
+        check_auto_scan(REPO, WORK, music, auto_argv, env, auto_port, check)
     finally:
         proc.terminate()
         try:

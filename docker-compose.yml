@@ -63,8 +63,13 @@ services:
       # ── 库与缓存 ──
       METATIDY_MUSIC_DIR: /music        # 要扫描/整理的库
       METATIDY_LIBRARY_ROOT: /music     # 整理移动的边界（绝不能越出这里）
-      METATIDY_DATA_DIR: /data          # 封面/缩略图磁盘缓存
+      METATIDY_DATA_DIR: /data          # covers 原图缓存；thumbs 按需生成 AVIF 缩略图
       METATIDY_SCAN_WORKERS: "4"        # 机械硬盘建议 2，SSD/NVMe 可 8
+      # ── 自动增量扫描：新增/修改音乐自动入库；启动和监听恢复时补扫，不自动清理索引 ──
+      METATIDY_AUTO_SCAN: "1"          # 默认开启；设 0 关闭（继续支持手动扫描）
+      METATIDY_AUTO_SCAN_FAST: "0"     # 默认读真实标签；云盘首次启动前可设 1，仅按路径建索引
+      METATIDY_AUTO_SCAN_DEBOUNCE_SECS: "10" # 静默 10 秒后再检查大小/mtime稳定，减少读取未复制完的文件
+      # CloudDrive2/远端网盘改动须传入文件事件；官方App上传后可能需先刷新CD2目录或手动补扫。
       RUST_LOG: info
       # ── 登录保护：**务必改掉**这个占位口令，否则等于把口令写进配置文件 ──
       # 不设这一项 = 界面完全开放（同网段谁都能改你的标签、按模板移动你的文件）

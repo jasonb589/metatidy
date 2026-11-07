@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -99,12 +98,8 @@ pub async fn detail(State(state): State<AppState>, Path(raw_id): Path<String>) -
 
 /// `/api/tracks/{track_id}/cover`：内嵌封面 / 缩略图（二进制）。
 ///
-/// `size=0` = 原图；`size>0` = 缩略图。缓存落 `{data_dir}/covers|thumbs/{id}.jpg`，
-/// 只在 `缓存 mtime >= 曲目 mtime` 时复用（与 Python 的失效判断一致）。
-///
-/// ⚠️ 有意偏离：契约要求 `size>0` 时返回真正的缩略图，但那需要图像库（PIL 的等价物），
-/// 而任务约束不允许新增依赖 —— 这里返回**原图字节**并标 `image/jpeg`
-/// （浏览器 `<img>` 会自己缩放，前端表现不变）。
+/// `size=0` 保留内嵌原图；1..=512 按 128 / 256 / 512 档生成真正的 AVIF 缩略图。
+/// 缓存随索引版本失效，磁盘读取与图像编码在受限的阻塞线程中完成。
 pub async fn cover(
     State(state): State<AppState>,
     Path(raw_id): Path<String>,
@@ -112,39 +107,24 @@ pub async fn cover(
 ) -> Result<Response, ApiError> {
     let track_id = path_i64(&raw_id, "track_id")?;
     let size = RawQuery(params).i64("size", 0)?;
+    let edge = crate::cover_cache::thumbnail_edge(size).ok_or_else(|| {
+        ApiError::unprocessable(
+            "value_error",
+            vec!["query", "size"],
+            "封面尺寸须为 0（原图）或 1–512（缩略图）",
+            json!(size),
+            None,
+        )
+    })?;
     let track = match repo::get_track(&state.db, track_id).await? {
         Some(track) => track,
         None => return Err(ApiError::not_found("没有这条曲目")),
     };
 
-    let cache_dir = if size > 0 {
-        state.config.thumb_cache_dir()
-    } else {
-        state.config.cover_cache_dir()
-    };
-    let cache: PathBuf = cache_dir.join(format!("{track_id}.jpg"));
-    if let Ok(meta) = fs::metadata(&cache) {
-        let cached_mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        if cached_mtime >= track.mtime {
-            if let Ok(bytes) = fs::read(&cache) {
-                return Ok(image_response(bytes, "image/jpeg"));
-            }
-        }
-    }
-
-    let Some((bytes, mime)) = tagio::read_cover(std::path::Path::new(&track.path)) else {
+    let Some(image) = crate::cover_cache::load(state.config.clone(), track, edge).await? else {
         return Err(ApiError::not_found("这首歌没有内嵌封面"));
     };
-    let mime = if size > 0 { "image/jpeg".to_string() } else { mime };
-    if let Err(err) = fs::create_dir_all(&cache_dir).and_then(|_| fs::write(&cache, &bytes)) {
-        tracing::debug!("封面缓存写入失败（不影响响应）：{err}");
-    }
-    Ok(image_response(bytes, &mime))
+    Ok(image_response(image.bytes, &image.mime))
 }
 
 fn image_response(bytes: Vec<u8>, mime: &str) -> Response {

@@ -7,7 +7,7 @@
 //! - 任务进度：Postgres 落行 + Redis 存实时值；完成时强制 `done == total`（percent=100.0）
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -226,6 +226,10 @@ async fn run_move(
             .await;
         return;
     }
+    progress.note("等待扫描或整理任务完成…").await;
+    // Hold through filesystem moves AND the final path updates. Otherwise a
+    // watcher could index a destination first and make set_track_path collide.
+    let _library_guard = crate::scanner::lock_library_scan().await;
     progress.note("开始").await;
 
     // 任务总数 = 可移动项（in_place / conflict_skip / invalid 不算）
@@ -312,71 +316,62 @@ pub async fn scan(State(state): State<AppState>, body: Bytes) -> ApiResult {
         Some(_) => body_i64(&payload, "workers", state.config.scan_workers as i64)?.max(1) as usize,
     };
 
-    let store = JobStore::new(state.db.clone(), state.redis.clone());
-    let job_id = store.create("scan").await?;
-    let job_state = state.clone();
-    let job_store = store.clone();
-    let job_id_for_task = job_id.clone();
-    tokio::spawn(async move {
-        run_scan(job_state, job_store, job_id_for_task, root, full, prune, fast, workers).await;
-    });
-    Ok(Json(json!({ "job_id": job_id })))
-}
-
-/// 扫描任务体（音乐目录不存在时：接口仍是 200 + job_id，错误落在任务里）。
-#[allow(clippy::too_many_arguments)]
-async fn run_scan(
-    state: AppState,
-    store: JobStore,
-    job_id: String,
-    root: PathBuf,
-    full: bool,
-    prune: bool,
-    fast: bool,
-    workers: usize,
-) {
-    let mut progress = Progress::new(store.clone(), job_id.clone());
-    if !JobStore::acquire_slot().await {
-        let _ = store
-            .update(
-                &job_id,
-                &JobPatch {
-                    state: Some("error".to_string()),
-                    error: Some("等待其它任务超时".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await;
-        return;
-    }
-    progress.note("开始").await;
-    if !root.exists() {
-        progress
-            .fail(
-                "FileNotFoundError",
-                &format!("音乐目录不存在：{}", root.display()),
-            )
-            .await;
-        return;
-    }
-
-    progress.note(format!("枚举 {} …", root.display())).await;
     let options = crate::scanner::ScanOptions {
-        root: root.clone(),
+        root,
         full,
         prune,
         fast,
         workers: workers.max(1),
     };
+    let job_id = start_scan_job(state, options, false).await?;
+    Ok(Json(json!({ "job_id": job_id })))
+}
+
+/// Manual and automatic scans use the same persisted job and progress path.
+pub(crate) async fn start_scan_job(
+    state: AppState,
+    mut options: crate::scanner::ScanOptions,
+    automatic: bool,
+) -> Result<String, ApiError> {
+    if automatic {
+        options.full = false;
+        options.prune = false;
+    }
+    let store = JobStore::new(state.db.clone(), state.redis.clone());
+    let job_id = store.create("scan").await?;
+    let job_id_for_task = job_id.clone();
+    tokio::spawn(async move {
+        run_scan(state, store, job_id_for_task, options, automatic).await;
+    });
+    Ok(job_id)
+}
+
+/// 扫描任务体（音乐目录不存在时：接口仍是 200 + job_id，错误落在任务里）。
+async fn run_scan(
+    state: AppState,
+    store: JobStore,
+    job_id: String,
+    options: crate::scanner::ScanOptions,
+    automatic: bool,
+) {
+    let mut progress = Progress::new(store.clone(), job_id.clone());
+    progress
+        .note(if automatic { "自动增量扫描已排队" } else { "扫描已排队" })
+        .await;
     let (tx, rx) = crate::jobs::progress_channel();
     let drain = crate::jobs::spawn_progress_drain(progress, rx);
-    let result = crate::scanner::scan(&state.db, &options, move |done, total, message| {
-        let _ = tx.send(ProgressEvent::Set {
-            done: done as i64,
-            total: total as i64,
-            message,
-        });
-    })
+    let result = crate::scanner::scan_with_library_root(
+        &state.db,
+        &options,
+        &state.config.music_dir,
+        move |done, total, message| {
+            let _ = tx.send(ProgressEvent::Set {
+                done: done as i64,
+                total: total as i64,
+                message,
+            });
+        },
+    )
     .await;
     let mut progress = drain.await.unwrap_or_else(|_| Progress::new(store.clone(), job_id.clone()));
 
@@ -384,6 +379,7 @@ async fn run_scan(
         Ok(summary) => {
             progress
                 .finish(Some(json!({
+                    "trigger": if automatic { "watch" } else { "manual" },
                     "root": summary.root,
                     "scanned": summary.scanned,
                     "parsed": summary.parsed,

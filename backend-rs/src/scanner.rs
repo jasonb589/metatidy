@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use once_cell::sync::Lazy;
 use sqlx::PgPool;
 use walkdir::{DirEntry, WalkDir};
 
@@ -31,6 +32,14 @@ pub const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "__pycache__",
 ];
+
+// Scans and file moves share a lifetime lock. A moved destination must not be
+// inserted as a new track before the original track's path is synchronized.
+static SCAN_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+pub(crate) async fn lock_library_scan() -> tokio::sync::MutexGuard<'static, ()> {
+    SCAN_LOCK.lock().await
+}
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -213,13 +222,23 @@ fn split_track_prefix(stem: &str) -> (String, String) {
 pub async fn scan(
     pool: &PgPool,
     opts: &ScanOptions,
+    progress: impl FnMut(usize, usize, String),
+) -> anyhow::Result<ScanSummary> {
+    scan_with_library_root(pool, opts, &opts.root, progress).await
+}
+
+/// A subtree scan still derives language / artist relative to the whole music
+/// library. Its enumeration and pruning remain restricted to `opts.root`.
+pub async fn scan_with_library_root(
+    pool: &PgPool,
+    opts: &ScanOptions,
+    library_root: &Path,
     mut progress: impl FnMut(usize, usize, String),
 ) -> anyhow::Result<ScanSummary> {
+    progress(0, 0, "等待扫描队列…".into());
+    let _scan_guard = lock_library_scan().await;
     let started = Instant::now();
     let root = opts.root.clone();
-    if !root.exists() {
-        anyhow::bail!("音乐目录不存在：{}", root.display());
-    }
 
     let walk_root = root.clone();
     // 枚举可能很久（云盘上光是遍历目录就要几分钟），所以边遍历边上报：
@@ -228,11 +247,16 @@ pub async fn scan(
     let mut last_log = std::time::Instant::now();
     let walk_counters = counters.clone();
     let mut walk = tokio::task::spawn_blocking(move || {
-        collect_audio_files(&walk_root, Some(walk_counters.as_ref()))
+        anyhow::ensure!(
+            walk_root.is_dir(),
+            "音乐目录不存在或不是目录：{}",
+            walk_root.display()
+        );
+        Ok::<_, anyhow::Error>(collect_audio_files(&walk_root, Some(walk_counters.as_ref())))
     });
     let files = loop {
         tokio::select! {
-            res = &mut walk => break res?,
+            res = &mut walk => break res??,
             _ = tokio::time::sleep(std::time::Duration::from_millis(700)) => {
                 use std::sync::atomic::Ordering;
                 // 同时按 10 秒节流写一行日志：容器日志里能看见进度在动
@@ -320,7 +344,7 @@ pub async fn scan(
         let mut handles = Vec::with_capacity(chunk.len());
         for (path, mtime, size) in chunk {
             let path = path.clone();
-            let task_root = root.clone();
+            let task_root = library_root.to_path_buf();
             let (mtime, size) = (*mtime, *size);
             let fast = opts.fast;
             handles.push(tokio::task::spawn_blocking(move || {
