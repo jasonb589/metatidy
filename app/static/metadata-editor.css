@@ -1,0 +1,87 @@
+/* Loaded values stay legible; field state describes edits without changing write semantics. */
+#edit-drawer { min-height: 0; }
+#edit-drawer .drawer-head { align-items: flex-start; justify-content: space-between; gap: 14px; padding: 19px 21px 16px; }
+.edit-heading { flex: 1; min-width: 0; }
+#edit-drawer .edit-heading h3 { font-size: 18px; font-weight: 600; letter-spacing: -.3px; line-height: 1.5; }
+#edit-scope { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; width: fit-content; max-width: 100%; margin-top: 7px; padding: 0; background: transparent; border: 0; color: var(--fg-2); font-size: 11px; font-weight: 400; line-height: 1.7; white-space: normal; overflow-wrap: anywhere; }
+#edit-close { flex: none; height: 31px; padding-inline: 9px; }
+.edit-overview { flex: none; min-width: 0; padding: 13px 21px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+#edit-description { color: var(--fg-2); font-size: 11px; line-height: 1.85; overflow-wrap: anywhere; }
+.edit-load-row { display: flex; align-items: start; gap: 9px; min-width: 0; }
+.edit-load-row:has(#edit-load-status:empty):has(#edit-load-retry[hidden]) { display: none; }
+#edit-load-status { flex: 1; min-width: 0; max-height: 75px; overflow-y: auto; margin-top: 8px; color: var(--fg-3); font-size: 10px; line-height: 1.8; overflow-wrap: anywhere; }
+#edit-load-status[data-tone="error"], #edit-load-status[data-state="error"], #edit-load-status.hint-err { color: var(--err-fg); }
+#edit-load-status[data-tone="warn"], #edit-load-status[data-state="unknown"] { color: var(--warn-fg); }
+#edit-load-status[data-tone="success"], #edit-load-status[data-state="ready"] { color: var(--ok-fg); }
+#edit-load-retry { flex: none; margin-top: 5px; height: 29px; padding-inline: 8px; font-size: 10px; }
+#edit-drawer .drawer-body { flex: 1 1 auto; min-height: 0; padding: 20px 21px; gap: 21px; scrollbar-gutter: stable; }
+#edit-drawer .drawer-body .grid-2 { gap: 16px 14px; align-items: start; }
+#edit-drawer label.field { position: relative; min-width: 0; }
+#edit-drawer .field > .lbl { margin-bottom: 7px; color: var(--fg-2); font-size: 10px; line-height: 1.5; }
+#edit-drawer .field :is(input[type="text"], textarea) { width: 100%; min-width: 0; color: var(--fg); background-color: var(--bg-1); border-color: var(--line-2); font-size: 12px; transition: border-color 140ms, background-color 140ms, box-shadow 140ms; }
+#edit-drawer .field textarea { line-height: 1.8; resize: vertical; }
+#edit-drawer .field :is(input, textarea):disabled { opacity: .65; background-color: var(--bg-2); cursor: wait; }
+#edit-drawer .field :is(input, textarea):focus-visible { outline: 0; border-color: var(--accent); box-shadow: var(--ring); }
+#edit-drawer .field[data-edit-state="changed"] > .lbl { color: var(--accent-2); }
+#edit-drawer .field[data-edit-state="changed"] > .lbl::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px; margin-bottom: 1px; border-radius: 50%; background: var(--accent); }
+#edit-drawer .field[data-edit-state="changed"] :is(input[type="text"], textarea) { border-color: var(--accent-line); background-color: var(--accent-soft); }
+#edit-drawer .field[data-edit-state="mixed"] :is(input[type="text"], textarea) { border-color: var(--warn-line); background-color: color-mix(in srgb, var(--warn-soft) 55%, var(--bg-1)); }
+#edit-drawer .field[data-edit-state="unknown"] :is(input[type="text"], textarea) { border-style: dashed; background-color: var(--bg-2); }
+#edit-drawer .field[data-edit-state="empty"] :is(input[type="text"], textarea)::placeholder { color: var(--fg-3); }
+.edit-field-hint { display: block; margin-top: 6px; color: var(--fg-3); font-size: 9px; font-weight: 400; line-height: 1.65; overflow-wrap: anywhere; }
+.edit-field-hint:empty { display: none; }
+#edit-drawer .field[data-edit-state="changed"] .edit-field-hint { color: var(--accent-2); }
+#edit-drawer .field[data-edit-state="mixed"] .edit-field-hint { color: var(--warn-fg); }
+.edit-more-fields { min-width: 0; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-1); }
+#edit-drawer .edit-more-fields > summary { display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 3px 6px; cursor: pointer; padding: 12px 13px; margin: 0; color: var(--fg-2); font-size: 11px; line-height: 1.65; }
+.edit-more-fields > summary > span { display: block; grid-column: 2; margin: 0; color: var(--fg-3); font-size: 9px; font-weight: 400; }
+.edit-more-fields[open] > summary { border-bottom: 1px solid var(--line); background: var(--bg-2); }
+#edit-drawer .edit-more-fields > .grid-2 { padding: 15px 13px; }
+.edit-comment-field { grid-column: 1 / -1; }
+#edit-comment { min-height: 64px; }
+.edit-lyrics-field { min-width: 0; }
+#edit-lyrics-hint { margin-bottom: 9px; font-size: 10px; line-height: 1.8; }
+#edit-lyrics { min-height: 132px; }
+#edit-drawer .drawer-foot { gap: 11px; margin-top: 0; padding: 14px 21px 17px; background: var(--bg-2); }
+#edit-change-summary { min-width: 0; color: var(--fg-2); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+#edit-change-summary[data-state="changed"], #edit-change-summary[data-changed="true"] { color: var(--accent-2); font-weight: 600; }
+#edit-drawer .edit-write-options { gap: 8px 16px; }
+#edit-drawer .edit-write-options .check { gap: 6px; font-size: 10px; color: var(--fg-2); line-height: 1.7; }
+#edit-drawer .edit-actions { gap: 9px; flex-wrap: nowrap; }
+#edit-drawer .edit-actions .btn { min-width: 0; height: 37px; font-size: 11px; }
+#btn-edit-clear { flex: none; padding-inline: 13px; }
+#edit-result { max-height: min(140px, 22dvh); overflow-y: auto; min-width: 0; overflow-wrap: anywhere; }
+#edit-result .hint { font-size: 10px; }
+@media (max-width: 520px) {
+  #edit-drawer { inset: 8px 8px 8px auto; width: calc(100vw - 16px); max-width: none; border-radius: 13px; }
+  #edit-drawer .drawer-head { padding: 13px 15px 12px; gap: 10px; }
+  #edit-drawer .edit-heading h3 { font-size: 16px; }
+  #edit-scope { margin-top: 5px; font-size: 10px; }
+  .edit-overview { padding: 10px 15px; }
+  #edit-description { font-size: 10px; line-height: 1.8; }
+  #edit-load-status { font-size: 9px; max-height: 49px; margin-top: 6px; }
+  #edit-load-retry { margin-top: 3px; font-size: 9px; height: 27px; }
+  #edit-drawer .drawer-body { padding: 15px; gap: 17px; }
+  #edit-drawer .drawer-body .grid-2 { gap: 13px 11px; }
+  #edit-drawer .field :is(input[type="text"], textarea) { font-size: 12px; }
+  #edit-drawer .drawer-foot { padding: 11px 15px 13px; gap: 9px; }
+  #edit-change-summary { font-size: 10px; }
+  #edit-drawer .edit-write-options { gap: 6px 12px; }
+  #edit-drawer .edit-actions .btn { height: 35px; }
+}
+@media (max-width: 360px) {
+  #edit-drawer .drawer-body .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .edit-comment-field { grid-column: auto; }
+  #edit-drawer .edit-write-options { gap: 5px 10px; }
+  #edit-drawer .edit-write-options .check { font-size: 9px; }
+  #btn-edit-clear { padding-inline: 9px; }
+}
+@media (max-height: 650px) {
+  #edit-drawer .drawer-head { padding-block: 11px 9px; }
+  #edit-scope { -webkit-line-clamp: 1; margin-top: 4px; }
+  .edit-overview { padding-block: 8px; }
+  #edit-load-status { max-height: 40px; }
+  #edit-drawer .drawer-foot { padding-block: 10px; gap: 8px; }
+  #edit-result { max-height: 65px; }
+}
+@media (prefers-reduced-motion: reduce) { #edit-drawer .field :is(input[type="text"], textarea) { transition: none; } }

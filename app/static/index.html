@@ -12,6 +12,7 @@
 <link rel="stylesheet" href="./track-inspector.css">
 <link rel="stylesheet" href="./saved-filters.css">
 <link rel="stylesheet" href="./library-tools.css">
+<link rel="stylesheet" href="./metadata-editor.css">
 <link rel="stylesheet" href="./albums.css">
 <link rel="stylesheet" href="./artist-portraits.css">
 <link rel="stylesheet" href="./portrait-viewer.css">
@@ -678,14 +679,21 @@
 
 <aside class="drawer" id="edit-drawer" data-open="false" aria-labelledby="edit-drawer-title" aria-hidden="true">
   <div class="drawer-head">
-    <h3 id="edit-drawer-title">编辑元数据</h3>
-    <span class="badge" id="edit-scope">未选择</span>
-    <div class="spacer"></div>
+    <div class="edit-heading">
+      <h3 id="edit-drawer-title">编辑元数据</h3>
+      <span class="badge" id="edit-scope">未选择</span>
+    </div>
     <button class="btn btn-sm btn-ghost" id="edit-close" aria-label="关闭编辑面板">关闭</button>
   </div>
+  <div class="edit-overview">
+    <p class="hint" id="edit-description">载入现有资料后，修改需要调整的字段。预览差异并确认后，才会写入标签。</p>
+    <div class="edit-load-row">
+      <div id="edit-load-status" role="status"></div>
+      <button class="btn btn-sm btn-ghost" id="edit-load-retry" type="button" hidden>重新载入</button>
+    </div>
+  </div>
   <div class="drawer-body">
-    <p class="hint">只填想改的字段，留空表示保持原值不变。所有修改都会先出差异预览，确认后才写入标签。</p>
-    <div class="grid-2">
+    <div class="grid-2 edit-primary-fields">
       <label class="field"><span class="lbl">标题</span><input type="text" id="edit-title" autocomplete="off"></label>
       <label class="field"><span class="lbl">歌手（多歌手用 &amp; 分隔）</span><input type="text" id="edit-artist" autocomplete="off"></label>
       <label class="field"><span class="lbl">专辑</span><input type="text" id="edit-album" autocomplete="off"></label>
@@ -697,31 +705,32 @@
       <label class="field"><span class="lbl">语言</span><input type="text" id="edit-language" list="dl-languages" autocomplete="off"></label>
       <label class="field"><span class="lbl">专辑类型</span><input type="text" id="edit-albumtype" list="dl-albumtypes" autocomplete="off"></label>
     </div>
-    <details>
-      <summary class="lbl" style="cursor:pointer">更多字段（作曲 / 作词 / 版权 / 注释 / MusicBrainz ID）</summary>
-      <div class="grid-2" style="margin-top:8px">
+    <details class="edit-more-fields">
+      <summary class="lbl">更多资料<span>创作信息、注释与 MusicBrainz ID</span></summary>
+      <div class="grid-2">
         <label class="field"><span class="lbl">作曲</span><input type="text" id="edit-composer" autocomplete="off"></label>
         <label class="field"><span class="lbl">作词</span><input type="text" id="edit-lyricist" autocomplete="off"></label>
         <label class="field"><span class="lbl">版权</span><input type="text" id="edit-copyright" autocomplete="off"></label>
-        <label class="field"><span class="lbl">注释</span><input type="text" id="edit-comment" autocomplete="off"></label>
+        <label class="field edit-comment-field"><span class="lbl">注释</span><textarea id="edit-comment" rows="2" spellcheck="false"></textarea></label>
         <label class="field"><span class="lbl">MusicBrainz 歌手 ID</span><input type="text" id="edit-mb_artist_id" autocomplete="off"></label>
         <label class="field"><span class="lbl">MusicBrainz 发行组 ID</span><input type="text" id="edit-release_group_id" autocomplete="off"></label>
       </div>
     </details>
-    <div class="field" style="margin-top:8px">
+    <div class="field edit-lyrics-field">
       <span class="lbl">歌词</span>
       <p class="hint" id="edit-lyrics-hint">打开面板时会自动载入文件里现有的歌词；改了才会写入，清空 = 不改动（歌词不受「覆盖已有值」影响）。</p>
       <textarea id="edit-lyrics" rows="7" spellcheck="false" placeholder="（这个文件当前没有歌词）"></textarea>
     </div>
   </div>
   <div class="drawer-foot">
-    <div class="row">
+    <p id="edit-change-summary" role="status">尚未修改</p>
+    <div class="row edit-write-options">
       <label class="check"><input type="checkbox" id="edit-normalize" checked><span>多歌手归一为 &amp;</span></label>
       <label class="check"><input type="checkbox" id="edit-overwrite" checked><span>覆盖已有值</span></label>
     </div>
-    <div class="row">
+    <div class="row edit-actions">
       <button class="btn btn-primary flex-1" id="btn-edit-preview">预览变更</button>
-      <button class="btn" id="btn-edit-clear">清空输入</button>
+      <button class="btn" id="btn-edit-clear">重置修改</button>
     </div>
     <div id="edit-result"></div>
   </div>

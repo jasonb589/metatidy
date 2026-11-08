@@ -57,7 +57,12 @@ let nodes = null;
 let editTrigger = null;
 let refreshSequence = 0;
 let editRevision = 0;
-let lyricsInputRevision = 0;
+let editBaseline = new Map();
+let editTouched = new Set();
+let editDetailRequest = null;
+let editLyricsRequest = null;
+let editUnavailable = false;
+let lyricsTouched = false;
 let savedFilters = null;
 let cancelPendingSearch = () => {};
 
@@ -104,6 +109,10 @@ export function init() {
     drawerPreview: ui.byId("btn-edit-preview"),
     drawerClear: ui.byId("btn-edit-clear"),
     drawerResult: ui.byId("edit-result"),
+    editDescription: ui.byId("edit-description"),
+    editLoadStatus: ui.byId("edit-load-status"),
+    editLoadRetry: ui.byId("edit-load-retry"),
+    editChangeSummary: ui.byId("edit-change-summary"),
     editNormalize: ui.byId("edit-normalize"),
     editOverwrite: ui.byId("edit-overwrite"),
     editLyrics: ui.byId("edit-lyrics"),
@@ -302,16 +311,17 @@ export function init() {
   });
 
   nodes.drawerClose.addEventListener("click", closeEdit);
-  nodes.drawerClear.addEventListener("click", () => {
-    EDIT_FIELDS.forEach((key) => {
-      const input = ui.byId(`edit-${key}`);
-      if (input) input.value = "";
-    });
-    if (nodes.editLyrics) nodes.editLyrics.value = "";
-    lyricsInputRevision += 1;
-    lyricsBase = "";
-  });
-  nodes.editLyrics?.addEventListener("input", () => { lyricsInputRevision += 1; });
+  nodes.drawerClear.addEventListener("click", resetEditDraft);
+  nodes.editLoadRetry.addEventListener("click", () => void loadEditMetadata());
+  for (const key of EDIT_FIELDS) {
+    const input = ui.byId(`edit-${key}`);
+    const hint = ui.el("small", { id: `edit-hint-${key}`, class: "edit-field-hint" });
+    input.closest(".field").append(hint);
+    input.setAttribute("aria-describedby", hint.id);
+    input.addEventListener("input", () => { editTouched.add(key); syncEditDraft(); });
+  }
+  nodes.editLyrics?.addEventListener("input", () => { lyricsTouched = true; syncEditDraft(); });
+  window.addEventListener("metatidy:unauthorized", () => closeEdit({ restoreFocus: false }));
   nodes.drawerPreview.addEventListener("click", runPreview);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
@@ -1300,36 +1310,144 @@ function isCurrentEdit(revision) {
   return state.edit.open && revision === editRevision;
 }
 
+// Baselines use what the control can actually display. Text inputs strip line
+// breaks, while textareas normalize CRLF; neither may create an unintended edit.
+function editDisplayValue(key, value) {
+  const control = ui.byId(`edit-${key}`).cloneNode(false);
+  control.value = value === null ? "" : String(value);
+  return control.value;
+}
+
+function fieldBaseline(rows, key) {
+  const values = [];
+  for (const row of rows) {
+    if (!Object.hasOwn(row, key) || (row[key] !== null && typeof row[key] !== "string" && !(typeof row[key] === "number" && Number.isFinite(row[key])))) {
+      return { kind: "unknown", value: "" };
+    }
+    values.push(editDisplayValue(key, row[key]));
+  }
+  if (values.some(value => value !== values[0])) return { kind: "mixed", value: "" };
+  return { kind: values[0]?.trim() ? "unchanged" : "empty", value: values[0] || "" };
+}
+
+function populateEditBaseline(rows, { preserveDraft = false } = {}) {
+  for (const key of EDIT_FIELDS) {
+    const baseline = fieldBaseline(rows, key);
+    editBaseline.set(key, baseline);
+    if (!preserveDraft || !editTouched.has(key)) ui.byId(`edit-${key}`).value = baseline.value;
+  }
+  syncEditDraft();
+}
+
+function syncEditDraft() {
+  if (!state.edit.open) return;
+  const pending = collectFields();
+  for (const key of EDIT_FIELDS) {
+    const input = ui.byId(`edit-${key}`);
+    const baseline = editBaseline.get(key) || { kind: "unknown", value: "" };
+    const changed = Object.hasOwn(pending, key);
+    const ignoredBlank = input.value.trim() === "" && baseline.value.trim() !== "";
+    input.closest(".field").dataset.editState = changed ? "changed" : baseline.kind;
+    input.placeholder = baseline.kind === "mixed" ? "多个不同值，输入后统一修改"
+      : baseline.kind === "unknown" ? "尚未载入，留空保持原值" : "未填写";
+    ui.byId(`edit-hint-${key}`).textContent = changed ? (baseline.kind === "mixed" || baseline.kind === "unknown" ? "将应用到所选曲目" : "已修改，等待预览")
+      : ignoredBlank ? "留空会保留原值，不会清除标签"
+        : baseline.kind === "mixed" ? "多个不同值 · 留空保持各自原值"
+          : baseline.kind === "unknown" ? "此字段尚未载入 · 留空不修改"
+            : baseline.kind === "empty" ? "当前未填写"
+              : state.edit.rows.length > 1 ? "所选曲目的共同值" : "现有值";
+  }
+  const count = Object.keys(pending).length;
+  nodes.editChangeSummary.textContent = count ? `${count} 个字段待预览${state.edit.rows.length > 1 ? ` · 应用于 ${ui.fmtNum(state.edit.rows.length)} 首曲目` : ""}` : "尚未修改 · 未改动的字段不会写入";
+  nodes.editChangeSummary.dataset.changed = String(count > 0);
+  nodes.drawerPreview.disabled = state.edit.busy || editUnavailable;
+  nodes.drawerClear.disabled = state.edit.busy;
+  nodes.editLoadRetry.disabled = state.edit.busy;
+}
+
+function resetEditDraft() {
+  if (!state.edit.open || state.edit.busy) return;
+  editTouched.clear();
+  for (const key of EDIT_FIELDS) ui.byId(`edit-${key}`).value = editBaseline.get(key)?.value || "";
+  lyricsTouched = false;
+  nodes.editLyrics.value = lyricsBase;
+  nodes.drawerResult.replaceChildren();
+  syncEditDraft();
+}
+
+async function loadEditMetadata() {
+  if (!state.edit.open || state.edit.rows.length !== 1) return;
+  editDetailRequest?.abort();
+  const request = new AbortController();
+  editDetailRequest = request;
+  const revision = editRevision, id = Number(state.edit.rows[0].id);
+  nodes.editLoadStatus.textContent = "正在载入完整索引资料；你可以先修改已显示的字段。";
+  nodes.editLoadStatus.dataset.tone = "loading";
+  nodes.editLoadRetry.hidden = true;
+  try {
+    const detail = await api.track(id, { signal: request.signal });
+    if (!isCurrentEdit(revision) || request !== editDetailRequest || request.signal.aborted) return;
+    if (!detail || Array.isArray(detail) || Number(detail.id) !== id) throw new Error("返回的曲目与当前编辑对象不一致");
+    state.edit.rows[0] = { ...state.edit.rows[0], ...detail };
+    for (const key of EDIT_FIELDS) if (!Object.hasOwn(detail, key)) delete state.edit.rows[0][key];
+    populateEditBaseline(state.edit.rows, { preserveDraft: true });
+    editUnavailable = detail.file_exists === false;
+    const partial = [...editBaseline.values()].some(field => field.kind === "unknown");
+    nodes.editLoadStatus.textContent = editUnavailable ? "原文件暂不可访问。请检查挂载后重新载入，当前修改会保留。"
+      : partial ? "部分字段尚未载入，已单独标记；你可以重新载入，或只修改已知内容。"
+      : detail.tags_loaded === false || detail.path_derived === true ? "已载入索引资料，其中包含路径推断；预览时会读取文件里的真实值。"
+        : "已载入完整索引资料；预览时会核对文件里的实际值。";
+    nodes.editLoadStatus.dataset.tone = editUnavailable || partial ? "warn" : "success";
+    nodes.editLoadRetry.hidden = !editUnavailable && !partial;
+  } catch (error) {
+    if (!isCurrentEdit(revision) || request !== editDetailRequest || request.signal.aborted) return;
+    if (error.status === 404) editUnavailable = true;
+    nodes.editLoadStatus.textContent = error.status === 404 ? "这首曲目已不在索引中。请刷新曲库，或恢复索引后重新载入。"
+      : `完整资料载入失败：${error.message}。已显示的内容和你的修改已保留。`;
+    nodes.editLoadStatus.dataset.tone = "error";
+    nodes.editLoadRetry.hidden = false;
+  } finally {
+    if (isCurrentEdit(revision) && request === editDetailRequest) { editDetailRequest = null; syncEditDraft(); }
+  }
+}
+
 /** 载入文件里现有的歌词（只读；失败也不影响编辑其它字段）。 */
 async function loadLyrics(trackId) {
   const rowId = Number(trackId);
   if (!rowId || !nodes.editLyrics) return;
   const revision = editRevision;
-  const inputRevision = lyricsInputRevision;
+  editLyricsRequest?.abort();
+  const request = new AbortController();
+  editLyricsRequest = request;
   if (nodes.editLyricsHint) nodes.editLyricsHint.textContent = "正在读取文件里的歌词…";
   try {
-    const data = await api.trackLyrics(rowId);
+    const data = await api.trackLyrics(rowId, { signal: request.signal });
     // 期间可能已经关了面板或换了曲目：只认当前这一首
     const current = state.edit.rows[0];
-    if (!isCurrentEdit(revision) || !current || Number(current.id) !== rowId) return;
-    lyricsBase = data.lyrics || "";
+    if (!isCurrentEdit(revision) || request !== editLyricsRequest || request.signal.aborted || !current || Number(current.id) !== rowId) return;
+    lyricsBase = editDisplayValue("lyrics", typeof data.lyrics === "string" ? data.lyrics : "");
     // 网络返回之前已经开始输入时，保留用户的文字，只更新比对基线。
-    if (inputRevision === lyricsInputRevision) nodes.editLyrics.value = lyricsBase;
+    if (!lyricsTouched) nodes.editLyrics.value = lyricsBase;
     if (nodes.editLyricsHint) {
       nodes.editLyricsHint.textContent = data.has_lyrics
         ? `文件里现有 ${data.lines} 行 · ${data.chars} 字（改了才会写入；清空 = 不改动）`
         : "这个文件当前没有歌词：写进去后点「预览变更」，确认才会落盘。";
     }
   } catch (err) {
-    if (!isCurrentEdit(revision)) return;
+    if (!isCurrentEdit(revision) || request !== editLyricsRequest || request.signal.aborted) return;
     if (nodes.editLyricsHint) {
       nodes.editLyricsHint.textContent = `读取现有歌词失败：${err.message}（留空表示不改动歌词）`;
     }
+  } finally {
+    if (isCurrentEdit(revision) && request === editLyricsRequest) { editLyricsRequest = null; syncEditDraft(); }
   }
 }
 
 function openEdit(rows) {
   if (!rows || !rows.length) return;
+  editDetailRequest?.abort();
+  editLyricsRequest?.abort();
+  editDetailRequest = editLyricsRequest = null;
   const revision = ++editRevision;
   const trigger = document.activeElement;
   if (!state.edit.open || !nodes.drawer.contains(trigger)) {
@@ -1338,21 +1456,29 @@ function openEdit(rows) {
   state.edit.rows = rows.map((row) => ({ ...row }));
   state.edit.open = true;
   state.edit.busy = false;
+  editUnavailable = false;
+  editBaseline = new Map();
+  editTouched = new Set();
+  lyricsTouched = false;
   nodes.drawerPreview.disabled = false;
   nodes.drawerPreview.textContent = "预览变更";
   nodes.drawerResult.replaceChildren();
-  EDIT_FIELDS.forEach((key) => {
-    const input = ui.byId(`edit-${key}`);
-    if (input) input.value = "";
-  });
   // 歌词：先清空，再载入文件里现有的（多选时留空 = 不改动歌词）
   lyricsBase = "";
   if (nodes.editLyrics) nodes.editLyrics.value = "";
   if (nodes.editLyricsHint) {
-    nodes.editLyricsHint.textContent =
-      "打开面板时会自动载入文件里现有的歌词；改了才会写入，清空 = 不改动（歌词不受「覆盖已有值」影响）。";
+    nodes.editLyricsHint.textContent = rows.length === 1
+      ? "正在载入现有歌词；只提交修改，留空保持原值。"
+      : "批量编辑不载入各首歌词；填写后会统一替换所选曲目的歌词，留空保持各自原值。";
   }
-  if (state.edit.rows.length === 1) loadLyrics(state.edit.rows[0].id);
+  populateEditBaseline(state.edit.rows);
+  nodes.editDescription.textContent = rows.length === 1
+    ? "已有资料直接显示，只提交实际修改的字段。留空保持原值；预览并确认后才写入。"
+    : "相同字段显示共同值，不同内容会明确标记。只提交你修改的字段，留空保持各自原值。";
+  nodes.editLoadRetry.hidden = true;
+  nodes.editLoadStatus.dataset.tone = "success";
+  nodes.editLoadStatus.textContent = "已显示所选曲目的已知资料；未载入字段不会被当作空值写入。";
+  if (rows.length === 1) { void loadEditMetadata(); void loadLyrics(rows[0].id); }
   const first = state.edit.rows[0];
   ui.setText(nodes.drawerScope, rows.length === 1 ? `1 首：${first.title || first.filename}` : `${rows.length} 首`);
   nodes.drawerScope.title = rows.length === 1 ? first.path || "" : rows.map((row) => row.title || row.filename).join("\n");
@@ -1372,16 +1498,21 @@ function openEdit(rows) {
 /** Review handoff carries the complete, immutable selection scope. */
 export function editSelection(rows) { openEdit(rows); }
 
-function closeEdit() {
+function closeEdit({ restoreFocus = true } = {}) {
   if (!state.edit.open) return;
   editRevision += 1;
+  editDetailRequest?.abort();
+  editLyricsRequest?.abort();
+  editDetailRequest = editLyricsRequest = null;
   state.edit.open = false;
   state.edit.busy = false;
   nodes.drawer.dataset.open = "false";
   // 先把焦点移出即将隐藏的抽屉；列表刷新后原触发按钮可能已经不在文档中。
-  if (editTrigger?.isConnected && editTrigger.getClientRects().length && !editTrigger.matches(":disabled") && !editTrigger.closest("[inert]") && !nodes.drawer.contains(editTrigger)) editTrigger.focus();
-  else if (state.tab === "tracks") nodes.q.focus();
-  else document.querySelector('.tab[aria-selected="true"]')?.focus();
+  if (restoreFocus) {
+    if (editTrigger?.isConnected && editTrigger.getClientRects().length && !editTrigger.matches(":disabled") && !editTrigger.closest("[inert]") && !nodes.drawer.contains(editTrigger)) editTrigger.focus();
+    else if (state.tab === "tracks") nodes.q.focus();
+    else document.querySelector('.tab[aria-selected="true"]')?.focus();
+  }
   nodes.drawer.setAttribute("aria-hidden", "true");
   nodes.drawer.inert = true;
   editTrigger = null;
@@ -1394,27 +1525,28 @@ function collectFields() {
     const input = ui.byId(`edit-${key}`);
     if (!input) return;
     const value = input.value.trim();
-    if (value !== "") fields[key] = value;
+    if (value !== "" && value !== (editBaseline.get(key)?.value || "").trim()) fields[key] = value;
   });
   // 歌词：只有改动过才带上（基线是打开面板时从文件里读回来的那份）
   const lyrics = nodes.editLyrics ? nodes.editLyrics.value : "";
-  if (lyrics.trim() !== "" && lyrics !== lyricsBase) fields.lyrics = lyrics;
+  if (lyrics.trim() !== "" && lyrics.trim() !== lyricsBase.trim()) fields.lyrics = lyrics;
   return fields;
 }
 
 async function runPreview() {
-  if (state.edit.busy || !state.edit.open) return;
+  if (state.edit.busy || !state.edit.open || editUnavailable) return;
   const revision = editRevision;
   const ids = state.edit.rows.map((row) => Number(row.id)).filter(Boolean);
   if (!ids.length) return;
   const fields = collectFields();
   if (!Object.keys(fields).length) {
-    ui.toast("warn", "还没有填写要修改的字段", "留空的字段表示保持原值不变。");
+    ui.toast("info", "还没有需要提交的修改", "未修改的字段与留空的字段都会保留原值。");
     return;
   }
   const normalize = nodes.editNormalize.checked;
   const overwrite = nodes.editOverwrite.checked;
   state.edit.busy = true;
+  syncEditDraft();
   nodes.drawerPreview.disabled = true;
   nodes.drawerPreview.textContent = "预览中…";
   ui.clear(nodes.drawerResult);
@@ -1483,8 +1615,8 @@ async function runPreview() {
   } finally {
     if (isCurrentEdit(revision)) {
       state.edit.busy = false;
-      nodes.drawerPreview.disabled = false;
       nodes.drawerPreview.textContent = "预览变更";
+      syncEditDraft();
     }
   }
 }
@@ -1537,6 +1669,16 @@ async function applyChanges(ids, fields, normalize, overwrite, revision) {
     } else {
       ui.toast("ok", result.written ? `已写入 ${result.written} 首` : "没有需要写入的变更",
         [unchanged ? `${unchanged} 首保留现值` : "", (result.fields || []).length ? `字段：${result.fields.map(ui.fieldLabel).join("、")}` : ""].filter(Boolean).join("；"));
+    }
+    if (isCurrentEdit(revision) && ids.length === 1 && !failed.some(item => Number(item.track_id) === ids[0])) {
+      const outcome = result.items?.find(item => Number(item.track_id) === ids[0]);
+      // Read the resulting index instead of guessing normalized/aliased values.
+      // A draft typed while the write was running still belongs to the user.
+      for (const key of Array.isArray(outcome?.written) ? outcome.written : []) {
+        if (EDIT_FIELDS.includes(key) && ui.byId(`edit-${key}`).value.trim() === String(fields[key] ?? "").trim()) editTouched.delete(key);
+      }
+      if (outcome?.lyrics && nodes.editLyrics.value.trim() === String(fields.lyrics ?? "").trim()) lyricsTouched = false;
+      await Promise.allSettled([loadEditMetadata(), ...(outcome?.lyrics ? [loadLyrics(ids[0])] : [])]);
     }
     const writtenIds = Array.isArray(result.items)
       ? result.items.filter((item) => item.file_changed && !failed.some((failure) => Number(failure.track_id) === Number(item.track_id))).map((item) => Number(item.track_id))

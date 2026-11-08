@@ -203,8 +203,8 @@ export const api = {
   albumDetail: (params, options = {}) => request(`${API}/albums/detail?${qs(params)}`, options),
   albumSelection: (payload, options = {}) => request(`${API}/albums/selection`, { ...options, method: "POST", body: payload }),
   trackSelection: (payload, options = {}) => request(`${API}/tracks/selection`, { ...options, method: "POST", body: payload }),
-  track: (id) => request(`${API}/tracks/${id}`),
-  trackLyrics: (id) => request(`${API}/tracks/${id}/lyrics`),
+  track: (id, options = {}) => request(`${API}/tracks/${id}`, options),
+  trackLyrics: (id, options = {}) => request(`${API}/tracks/${id}/lyrics`, options),
   previewTracks: (payload) => request(`${API}/tracks/preview`, { method: "POST", body: payload, timeout: 90000 }),
   applyTracks: (payload) => request(`${API}/tracks/apply`, { method: "POST", body: payload, timeout: 300000 }),
 

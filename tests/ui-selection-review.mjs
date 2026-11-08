@@ -160,6 +160,9 @@ try {
     assert.equal(await page.locator('dialog[open]').count(), 0); assert.equal(writes(calls).length, 0); await page.locator('#edit-review-selection').click(); await page.locator('#selection-review-dialog').waitFor();
   }));
   await check('Missing index feedback cannot redirect a different editor scope into unrelated selections', () => withPage(async ({ page, control }) => {
+    // The track exists when opened, then disappears before preview. A track
+    // already missing at the initial detail request is now blocked earlier.
+    await page.route('**/api/tracks/5000', route => route.fulfill({ json: { id: 5000, title: '单独打开的旧曲目', file_exists: true } }));
     control.previewMissing = 1;
     await page.evaluate(async () => { const { editSelection } = await import('/tracks.js'); editSelection([{ id: 5000, title: '单独打开的旧曲目' }]); });
     await page.locator('#edit-title').fill('重新编辑'); await page.locator('#btn-edit-preview').click();
