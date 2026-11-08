@@ -14,6 +14,8 @@
 <link rel="stylesheet" href="./library-tools.css">
 <link rel="stylesheet" href="./albums.css">
 <link rel="stylesheet" href="./artist-portraits.css">
+<link rel="stylesheet" href="./portrait-viewer.css">
+<link rel="stylesheet" href="./folder-browser.css">
 <link rel="stylesheet" href="./review-queue.css">
 <link rel="stylesheet" href="./move-review.css">
 <link rel="stylesheet" href="./jobs-center.css">
@@ -166,6 +168,7 @@
         <span class="badge count-chip" id="tracks-total">—</span>
         <div class="grow">
           <span class="hint" id="tracks-updated"></span>
+          <button class="btn btn-sm" id="btn-library-folders" type="button">浏览目录</button>
           <button class="btn btn-sm" id="btn-duplicates" type="button">疑似重复</button>
           <button class="btn btn-sm btn-ghost" id="btn-tracks-reload" title="刷新列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg><span>刷新</span></button>
           <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
@@ -178,7 +181,11 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">搜索曲库</span>
             <input type="search" id="tracks-q" placeholder="搜索歌曲、艺术家、专辑…" autocomplete="off">
           </label>
-          <label class="row-inline sort-control">
+          <details id="library-display-settings" class="library-display-settings">
+            <summary id="library-display-toggle"><span class="library-display-label">显示与排序</span><span id="library-display-summary" class="library-display-summary">歌手 · 升序</span><span class="library-display-chevron" aria-hidden="true">⌄</span></summary>
+            <div class="library-display-panel">
+              <div class="library-display-heading"><strong>按你的习惯浏览</strong><span>设置保存在当前浏览器</span></div>
+          <label class="sort-control">
             <span class="lbl">排序</span>
             <select id="tracks-sort">
               <option value="artist">歌手</option>
@@ -192,14 +199,14 @@
               <option value="edited">最后编辑时间</option>
             </select>
           </label>
-          <label class="row-inline sort-control">
+          <label class="sort-control">
             <span class="lbl">方向</span>
             <select id="tracks-order">
               <option value="asc">升序</option>
               <option value="desc">降序</option>
             </select>
           </label>
-          <label class="row-inline page-size-control">
+          <label class="page-size-control">
             <span class="lbl">每页</span>
             <select id="tracks-pagesize">
               <option value="50">50</option>
@@ -207,6 +214,9 @@
               <option value="200">200</option>
             </select>
           </label>
+          <div id="library-display-density" class="library-display-density"><span class="lbl">列表密度</span></div>
+            </div>
+          </details>
         </div>
         <div class="filter-toolbar"><div class="quick-filters" id="quick-filters" role="group" aria-label="快速筛选"><button type="button" data-quick-filter="all" aria-pressed="true">全部曲目</button><button type="button" data-quick-filter="missing_cover" aria-pressed="false">待补封面</button><button type="button" data-quick-filter="missing_lyrics" aria-pressed="false">待补歌词</button></div><span class="filter-toolbar-hint">为你的收藏补全细节</span></div>
         <details class="advanced-filters"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>更多筛选<span aria-hidden="true">⌄</span></summary><div class="row">

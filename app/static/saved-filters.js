@@ -24,6 +24,8 @@ function snapshotOf(value) {
   const source = object(value) ? value : {};
   const incoming = object(source.filters) ? source.filters : {};
   const filters = {};
+  filters.folder = typeof incoming.folder === "string" && !incoming.folder.includes("\0") ? incoming.folder : "";
+  filters.folder_recursive = incoming.folder_recursive !== false;
   for (const key of TEXT_FILTERS) filters[key] = text(incoming[key]);
   for (const key of FLAG_FILTERS) filters[key] = incoming[key] === true;
   filters.album_group = normalizeAlbumGroup(incoming.album_group);
@@ -41,6 +43,7 @@ function snapshotOf(value) {
 function describe(snapshot) {
   const parts = [];
   if (snapshot.q) parts.push(`搜索：${snapshot.q}`);
+  if (snapshot.filters.folder) parts.push(`目录：${snapshot.filters.folder}${snapshot.filters.folder_recursive ? "（含子目录）" : "（仅本层）"}`);
   if (snapshot.filters.album_group) parts.push(`专辑分组：${albumGroupLabel(snapshot.filters.album_group)}`);
   for (const key of TEXT_FILTERS) if (snapshot.filters[key]) parts.push(`${LABELS[key]}：${snapshot.filters[key]}`);
   for (const key of FLAG_FILTERS) if (snapshot.filters[key]) parts.push(LABELS[key]);

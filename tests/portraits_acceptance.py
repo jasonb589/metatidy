@@ -29,9 +29,9 @@ from PIL import Image
 from tests.jobs_acceptance import _postgres
 
 
-def _picture(kind: str, color=(45, 108, 178)) -> bytes:
+def _picture(kind: str, color=(45, 108, 178), size=(32, 24)) -> bytes:
     stream = io.BytesIO()
-    Image.new("RGB", (32, 24), color).save(stream, format=kind)
+    Image.new("RGB", size, color).save(stream, format=kind)
     return stream.getvalue()
 
 
@@ -341,7 +341,9 @@ def check_portraits(
     data = work / "portrait-data" / nonce
     artifact_dir = data / "artist-portraits"
     artifact_dir.mkdir(parents=True)
-    jpeg, avif = _picture("JPEG"), _picture("AVIF")
+    # The source JPEG is deliberately larger than its AVIF thumbnail. Reading
+    # the original image must not silently substitute the preview rendition.
+    jpeg, avif = _picture("JPEG", size=(640, 480)), _picture("AVIF")
     for identifier in (portrait_id, damaged_id):
         (artifact_dir / f"{identifier}.jpg").write_bytes(jpeg)
         (artifact_dir / f"{identifier}.avif").write_bytes(avif)
@@ -405,6 +407,29 @@ def check_portraits(
         if "image/" not in response.headers.get("content-type", ""):
             public_results.append(response.text)
         return response
+
+    def artifact_snapshot():
+        return {path.name: (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_size,
+                            path.stat().st_mtime_ns) for path in artifact_dir.iterdir()}
+
+    def portrait_snapshot():
+        return _postgres(f"""SELECT jsonb_build_object(
+            'portraits',(SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM artist_portraits p WHERE id IN ({ids_sql})),
+            'fetches',(SELECT jsonb_agg(to_jsonb(f) ORDER BY cache_key) FROM artist_portrait_fetches f
+                WHERE cache_key IN ({keys_sql}) OR portrait_id IN ({ids_sql})),
+            'syncs',(SELECT jsonb_agg(to_jsonb(s) ORDER BY token) FROM artist_portrait_syncs s
+                WHERE portrait_id IN ({ids_sql})));""")
+
+    def binary_matches(response, expected, mime, identifier, *, attachment):
+        disposition = "attachment" if attachment else "inline"
+        extension = "jpg" if mime == "image/jpeg" else "avif"
+        headers = response.headers
+        return (response.status_code == 200 and response.content == expected
+                and hashlib.sha256(response.content).digest() == hashlib.sha256(expected).digest()
+                and headers.get("content-type") == mime
+                and headers.get("content-disposition") == f'{disposition}; filename="portrait-{identifier}.{extension}"'
+                and {"private", "no-store"} <= {part.strip() for part in headers.get("cache-control", "").split(",")}
+                and headers.get("x-content-type-options") == "nosniff")
 
     def preview(identifier=portrait_id, target="artist-b"):
         response = request("POST", "/api/artist-portraits/sync-preview",
@@ -472,8 +497,11 @@ def check_portraits(
                  "source_page": "https://www.last.fm/music/Fixture",
                  "source_image": source_image,
                  "jpeg_digest": hashlib.sha256(jpeg).hexdigest(), "preview_digest": hashlib.sha256(avif).hexdigest(),
-                 "width": 32, "height": 24, "created_at": anchor + index}
+                 "width": 640, "height": 480, "created_at": anchor + index}
                 for index, identifier in enumerate(portrait_ids)]
+        # Metadata may come from old records rather than the validated fetch
+        # form. Attachment headers must use the UUID even with unusual tags.
+        rows[1]["artist"] = f'{artist} 周杰倫 "原图"\\文件\r\nX-Portrait-Fixture: injected'
         rows[3]["artist"] = literal_artist
         rows[4]["artist"] = literal_artist.replace("%", "X").replace("_", "Y")
         rows[-1]["created_at"] = rows[-2]["created_at"]  # Tie ordering must use the UUID.
@@ -512,6 +540,84 @@ def check_portraits(
               image.status_code == 200 and image.headers.get("content-type") == "image/avif"
               and decoded.format == "AVIF" and decoded.size == (32, 24)
               and "no-store" in image.headers.get("cache-control", ""))
+
+        before_artifacts, before_portraits = artifact_snapshot(), portrait_snapshot()
+        before_network = (upstream.login_count, upstream.read_count, upstream.count(), upstream.external_attempts)
+        original_image = request("GET", f"/api/artist-portraits/{portrait_id}/image")
+        full_size = Image.open(io.BytesIO(original_image.content))
+        full_size.load()
+        check("头像大图按摘要返回原始JPEG字节和尺寸，inline响应不替换成AVIF缩略图",
+              binary_matches(original_image, jpeg, "image/jpeg", portrait_id, attachment=False)
+              and full_size.format == "JPEG" and full_size.size == (640, 480)
+              and full_size.size != decoded.size)
+        downloads = [request("GET", f"/api/artist-portraits/{portrait_id}/download", params=params)
+                     for params in ({}, {"format": "jpeg"}, {"format": "avif"})]
+        download_images = [Image.open(io.BytesIO(response.content)) for response in downloads]
+        for downloaded in download_images:
+            downloaded.load()
+        check("JPEG默认下载和AVIF下载返回已验证原字节，附件名、MIME及私有缓存头准确",
+              all(binary_matches(response, expected, mime, portrait_id, attachment=True)
+                  for response, expected, mime in zip(downloads, (jpeg, jpeg, avif),
+                                                      ("image/jpeg", "image/jpeg", "image/avif")))
+              and [(item.format, item.size) for item in download_images]
+              == [("JPEG", (640, 480)), ("JPEG", (640, 480)), ("AVIF", (32, 24))])
+        unusual_downloads = [request("GET", f"/api/artist-portraits/{damaged_id}/{route}", params=params)
+                             for route, params in (("image", {}), ("download", {}), ("download", {"format": "avif"}))]
+        check("Unicode、引号和换行歌手名不会进入图片或下载响应头，文件名仅含头像UUID",
+              all(binary_matches(response, expected, mime, damaged_id, attachment=ordinal > 0)
+                  and "x-portrait-fixture" not in response.headers
+                  and all("周杰倫" not in value and "injected" not in value for value in response.headers.values())
+                  for ordinal, (response, expected, mime) in enumerate(zip(
+                      unusual_downloads, (jpeg, jpeg, avif), ("image/jpeg", "image/jpeg", "image/avif")))))
+        bad_formats = ("", "jpg", "JPEG", "AVIF", "png", "jpeg ", "../jpeg", "jpeg\r\nX-Fixture: injected", "\0")
+        format_codes = [request("GET", f"/api/artist-portraits/{portrait_id}/download", params={"format": value}).status_code
+                        for value in bad_formats]
+        invalid_codes = [request("GET", f"/api/artist-portraits/not-a-uuid/{route}").status_code
+                         for route in ("image", "download")]
+        absent_id = str(uuid.uuid4())
+        absent_codes = [request("GET", f"/api/artist-portraits/{absent_id}/{route}", params=params).status_code
+                        for route, params in (("image", {}), ("download", {}), ("download", {"format": "avif"}))]
+        check("图片与下载拒绝非法UUID或格式，缺失头像明确404且不回退抓取",
+              format_codes == [422] * len(bad_formats) and invalid_codes == [400, 400]
+              and absent_codes == [404, 404, 404],
+              f"formats={format_codes}, uuid={invalid_codes}, absent={absent_codes}")
+        check("大图和下载只读现有缓存，不创建文件、改写索引或联系Last.fm及Navidrome",
+              artifact_snapshot() == before_artifacts and portrait_snapshot() == before_portraits
+              and (upstream.login_count, upstream.read_count, upstream.count(), upstream.external_attempts) == before_network)
+
+        unavailable_codes = [request("GET", f"/api/artist-portraits/{rows[2]['id']}/{route}", params=params).status_code
+                             for route, params in (("image", {}), ("download", {}), ("download", {"format": "avif"}))]
+        corrupt_codes, independent_formats = [], []
+        for suffix, original in (("jpg", jpeg), ("avif", avif)):
+            artifact = artifact_dir / f"{damaged_id}.{suffix}"
+            for corruption in ("missing", "tampered"):
+                try:
+                    if corruption == "missing":
+                        artifact.unlink()
+                    else:
+                        artifact.write_bytes(original + b"download-tampered")
+                    affected = (("image", {}), ("download", {"format": "jpeg"})) if suffix == "jpg" else (
+                        ("download", {"format": "avif"}),)
+                    corrupt_codes.extend(request("GET", f"/api/artist-portraits/{damaged_id}/{route}", params=params).status_code
+                                         for route, params in affected)
+                    unaffected = (("download", {"format": "avif"}, avif, "image/avif", True),) if suffix == "jpg" else (
+                        ("image", {}, jpeg, "image/jpeg", False),
+                        ("download", {"format": "jpeg"}, jpeg, "image/jpeg", True))
+                    independent_formats.extend(binary_matches(
+                        request("GET", f"/api/artist-portraits/{damaged_id}/{route}", params=params),
+                        expected, mime, damaged_id, attachment=attachment)
+                        for route, params, expected, mime, attachment in unaffected)
+                finally:
+                    artifact.write_bytes(original)
+        check("大图与下载遇到目标格式文件丢失或摘要被篡改时拒绝返回",
+              unavailable_codes == [400, 400, 400] and corrupt_codes == [400] * 6,
+              f"missing={unavailable_codes}, corrupt={corrupt_codes}")
+        check("单格式图片与下载不依赖另一格式，损坏AVIF仍可取JPEG且反之亦然",
+              len(independent_formats) == 6 and all(independent_formats)
+              and portrait_snapshot() == before_portraits
+              and {name: (digest, size) for name, (digest, size, _) in artifact_snapshot().items()}
+              == {name: (digest, size) for name, (digest, size, _) in before_artifacts.items()}
+              and (upstream.login_count, upstream.read_count, upstream.count(), upstream.external_attempts) == before_network)
 
         gallery_pages = [archive("library", q=artist, page=page, page_size=4) for page in range(1, 5)]
         gallery_items = [item for page in gallery_pages for item in page["items"]]
@@ -739,12 +845,29 @@ def check_portraits(
         anon_codes.extend(request("POST", route, json={}).status_code for route in (
             "/api/artist-portraits/fetch", "/api/artist-portraits/sync-preview", "/api/artist-portraits/sync", "/api/navidrome/test"))
         check("设置口令后头像读取、预览、收藏、历史和同步全受认证保护", anon_codes == [401] * 13, str(anon_codes))
+        download_anon_codes = [request("GET", route, params=params).status_code for route, params in (
+            (f"/api/artist-portraits/{portrait_id}/image", {}),
+            (f"/api/artist-portraits/{portrait_id}/download", {}),
+            (f"/api/artist-portraits/{portrait_id}/download", {"format": "avif"}),
+            ("/api/artist-portraits/not-a-uuid/image", {}),
+            (f"/api/artist-portraits/{portrait_id}/download", {"format": "invalid"}),
+        )]
+        check("大图与两格式下载均先鉴权，匿名非法参数请求也返回401",
+              download_anon_codes == [401] * 5, str(download_anon_codes))
         request("POST", "/api/login", json={"password": private_password}).raise_for_status()
+        authenticated_image = request("GET", f"/api/artist-portraits/{portrait_id}/image")
+        authenticated_download = request("GET", f"/api/artist-portraits/{portrait_id}/download", params={"format": "avif"})
         recovered = request("GET", f"/api/artist-portraits/sync/{interrupted['token']}").json()
         replay = submit(interrupted["token"])
         check("服务重启把未完成同步恢复为待确认，不会后台补传",
               recovered["state"] == "uncertain" and replay.status_code == 409 and upstream.count() == before)
         request("POST", "/api/logout", json={}).raise_for_status()
+        logged_out_image = request("GET", f"/api/artist-portraits/{portrait_id}/image")
+        logged_out_download = request("GET", f"/api/artist-portraits/{portrait_id}/download")
+        check("登录会话可读取大图并下载已验证缓存，退出后不再允许读取或下载",
+              binary_matches(authenticated_image, jpeg, "image/jpeg", portrait_id, attachment=False)
+              and binary_matches(authenticated_download, avif, "image/avif", portrait_id, attachment=True)
+              and logged_out_image.status_code == logged_out_download.status_code == 401)
 
         public = "\n".join(public_results)
         check("返回内容不含 Navidrome 密码、JWT、Subsonic token 或 salt",

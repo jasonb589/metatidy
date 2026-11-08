@@ -25,6 +25,7 @@ mod portraits;
 
 use std::sync::Arc;
 mod fixtures;
+mod folders;
 mod language;
 mod models;
 mod normalize;

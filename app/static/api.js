@@ -83,6 +83,80 @@ export async function request(path, { method = "GET", body, timeout = 30000, sig
   return data === null ? {} : data;
 }
 
+/** Authenticated local downloads: retain cancellation and byte limits through the body. */
+export async function fetchBlob(path, { mimeType, maxBytes = 8 * 1024 * 1024, timeout = 30000, signal } = {}) {
+  if (signal?.aborted) throw new ApiError("请求已取消");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  const relay = () => controller.abort();
+  signal?.addEventListener("abort", relay, { once: true });
+  const read = async (response, limit) => {
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > limit) {
+      await response.body?.cancel();
+      throw new ApiError("返回的文件超过允许大小");
+    }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const blob = await response.blob();
+      if (blob.size > limit) throw new ApiError("返回的文件超过允许大小");
+      return blob;
+    }
+    const chunks = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (done) break;
+        size += value.byteLength;
+        if (size > limit) { await reader.cancel(); throw new ApiError("返回的文件超过允许大小"); }
+        chunks.push(value);
+      }
+      return new Blob(chunks);
+    } finally { reader.releaseLock(); }
+  };
+  try {
+    const res = await fetch(path, { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+    const type = (res.headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+    if (!res.ok || type === "application/json" || type.endsWith("+json")) {
+      let detail = `${res.status} ${res.statusText || "文件读取失败"}`;
+      try {
+        const body = await read(res, 64 * 1024);
+        const data = JSON.parse(await body.text());
+        detail = explainDetail(data?.detail) || "接口返回了错误信息，未下载文件";
+      } catch (error) {
+        if (controller.signal.aborted && res.status !== 401) throw error;
+      }
+      if (res.status === 401) window.dispatchEvent(new CustomEvent("metatidy:unauthorized", { detail }));
+      throw new ApiError(detail, res.status, detail);
+    }
+    if (!mimeType || type !== mimeType) {
+      await res.body?.cancel();
+      throw new ApiError("返回的图片格式不符合预期，未保存文件", res.status);
+    }
+    const body = await read(res, maxBytes);
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    if (!body.size) throw new ApiError("返回的图片文件为空，未保存文件", res.status);
+    return new Blob([body], { type });
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (controller.signal.aborted || error?.name === "AbortError") {
+      throw new ApiError(signal?.aborted ? "请求已取消" : `请求超时（超过 ${Math.round(timeout / 1000)} 秒）`);
+    }
+    throw new ApiError("无法读取本地头像文件，请确认服务仍在运行");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", relay);
+  }
+}
+
+function portraitBlob(id, format, download, options) {
+  if (!["jpeg", "avif"].includes(format)) return Promise.reject(new ApiError("不支持的头像格式"));
+  const suffix = download ? `download?format=${format}` : format === "jpeg" ? "image" : "preview";
+  return fetchBlob(`/api/artist-portraits/${encodeURIComponent(id)}/${suffix}`, { ...options, mimeType: `image/${format}` });
+}
+
 /** 只保留有值的查询参数：false / 空串 / null 一律不传（后端默认就是 false）。 */
 export function qs(params) {
   const search = new URLSearchParams();
@@ -105,6 +179,8 @@ export const api = {
   artistPortraitStatus: (options = {}) => request(`${API}/artist-portraits/status`, options),
   artistPortraitLibrary: (params, options = {}) => request(`${API}/artist-portraits/library?${qs(params)}`, options),
   artistPortraitDetail: (id, options = {}) => request(`${API}/artist-portraits/${encodeURIComponent(id)}`, options),
+  artistPortraitImage: (id, format, options = {}) => portraitBlob(id, format, false, options),
+  artistPortraitDownload: (id, format, options = {}) => portraitBlob(id, format, true, options),
   artistPortraitHistory: (params, options = {}) => request(`${API}/artist-portraits/history?${qs(params)}`, options),
   artistPortraitFetch: (payload, options = {}) => request(`${API}/artist-portraits/fetch`, { ...options, method: "POST", body: payload, timeout: 90000 }),
   navidromeTest: (options = {}) => request(`${API}/navidrome/test`, { ...options, method: "POST", timeout: 45000 }),
@@ -119,7 +195,8 @@ export const api = {
   // 退出登录不带请求体：后端不必读它，也就不会出现「没消费 body 就返回」的收尾问题
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
-  tracks: (params) => request(`${API}/tracks?${qs(params)}`),
+  tracks: (params) => request(`${API}/tracks?${qs({ ...params, ...(params?.folder ? { folder_recursive: params.folder_recursive === false ? "false" : "true" } : {}) })}`),
+  folders: (params, options = {}) => request(`${API}/folders?${qs(params)}`, options),
   duplicateGroups: (params, options = {}) => request(`${API}/duplicates?${qs(params)}`, options),
   duplicateDetail: (params, options = {}) => request(`${API}/duplicates/detail?${qs(params)}`, options),
   duplicateSelection: (payload, options = {}) => request(`${API}/duplicates/selection`, { ...options, method: "POST", body: payload }),

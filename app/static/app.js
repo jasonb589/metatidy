@@ -20,6 +20,7 @@ import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOvervi
 import { initKeyboardHelp } from "./keyboard-help.js";
 import { openSelectionReview } from "./selection-review.js";
 import { openDuplicateReview, invalidateDuplicateReview } from "./duplicate-review.js";
+import { openFolderBrowser } from "./folder-browser.js";
 
 const TABS = ["tracks", "albums", "artist-portraits", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -102,6 +103,24 @@ function boot() {
   };
   on("library:review-duplicates", showDuplicates);
   ui.byId("btn-duplicates")?.addEventListener("click", showDuplicates);
+  const showFolders = () => {
+    if (!canUseWorkspace() || document.querySelector("dialog[open]")) return;
+    closeJobs();
+    openFolderBrowser({
+      onBrowse: scope => {
+        if (canUseWorkspace() && tracks.setFolderScope(scope)) void showScopedTracks();
+      },
+      onScan: async folder => {
+        if (!canUseWorkspace()) return;
+        try {
+          await activateTab("tracks", { focus: false });
+          if (state.tab === "tracks" && canUseWorkspace()) tracks.prepareFolderScan(folder);
+        } catch (error) { reportNavigationError(error); }
+      },
+    });
+  };
+  on("library:browse-folders", showFolders);
+  ui.byId("btn-library-folders")?.addEventListener("click", showFolders);
   on("library:batch-scrape", (scope) => {
     if (!canUseWorkspace() || !state.selection.size) return;
     activateTab("scrape", { focus: false }).then(() => {

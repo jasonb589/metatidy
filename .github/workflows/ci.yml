@@ -43,6 +43,7 @@ jobs:
           node tests/ui-album-detail.mjs
           node tests/ui-artist-portraits.mjs
           node tests/ui-duplicate-review.mjs
+          node tests/ui-folders.mjs
       - name: 保存桌面与手机预览
         if: always()
         uses: actions/upload-artifact@v4

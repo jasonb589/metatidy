@@ -244,6 +244,8 @@ pub struct TrackQuery {
     pub album: String,
     /// Exact normalized album group from the album browser, including blank artists.
     pub album_group: Option<(String, String)>,
+    /// Validated native directory scope, shared with indexed folder browsing.
+    pub folder: Option<crate::folders::FolderScope>,
     pub missing_cover: bool,
     pub missing_lyrics: bool,
     pub no_artist: bool,
@@ -309,6 +311,17 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         let album_bind = placeholder(&params);
         params.push(Param::Text(artist.clone()));
         clauses.push(album_group_predicate(album_bind, placeholder(&params)));
+    }
+    if let Some(folder) = &query.folder {
+        params.push(Param::Text(folder.directory().to_owned()));
+        let exact_bind = placeholder(&params);
+        let descendants_bind = if folder.recursive() {
+            params.push(Param::Text(folder.descendant_pattern()));
+            Some(placeholder(&params))
+        } else {
+            None
+        };
+        clauses.push(crate::folders::dir_predicate(exact_bind, descendants_bind));
     }
     if query.missing_cover {
         clauses.push("has_cover = false".to_string());

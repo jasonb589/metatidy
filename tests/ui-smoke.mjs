@@ -165,8 +165,10 @@ try {
     await page.locator('#view-list').click();
     assert.equal(await page.locator(`#tracks-tbody tr[data-id="${id}"] input[type="checkbox"]`).isChecked(), true);
     await page.locator(`#tracks-tbody tr[data-id="${id}"] input[type="checkbox"]`).uncheck();
+    await page.locator('#library-display-toggle').click();
     await page.locator('#density-compact').click();
     assert.equal(await page.locator('.library-card').getAttribute('data-library-density'), 'compact');
+    await page.keyboard.press('Escape');
     await page.locator('#view-cards').click();
     await page.reload();
     await page.locator('#tracks-grid .track-card').first().waitFor();
@@ -189,9 +191,11 @@ try {
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator('#view-list').click();
     assert.equal(await page.locator('#density-compact').getAttribute('aria-pressed'), 'true');
+    await page.locator('#library-display-toggle').click();
     await page.locator('#density-comfortable').click();
     await page.locator('#tracks-sort').selectOption('artist');
     await page.locator('#tracks-order').selectOption('asc');
+    await page.keyboard.press('Escape');
     await waitRows(page, 18);
   });
 

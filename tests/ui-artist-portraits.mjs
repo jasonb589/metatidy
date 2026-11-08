@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { jpeg as portraitJpeg, avif as portraitAvif } from './portrait-image-fixtures.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.join(root, '.codex/ui-preview');
@@ -26,7 +27,7 @@ const targets = [{ id: 'nd-1', name: '周杰伦', album_count: 3, song_count: 12
 const pageResult = (items, extra = {}) => ({ items, total: items.length, page: 1, page_size: 50, pages: 1, ...extra });
 const serviceStatus = model => ({ lastfm: { busy: false, cooldown: false, retry_after_seconds: 0, retry_at: 0, reason: '', min_interval_seconds: 5, ...model.lastfm }, navidrome: { configured: model.configured, url: 'https://music.example.test', min_version: '0.61.0' }, cache_days: 7 });
 const uuid = value => createHash('md5').update(String(value)).digest('hex').replace(/^(........)(....)(....)(....)(............)$/, '$1-$2-$3-$4-$5');
-const portraitFor = artist => ({ id: uuid(artist), artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: 'https://lastfm.freetls.fastly.net/i/u/512x512/0123456789abcdef0123456789abcdef.jpg', width: 512, height: 512, created_at: Math.floor(Date.now() / 1000), preview_url: `/api/artist-portraits/${uuid(artist)}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
+const portraitFor = artist => ({ id: uuid(artist), artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: 'https://lastfm.freetls.fastly.net/i/u/512x512/0123456789abcdef0123456789abcdef.jpg', width: 512, height: 384, created_at: Math.floor(Date.now() / 1000), preview_url: `/api/artist-portraits/${uuid(artist)}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
 const image = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#e8ded3"/><circle cx="256" cy="185" r="87" fill="#76645c"/><path d="M95 512v-80a161 161 0 0 1 322 0v80" fill="#596e69"/></svg>';
 const historyItem = (index, state = 'uploaded', extra = {}) => ({ token: uuid(`history-${index}`), portrait_id: uuid(`歌手 ${index}`), artist: `歌手 ${index}`, target: { id: `target-${index}`, name: `目标 ${index}` }, state, message: state === 'uploaded' ? '头像已同步' : state === 'failed' ? '连接失败' : state === 'uncertain' ? '请在 Navidrome 核对' : '正在上传', created_at: 1700000000 + index, updated_at: 1700001000 + index, ...extra });
 async function check(name, action) {
@@ -83,7 +84,13 @@ async function withPage(action, options = {}) {
       return route.fulfill({ json: { token, portrait: model.portraits.get(body.portrait_id), target: targets.find(item => item.id === body.artist_id), sync_state: 'ready', expires_at: Math.floor(Date.now() / 1000) + 600, target_image_url: `/api/artist-portraits/sync/${token}/target-image` } });
     }
     if (url.pathname === '/api/artist-portraits/sync') return route.fulfill({ json: { state: 'uploading', token: body.token, message: '正在上传' } });
-    if (url.pathname.endsWith('/preview') || url.pathname.endsWith('/target-image')) return route.fulfill({ contentType: 'image/svg+xml', headers: { 'Cache-Control': 'no-store' }, body: image });
+    const file = url.pathname.match(/^\/api\/artist-portraits\/([0-9a-f-]{36})\/(preview|image|download)$/);
+    if (file) {
+      if (!model.portraits.has(file[1])) return route.fulfill({ status: 404, json: { detail: '本地头像不存在' } });
+      const format = file[2] === 'preview' ? 'avif' : file[2] === 'image' ? 'jpeg' : url.searchParams.get('format') || 'jpeg';
+      return route.fulfill({ contentType: `image/${format}`, headers: { 'Cache-Control': 'private, no-store', 'Content-Disposition': `${file[2] === 'download' ? 'attachment' : 'inline'}; filename="portrait-${file[1]}.${format === 'jpeg' ? 'jpg' : 'avif'}"`, 'X-Content-Type-Options': 'nosniff' }, body: format === 'jpeg' ? portraitJpeg : portraitAvif });
+    }
+    if (url.pathname.endsWith('/target-image')) return route.fulfill({ contentType: 'image/svg+xml', headers: { 'Cache-Control': 'no-store' }, body: image });
     if (url.pathname.startsWith('/api/artist-portraits/sync/')) {
       const record = model.history.find(item => url.pathname.endsWith(`/${item.token}`));
       return route.fulfill({ json: record || { state: model.syncState, message: model.syncState === 'uploaded' ? '头像已同步' : '等待结果' } });
@@ -141,6 +148,21 @@ async function noOverflow(page) {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, 'No horizontal page overflow');
   assert.equal(await page.locator('#artist-portraits-root').evaluate(node => node.scrollWidth <= node.clientWidth + 1), true, 'No portrait workspace overflow');
 }
+async function openViewer(page, trigger = '#portraits-preview .portraits-open-image') {
+  await page.locator(trigger).click();
+  await page.waitForFunction(() => document.querySelector('#portrait-viewer-stage img')?.naturalWidth > 0 && document.querySelector('#portrait-viewer-stage')?.getAttribute('aria-busy') === 'false');
+}
+async function watchObjectUrls(page) {
+  await page.evaluate(() => {
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    window.portraitObjectUrls = { created: [], revoked: [] };
+    URL.createObjectURL = blob => { const url = create(blob); window.portraitObjectUrls.created.push(url); return url; };
+    URL.revokeObjectURL = url => { window.portraitObjectUrls.revoked.push(url); revoke(url); };
+  });
+}
+async function assertUrlsReleased(page) {
+  assert.equal(await page.evaluate(() => window.portraitObjectUrls.created.every(url => window.portraitObjectUrls.revoked.includes(url))), true, 'Every local object URL must be released');
+}
 
 try {
   await mkdir(outputDir, { recursive: true });
@@ -148,6 +170,182 @@ try {
   base = await startFixture(port);
   const authBase = await startFixture(port + 1, ['--auth']);
   browser = await playwright.chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || (process.platform === 'win32' ? 'msedge' : undefined) });
+
+  await check('Portrait viewer loads validated full JPEG on demand, switches AVIF, and returns focus without changing selection', () => withPage(async ({ page, model }) => {
+    await ready(page); await selected(page);
+    const original = { artist: await page.locator('#portraits-artist').inputValue(), target: await page.locator('.portraits-target[aria-pressed="true"]').getAttribute('data-artist-id'), fetches: fetches(model).length, targets: targetReads(model).length };
+    const id = uuid(original.artist);
+    assert.equal(model.calls.filter(call => call.url.pathname === `/api/artist-portraits/${id}/image`).length, 0);
+    await watchObjectUrls(page); await openViewer(page);
+    assert.equal(await page.locator('#portrait-viewer').getAttribute('data-format'), 'jpeg');
+    assert.equal(await page.locator('#portrait-viewer-dimensions').innerText(), 'JPEG · 512 × 384 px');
+    assert.match(await page.locator('#portrait-viewer-policy').innerText(), /上传用重编码.*1024px.*90.*AVIF.*512px/);
+    assert.equal(await page.locator('#portrait-viewer-close').evaluate(node => node === document.activeElement), true);
+    assert.equal(await page.locator('#portrait-viewer img').evaluate(node => getComputedStyle(node).objectFit), 'contain');
+    await page.locator('#portrait-viewer-avif').click();
+    await page.waitForFunction(() => document.querySelector('#portrait-viewer-dimensions')?.textContent === 'AVIF · 512 × 384 px');
+    await page.locator('#portrait-viewer-actual').click();
+    assert.equal(await page.locator('#portrait-viewer img').evaluate(node => node.clientWidth === node.naturalWidth && node.clientHeight === node.naturalHeight), true);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#portraits-preview .portraits-open-image').evaluate(node => node === document.activeElement), true);
+    await assertUrlsReleased(page);
+    assert.equal(await page.locator('#portraits-artist').inputValue(), original.artist);
+    assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').getAttribute('data-artist-id'), original.target);
+    assert.equal(fetches(model).length, original.fetches); assert.equal(targetReads(model).length, original.targets); assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Portrait viewer preserves gallery query and page while inspecting and downloading both local formats', () => withPage(async ({ page, model }) => {
+    for (let index = 0; index < 15; index++) { const item = portraitFor(`图库头像 ${index}`); model.portraits.set(item.id, item); }
+    await ready(page); await openArchive(page, 'collection', 12);
+    await page.locator('#portraits-collection-q').fill('图库头像'); await page.locator('#portraits-collection-search').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-collection-list')?.getAttribute('aria-busy') === 'false');
+    await page.locator('#portraits-collection-next').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-collection-page')?.textContent === '2 / 2');
+    const trigger = '.portraits-collection-card:first-child .portraits-open-image';
+    const id = await page.locator(trigger).getAttribute('data-portrait-id');
+    await watchObjectUrls(page); await openViewer(page, trigger);
+    for (const format of ['jpeg', 'avif']) {
+      const pending = page.waitForEvent('download');
+      await page.locator(`#portrait-viewer-download-${format}`).click();
+      const download = await pending;
+      assert.equal(download.suggestedFilename(), `portrait-${id}.${format === 'jpeg' ? 'jpg' : 'avif'}`);
+      const stream = await download.createReadStream(); const chunks = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      assert.deepEqual(Buffer.concat(chunks), format === 'jpeg' ? portraitJpeg : portraitAvif);
+    }
+    await page.locator('#portrait-viewer-close').click();
+    await assertUrlsReleased(page);
+    assert.equal(await page.locator('#portraits-collection-q').inputValue(), '图库头像');
+    assert.equal(await page.locator('#portraits-collection-page').innerText(), '2 / 2');
+    assert.equal(await page.locator(trigger).evaluate(node => node === document.activeElement), true);
+    assert.equal(await page.locator('#portraits-artist').inputValue(), '');
+    assert.equal(targetReads(model).length, 0); assert.equal(fetches(model).length, 0); assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Portrait viewer rejects stale image switches, pending details and downloads after invalidation', () => withPage(async ({ page, model }) => {
+    await ready(page); await source(page); await watchObjectUrls(page);
+    const id = uuid('周杰伦'), imageEntered = deferred(), imageRelease = deferred(), downloadEntered = deferred(), downloadRelease = deferred();
+    const downloads = []; page.on('download', item => downloads.push(item));
+    model.handlers[`/api/artist-portraits/${id}/image`] = async ({ route }) => { imageEntered.resolve(); await imageRelease.promise; await route.fulfill({ contentType: 'image/jpeg', body: portraitJpeg }).catch(() => {}); };
+    try {
+      await page.locator('#portraits-preview .portraits-open-image').click();
+      await waitDeferred(imageEntered, 'pending JPEG');
+      await page.locator('#portrait-viewer-avif').click();
+      await page.waitForFunction(() => document.querySelector('#portrait-viewer-dimensions')?.textContent.startsWith('AVIF · 512'));
+      imageRelease.resolve();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('#portrait-viewer').getAttribute('data-format'), 'avif');
+      model.handlers[`/api/artist-portraits/${id}/download`] = async ({ route }) => { downloadEntered.resolve(); await downloadRelease.promise; await route.fulfill({ contentType: 'image/jpeg', body: portraitJpeg }).catch(() => {}); };
+      await page.locator('#portrait-viewer-download-jpeg').click(); await waitDeferred(downloadEntered, 'pending download');
+      await page.locator('#portrait-viewer-close').click(); downloadRelease.resolve();
+      await assertUrlsReleased(page);
+      const detailEntered = deferred(), detailRelease = deferred();
+      model.handlers[`/api/artist-portraits/${id}`] = async ({ route }) => { detailEntered.resolve(); await detailRelease.promise; await route.fulfill({ json: { portrait: model.portraits.get(id) } }).catch(() => {}); };
+      try {
+        await page.locator('#portraits-preview .portraits-open-image').click(); await waitDeferred(detailEntered, 'pending detail');
+        await page.evaluate(() => { const artist = document.querySelector('#portraits-artist'); artist.value = '王菲'; artist.dispatchEvent(new Event('input', { bubbles: true })); });
+        await page.locator('#portrait-viewer').waitFor({ state: 'detached' }); detailRelease.resolve();
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.equal(await page.locator('#portrait-viewer').count(), 0); assert.equal(downloads.length, 0);
+      } finally { detailRelease.resolve(); }
+    } finally { imageRelease.resolve(); downloadRelease.resolve(); }
+  }));
+
+  await check('Portrait viewer cancels pending download explicitly and aborts requests on view and route changes', () => withPage(async ({ page, model }) => {
+    await ready(page); await source(page); await watchObjectUrls(page); await openViewer(page);
+    const id = uuid('周杰伦'), entered = deferred(), release = deferred(), downloads = [];
+    page.on('download', value => downloads.push(value));
+    model.handlers[`/api/artist-portraits/${id}/download`] = async ({ route }) => { entered.resolve(); await release.promise; await route.fulfill({ contentType: 'image/jpeg', body: portraitJpeg }).catch(() => {}); };
+    try {
+      await page.locator('#portrait-viewer-download-jpeg').click(); await waitDeferred(entered, 'cancellable download');
+      await page.locator('#portrait-viewer-download-cancel').click();
+      assert.equal(await page.locator('#portrait-viewer-download-jpeg').isDisabled(), false);
+      assert.match(await page.locator('#portrait-viewer-download-status').innerText(), /已取消/);
+      release.resolve();
+      await page.evaluate(() => document.querySelector('#portraits-tab-collection').click());
+      await page.locator('#portrait-viewer').waitFor({ state: 'detached' });
+      await page.waitForFunction(() => document.querySelectorAll('.portraits-collection-card').length === 1);
+      await openViewer(page, '.portraits-collection-card .portraits-open-image');
+      await page.evaluate(() => { location.hash = '#settings'; });
+      await page.locator('#portrait-viewer').waitFor({ state: 'detached' }); await assertUrlsReleased(page);
+      assert.equal(downloads.length, 0);
+    } finally { release.resolve(); }
+  }));
+
+  await check('Portrait viewer refuses JSON, wrong MIME, oversized and corrupt images without silent navigation or saving', () => withPage(async ({ page, model }) => {
+    await ready(page); await source(page); await watchObjectUrls(page); await openViewer(page);
+    const id = uuid('周杰伦'), originalUrl = page.url(), downloads = [];
+    page.on('download', value => downloads.push(value));
+    for (const response of [
+      { status: 400, json: { detail: '缓存文件已损坏' } },
+      { status: 200, json: { detail: '错误响应不能当作图片' } },
+      { contentType: 'text/html', body: '<html>login</html>' },
+      { contentType: 'image/jpeg', headers: { 'content-length': String(9 * 1024 * 1024) }, body: portraitJpeg },
+      { contentType: 'image/jpeg', body: Buffer.alloc(8 * 1024 * 1024 + 1) },
+    ]) {
+      model.handlers[`/api/artist-portraits/${id}/download`] = ({ route }) => route.fulfill(response);
+      await page.locator('#portrait-viewer-download-jpeg').click();
+      await page.waitForFunction(() => document.querySelector('#portrait-viewer-download-status')?.textContent.startsWith('下载失败：'));
+      assert.equal(await page.locator('#portrait-viewer-download-jpeg').isDisabled(), false);
+    }
+    model.handlers[`/api/artist-portraits/${id}/image`] = ({ route }) => route.fulfill({ contentType: 'image/jpeg', body: 'not a JPEG' });
+    await page.locator('#portrait-viewer-jpeg').click();
+    await page.waitForFunction(() => document.querySelector('#portrait-viewer-status')?.textContent.startsWith('图片未能载入'));
+    assert.equal(await page.locator('#portrait-viewer img').count(), 0);
+    assert.equal(downloads.length, 0); assert.equal(page.url(), originalUrl);
+    await page.keyboard.press('Escape'); await assertUrlsReleased(page);
+  }));
+
+  await check('Portrait viewer 401 closes active image and download reads and returns to login', async () => {
+    for (const endpoint of ['image', 'download']) await withPage(async ({ page, model }) => {
+      await ready(page); await source(page); await watchObjectUrls(page);
+      const id = uuid('周杰伦'), downloads = [];
+      page.on('download', value => downloads.push(value));
+      if (endpoint === 'download') await openViewer(page);
+      model.handlers[`/api/artist-portraits/${id}/${endpoint}`] = ({ route }) => route.fulfill({ status: 401, json: { detail: '登录已过期' } });
+      await page.locator(endpoint === 'download' ? '#portrait-viewer-download-jpeg' : '#portraits-preview .portraits-open-image').click();
+      await page.locator('#auth-password').waitFor({ state: 'visible' });
+      await page.locator('#portrait-viewer').waitFor({ state: 'detached' });
+      await assertUrlsReleased(page); assert.equal(downloads.length, 0);
+      assert.equal(await page.locator('.app-content').evaluate(node => node.inert), true);
+    });
+  });
+
+  await check('Portrait viewer remains read-only during unresolved uploads and never nests sync confirmation', () => withPage(async ({ page, model }) => {
+    model.syncState = 'uncertain';
+    await ready(page); await selected(page); await confirmation(page);
+    await page.locator('#portraits-preview .portraits-open-image').evaluate(node => node.click());
+    assert.equal(await page.locator('#portrait-viewer').count(), 0);
+    await page.getByRole('button', { name: '确认替换此歌手头像' }).click();
+    await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uncertain');
+    await openViewer(page);
+    assert.equal(await page.locator('#portraits-artist').isDisabled(), true);
+    assert.equal(uploads(model).length, 1);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#portraits-artist').isDisabled(), true);
+  }));
+
+  await check('Portrait viewer fits both themes and narrow screens with complete images, scrollable actual size and keyboard focus', async () => {
+    for (const [width, height, colorScheme] of [[1440, 1000, 'light'], [1440, 1000, 'dark'], [390, 844, 'light'], [320, 568, 'dark']]) {
+      await withPage(async ({ page }) => {
+        await ready(page); await source(page); await openViewer(page);
+        await noOverflow(page);
+        assert.equal(await page.locator('#portrait-viewer').evaluate(node => { const box = node.getBoundingClientRect(); return box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight && node.scrollWidth <= node.clientWidth + 1; }), true);
+        assert.equal(await page.locator('#portrait-viewer-stage').evaluate(node => node.clientHeight >= 100 && node.scrollHeight <= node.clientHeight + 1), true, 'Fit view keeps image inside its stage');
+        await page.screenshot({ path: path.join(outputDir, `portrait-viewer-${width}-${colorScheme}.png`) });
+        await page.locator('#portrait-viewer-actual').click();
+        assert.equal(await page.locator('#portrait-viewer img').evaluate(node => node.clientWidth === 512 && node.clientHeight === 384), true);
+        if (width < 700) assert.equal(await page.locator('#portrait-viewer-stage').evaluate(node => node.scrollWidth > node.clientWidth || node.scrollHeight > node.clientHeight), true);
+        await page.locator('#portrait-viewer-close').focus(); await page.keyboard.press('Shift+Tab');
+        assert.equal(await page.locator('#portrait-viewer-download-avif').evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press('Tab');
+        assert.equal(await page.locator('#portrait-viewer-close').evaluate(node => node === document.activeElement), true);
+        assert.equal(await page.locator('#portrait-viewer').evaluate(node => node.getAnimations({ subtree: true }).length), 0);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#portraits-preview .portraits-open-image').evaluate(node => node === document.activeElement), true);
+      }, { viewport: { width, height }, colorScheme });
+    }
+  });
 
   await check('Portrait archives load only on opening, paginate locally, and reuse validated files with fresh target selection', () => withPage(async ({ page, model }) => {
     for (let index = 0; index < 15; index++) { const item = portraitFor(`收藏歌手 ${index}`); model.portraits.set(item.id, item); }
@@ -627,7 +825,8 @@ try {
     const entered = deferred(), release = deferred();
     model.handlers['/api/artist-portraits/fetch'] = async ({ route, body }) => {
       if (body.artist === 'old') { entered.resolve(); await release.promise; }
-      return route.fulfill({ json: { portrait: portraitFor(body.artist), cached: true } }).catch(() => {});
+      const portrait = portraitFor(body.artist); model.portraits.set(portrait.id, portrait);
+      return route.fulfill({ json: { portrait, cached: true } }).catch(() => {});
     };
     try {
       await ready(page);
@@ -671,7 +870,10 @@ try {
       const url = new URL(request.url());
       if (url.hostname.includes('fastly')) externalRequests.push(url.href);
     });
-    model.handlers['/api/artist-portraits/fetch'] = ({ route, body }) => route.fulfill({ json: { portrait: { ...portraitFor(body.artist), source_image: sourceImage, ...(sourcePage ? { source_page: sourcePage } : {}) }, cached: true } });
+    model.handlers['/api/artist-portraits/fetch'] = ({ route, body }) => {
+      const portrait = { ...portraitFor(body.artist), source_image: sourceImage, ...(sourcePage ? { source_page: sourcePage } : {}) }; model.portraits.set(portrait.id, portrait);
+      return route.fulfill({ json: { portrait, cached: true } });
+    };
     await ready(page);
     for (const host of ['lastfm.freetls.fastly.net', 'lastfm-img.freetls.fastly.net']) {
       sourceImage = `https://${host}/i/u/770x0/0123456789abcdef0123456789abcdef.jpg`;

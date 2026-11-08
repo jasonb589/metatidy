@@ -1,6 +1,7 @@
 /** Explicit portrait review. Selecting a singer searches Navidrome; Last.fm fetching stays manual. */
 import { api } from "./api.js";
 import * as ui from "./ui.js";
+import { openPortraitViewer, invalidatePortraitViewer } from "./portrait-viewer.js";
 
 const PAGE_SIZE = 50;
 const SYNC_KEY = "metatidy-portrait-pending-sync";
@@ -71,6 +72,7 @@ function clearFinishedSync() {
 }
 
 function invalidateSource() {
+  invalidatePortraitViewer();
   sourceRevision++;
   cancel("fetch");
   sourceLoading = false;
@@ -264,6 +266,7 @@ function buildArchiveView(kind) {
   const page = ui.el("span", { id: `portraits-${kind}-page`, class: "portraits-page", text: "1 / 1" });
   nodes[kind] = { q, search, refresh, filter, status: statusNode, items, prev, next, page };
   const invalidate = () => {
+    invalidatePortraitViewer();
     cancel(kind); cancel("reuse"); cancel("history-check");
     detailLoading = false; historyChecking = "";
     model.loading = false; model.dirty = true; model.loaded = false; model.items = [];
@@ -284,6 +287,7 @@ function buildArchiveView(kind) {
 async function changeView(name, { focus = false, load = true } = {}) {
   if (!active || !nodes.views[name]) return;
   if (currentView !== name) {
+    invalidatePortraitViewer();
     closePreview();
     for (const kind of ["collection", "history", "reuse", "history-check"]) cancel(kind);
     if (collection.loading) collection.dirty = true;
@@ -316,6 +320,7 @@ async function loadArchive(kind, page = 1) {
   const model = kind === "history" ? history : collection;
   const controls = nodes[kind];
   if (!active || currentView !== kind || model.loading) return;
+  invalidatePortraitViewer();
   cancel("reuse"); cancel("history-check");
   detailLoading = false; historyChecking = "";
   const operation = startRequest(kind);
@@ -356,7 +361,7 @@ function renderArchive(kind) {
       const img = image.querySelector("img");
       if (img) img.loading = "lazy";
       return ui.el("article", { class: "portraits-collection-card", dataset: { portraitId: item.id }, style: { "--portrait-delay": `${Math.min(index, 5) * 35}ms` } }, [
-        image, ui.el("div", { class: "portraits-collection-copy" }, [ui.el("h3", { text: text(item.artist) || "未命名歌手" }), ui.el("p", { text: `${count(item.width)} × ${count(item.height)} · 上传尺寸` }), ui.el("time", { text: dateLabel(item.created_at) }), use]),
+        viewerTrigger(image, item), ui.el("div", { class: "portraits-collection-copy" }, [ui.el("h3", { text: text(item.artist) || "未命名歌手" }), ui.el("p", { text: `${count(item.width)} × ${count(item.height)} · 上传尺寸` }), ui.el("time", { text: dateLabel(item.created_at) }), use]),
       ]);
     }
     const state = STATE_LABELS[item.state] ? item.state : "uncertain";
@@ -451,6 +456,7 @@ export async function activate() {
 }
 
 export function leave() {
+  invalidatePortraitViewer();
   active = false;
   lifecycle++;
   pendingTargetQuery = null;
@@ -655,6 +661,14 @@ function imageFrame(url, alt, empty = "暂无头像", onState = () => {}) {
   return frame;
 }
 
+function viewerTrigger(frame, item) {
+  const trigger = ui.el("button", { type: "button", class: "portraits-open-image", dataset: { portraitId: item.id }, "aria-label": `查看 ${text(item.artist) || "歌手"} 的头像大图`, title: "查看大图与下载", onClick: () => {
+    if (!active || preflighting || dialog?.open || document.querySelector("dialog[open]")) return;
+    openPortraitViewer(item.id, { trigger });
+  } }, [frame, ui.el("span", { class: "portraits-image-caption", "aria-hidden": "true" }, [ui.icon("scan", { size: 13 }), "查看大图"]) ]);
+  return trigger;
+}
+
 function renderPortrait() {
   nodes.preview.hidden = !portrait;
   nodes.sourceEmpty.hidden = Boolean(portrait);
@@ -662,12 +676,12 @@ function renderPortrait() {
   if (!portrait) return;
   const id = portrait.id;
   const revision = sourceRevision;
-  nodes.preview.append(imageFrame(portraitUrl(portrait), `${portrait.artist} 的来源头像`, "来源预览地址无效", loaded => {
+  nodes.preview.append(viewerTrigger(imageFrame(portraitUrl(portrait), `${portrait.artist} 的来源头像`, "来源预览地址无效", loaded => {
     if (revision !== sourceRevision || portrait?.id !== id) return;
     portraitLoaded = loaded;
     if (!loaded) message(nodes.fetchStatus, "来源头像预览加载失败，暂不能同步。请重新获取，确认看见头像后继续。", "error");
     updateControls();
-  }), ui.el("div", { class: "portraits-preview-copy" }, [
+  }), portrait), ui.el("div", { class: "portraits-preview-copy" }, [
     ui.el("h3", { text: portrait.artist }),
     ui.el("p", { text: `本地 AVIF 预览 · 上传图片 ${count(portrait.width)} × ${count(portrait.height)}` }),
     ui.el("p", { text: "请确认是这位歌手，并核对图片是否适合用作头像。" }),
@@ -744,6 +758,7 @@ function updateSelection() {
 
 async function previewSync() {
   if (!active || nodes.preflight.disabled) return;
+  invalidatePortraitViewer();
   const sourceAt = sourceRevision;
   const targetAt = targetRevision;
   const portraitId = portrait.id;

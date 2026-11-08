@@ -464,6 +464,81 @@ fn image_response(bytes: Vec<u8>, mime: &str) -> Response {
     )
         .into_response()
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortraitFormat {
+    Jpeg,
+    Avif,
+}
+
+impl PortraitFormat {
+    fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Avif => "image/avif",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Avif => "avif",
+        }
+    }
+}
+
+fn download_format(query: &RawQuery) -> Result<PortraitFormat, ApiError> {
+    match query.0.get("format").map(String::as_str) {
+        None | Some("jpeg") => Ok(PortraitFormat::Jpeg),
+        Some("avif") => Ok(PortraitFormat::Avif),
+        Some(value) => Err(ApiError::unprocessable(
+            "value_error",
+            vec!["query", "format"],
+            "下载格式须为 jpeg 或 avif",
+            json!(value),
+            None,
+        )),
+    }
+}
+
+fn portrait_response(id: Uuid, format: PortraitFormat, bytes: Vec<u8>, attachment: bool) -> Response {
+    let mut response = image_response(bytes, format.mime());
+    let disposition = if attachment { "attachment" } else { "inline" };
+    // Only a parsed UUID and fixed ASCII values enter this header. Artist names
+    // and upstream filenames can never become a header or a local output path.
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        format!("{disposition}; filename=\"portrait-{id}.{}\"", format.extension())
+            .parse()
+            .expect("UUID portrait disposition is valid ASCII"),
+    );
+    response
+}
+
+/// Serve the verified JPEG already used for uploads; do not fetch or re-encode.
+pub async fn image(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
+    let id = uuid(&id)?;
+    Ok(portrait_response(
+        id,
+        PortraitFormat::Jpeg,
+        read_bytes(&state, id, false).await?,
+        false,
+    ))
+}
+
+/// Read only the requested immutable artifact. A missing companion format must
+/// not prevent downloading an otherwise valid JPEG or AVIF.
+pub async fn download(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Response> {
+    let id = uuid(&id)?;
+    let format = download_format(&RawQuery(params))?;
+    let bytes = read_bytes(&state, id, format == PortraitFormat::Avif).await?;
+    Ok(portrait_response(id, format, bytes, true))
+}
+
 pub async fn preview(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     Ok(image_response(
         read_bytes(&state, uuid(&id)?, true).await?,
@@ -689,6 +764,43 @@ mod tests {
                 .map(|(key, value)| ((*key).into(), (*value).into()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn portrait_download_formats_are_exact_and_default_to_jpeg() {
+        assert_eq!(download_format(&query(&[])).unwrap(), PortraitFormat::Jpeg);
+        assert_eq!(download_format(&query(&[("format", "jpeg")])).unwrap(), PortraitFormat::Jpeg);
+        assert_eq!(download_format(&query(&[("format", "avif")])).unwrap(), PortraitFormat::Avif);
+        for value in ["", "jpg", "JPEG", "Avif", " jpeg", "avif ", "png", "../jpeg", "jpeg\0", "jpeg\r\nX-Test: 1"] {
+            let error = download_format(&query(&[("format", value)])).unwrap_err();
+            assert_eq!(error.into_response().status(), StatusCode::UNPROCESSABLE_ENTITY, "{value:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn portrait_image_and_download_headers_preserve_exact_artifact_bytes() {
+        let id = uuid("67A1AE05-807F-46C3-AEA4-B19E425740E4").unwrap();
+        let bytes = vec![0, 255, 17, 93, 0, 8];
+        for (format, attachment, mime, disposition) in [
+            (PortraitFormat::Jpeg, false, "image/jpeg", "inline; filename=\"portrait-67a1ae05-807f-46c3-aea4-b19e425740e4.jpg\""),
+            (PortraitFormat::Jpeg, true, "image/jpeg", "attachment; filename=\"portrait-67a1ae05-807f-46c3-aea4-b19e425740e4.jpg\""),
+            (PortraitFormat::Avif, true, "image/avif", "attachment; filename=\"portrait-67a1ae05-807f-46c3-aea4-b19e425740e4.avif\""),
+        ] {
+            let response = portrait_response(id, format, bytes.clone(), attachment);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], mime);
+            assert_eq!(response.headers()[header::CONTENT_DISPOSITION], disposition);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "private, no-store");
+            assert_eq!(response.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+            assert_eq!(axum::body::to_bytes(response.into_body(), 100).await.unwrap().as_ref(), bytes.as_slice());
+        }
+    }
+
+    #[test]
+    fn portrait_artifact_identifiers_reject_paths_and_header_injection() {
+        for value in ["", "not-a-uuid", "../67a1ae05-807f-46c3-aea4-b19e425740e4", "%2e%2e", "67a1ae05-807f-46c3-aea4-b19e425740e4\r\nX-Test: 1", "67a1ae05-807f-46c3-aea4-b19e425740e4\"", "67a1ae05-807f-46c3-aea4-b19e425740e4.jpg"] {
+            assert_eq!(uuid(value).unwrap_err().into_response().status(), StatusCode::BAD_REQUEST, "{value:?}");
+        }
     }
 
     #[test]

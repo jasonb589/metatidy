@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { jpeg as portraitJpeg, avif as portraitAvif } from './portrait-image-fixtures.mjs';
 
 const staticRoot = fileURLToPath(new URL('../app/static/', import.meta.url));
 const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.split('=')[1] || 8765);
@@ -165,6 +166,11 @@ function stats() {
 
 function filterTracks(params) {
   let result = [...tracks];
+  const folder = params.get('folder');
+  if (folder) {
+    const recursive = !['0', 'false'].includes(params.get('folder_recursive'));
+    result = result.filter(track => track.dir === folder || (recursive && track.dir.startsWith(`${folder}/`)));
+  }
   if (params.has('album_group')) {
     const group = JSON.parse(params.get('album_group'));
     if (!Array.isArray(group) || group.length !== 2 || group.some(value => typeof value !== 'string')) throw new Error('album_group must contain an album and album artist');
@@ -186,6 +192,26 @@ function filterTracks(params) {
   result.sort((a, b) => String(a[key] || '').localeCompare(String(b[key] || ''), 'zh-CN', { numeric: true }));
   if (params.get('order') === 'desc') result.reverse();
   return result;
+}
+
+function folderPage(params) {
+  const root = '/fixture-music', current = params.get('folder') || root;
+  if (current !== root && !current.startsWith(`${root}/`) || current.includes('\0') || current.includes('//') || current.split('/').some(part => part === '.' || part === '..') || current.endsWith('/')) throw fixtureError('目录位置无效', 400);
+  const rows = tracks.filter(track => track.dir === current || track.dir.startsWith(`${current}/`));
+  if (current !== root && !rows.length) throw fixtureError('目录没有索引记录', 404);
+  const groups = new Map();
+  for (const track of rows) {
+    if (track.dir === current) continue;
+    const name = track.dir.slice(current.length + 1).split('/')[0], folder = `${current}/${name}`;
+    if (!groups.has(folder)) groups.set(folder, { name, path: folder, track_count: 0, direct_tracks: 0, bytes: 0 });
+    const item = groups.get(folder); item.track_count++; item.direct_tracks += Number(track.dir === folder); item.bytes += track.size;
+  }
+  const q = (params.get('q') || '').trim().toLowerCase();
+  const all = [...groups.values()].filter(item => item.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  const pageSize = Math.max(1, Math.min(100, Number(params.get('page_size')) || 50)), pages = Math.ceil(all.length / pageSize), page = Math.max(1, Math.min(Number(params.get('page')) || 1, pages || 1));
+  const breadcrumbs = [{ name: 'fixture-music', path: root }];
+  for (const name of current.slice(root.length + 1).split('/').filter(Boolean)) breadcrumbs.push({ name, path: `${breadcrumbs.at(-1).path}/${name}` });
+  return { root, current, parent: breadcrumbs.length > 1 ? breadcrumbs.at(-2).path : null, breadcrumbs, total: all.length, page, page_size: pageSize, pages, total_tracks: rows.length, direct_tracks: rows.filter(track => track.dir === current).length, bytes: rows.reduce((sum, track) => sum + track.size, 0), items: all.slice((page - 1) * pageSize, page * pageSize), scan_root: current, can_scan: true };
 }
 
 function albumPage(params) {
@@ -452,7 +478,7 @@ async function handleApi(req, res, url) {
     const key = JSON.stringify([artist, payload.image_url || null]), cached = portraitCache.has(key);
     if (!cached) {
       const id = `00000000-0000-4000-8000-${String(portraitCache.size + 1).padStart(12, '0')}`;
-      portraitCache.set(key, { id, artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: payload.image_url || 'https://lastfm.freetls.fastly.net/i/u/770x0/1234567890abcdef1234567890abcdef.jpg', width: 512, height: 512, created_at: now, preview_url: `/api/artist-portraits/${id}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
+      portraitCache.set(key, { id, artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: payload.image_url || 'https://lastfm.freetls.fastly.net/i/u/770x0/1234567890abcdef1234567890abcdef.jpg', width: 512, height: 384, created_at: now, preview_url: `/api/artist-portraits/${id}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
     }
     return json(res, { portrait: portraitCache.get(key), cached });
   }
@@ -475,7 +501,16 @@ async function handleApi(req, res, url) {
   }
   const portraitStatus = route.match(/^\/api\/artist-portraits\/sync\/([^/]+)$/);
   if (portraitStatus) { const record = portraitSyncs.get(portraitStatus[1]); if (!record) throw fixtureError('同步记录不存在', 404); return json(res, record); }
-  if (/^\/api\/artist-portraits\/(?:[^/]+\/preview|sync\/[^/]+\/target-image)$/.test(route)) {
+  const portraitFile = route.match(/^\/api\/artist-portraits\/([0-9a-f-]{36})\/(preview|image|download)$/);
+  if (portraitFile) {
+    const portrait = [...portraitCache.values()].find(item => item.id === portraitFile[1]);
+    if (!portrait) throw fixtureError('本地头像缓存不存在', 404);
+    const format = portraitFile[2] === 'preview' ? 'avif' : portraitFile[2] === 'image' ? 'jpeg' : url.searchParams.has('format') ? url.searchParams.get('format') : 'jpeg';
+    if (!['jpeg', 'avif'].includes(format)) throw fixtureError('不支持的头像格式', 422);
+    res.writeHead(200, { 'Content-Type': `image/${format}`, 'Content-Disposition': `${portraitFile[2] === 'download' ? 'attachment' : 'inline'}; filename="portrait-${portrait.id}.${format === 'jpeg' ? 'jpg' : 'avif'}"`, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' });
+    return res.end(format === 'jpeg' ? portraitJpeg : portraitAvif);
+  }
+  if (/^\/api\/artist-portraits\/sync\/[^/]+\/target-image$/.test(route)) {
     res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' }); return res.end(coverSvg(route.endsWith('target-image') ? 3 : 1));
   }
   const portraitDetail = route.match(/^\/api\/artist-portraits\/([0-9a-f-]{36})$/);
@@ -513,6 +548,7 @@ async function handleApi(req, res, url) {
   if (route === '/api/albums') return json(res, albumPage(url.searchParams));
   if (route === '/api/albums/detail') return json(res, albumDetail(url.searchParams));
   if (route === '/api/albums/selection') return json(res, albumSelection(payload));
+  if (route === '/api/folders') return json(res, folderPage(url.searchParams));
   if (route === '/api/tracks') {
     const filtered = filterTracks(url.searchParams);
     const pageSize = Math.min(1000, Math.max(1, Number(url.searchParams.get('page_size')) || 100));

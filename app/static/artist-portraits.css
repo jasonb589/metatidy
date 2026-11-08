@@ -59,11 +59,17 @@
 .portraits-page { color: var(--fg-2); font-size: 11px; font-variant-numeric: tabular-nums; }
 .portraits-preview { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); }
 .portraits-preview:not([hidden]) { animation: portraits-view-in 260ms ease-out both; }
-.portraits-preview > .portraits-image { width: 124px; align-self: center; }
+.portraits-preview > .portraits-open-image { width: 124px; align-self: center; }
 .portraits-preview > .portraits-preview-copy { flex: 1 1 160px; }
 .portraits-image { display: grid; place-items: center; flex: none; width: 144px; aspect-ratio: 1; overflow: hidden; border-radius: 10px; border: 1px solid var(--line); background: var(--bg-1); color: var(--fg-3); text-align: center; }
 .portraits-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .portraits-image p { padding: 12px; font-size: 11px; }
+.portraits-open-image { position: relative; display: block; padding: 0; flex: none; width: 100%; min-width: 0; border: 0; border-radius: 9px; background: var(--bg-1); color: var(--fg); text-align: center; cursor: zoom-in; overflow: hidden; }
+.portraits-open-image .portraits-image { width: 100%; }
+.portraits-open-image:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.portraits-image-caption { display: flex; justify-content: center; align-items: center; gap: 6px; width: 100%; padding: 7px 5px; background: var(--bg-2); border-top: 1px solid var(--line); color: var(--fg-2); font-size: 10px; line-height: 1.5; transition: color 160ms, background 160ms; }
+.portraits-open-image:hover .portraits-image-caption, .portraits-open-image:focus-visible .portraits-image-caption { color: var(--accent-2); background: var(--accent-soft); }
+.portraits-collection-card > .portraits-open-image { border-radius: 0; }
 .portraits-preview-copy { display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
 .portraits-preview-copy h3 { font-size: 16px; }
 .portraits-preview-copy p, .portraits-preview-copy a { font-size: 11px; line-height: 1.8; }

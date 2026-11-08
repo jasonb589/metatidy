@@ -304,10 +304,12 @@ try {
     await page.locator('#filter-album').blur();
     await page.locator('#filter-language').selectOption('中文');
     await page.locator('#filter-missing-lyrics').check();
+    await page.locator('#library-display-toggle').click();
     await page.locator('#tracks-sort').selectOption('title');
     await page.locator('#tracks-order').selectOption('desc');
     await page.locator('#tracks-pagesize').selectOption('50');
     await page.locator('#density-compact').click();
+    await page.keyboard.press('Escape');
     await page.locator('#view-cards').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-grid .track-card').length === 1);
     const before = await snapshot(page);
@@ -315,10 +317,12 @@ try {
     assert.equal((await storedItems(page)).length, 1);
     await page.locator('[data-quick-filter="all"]').click();
     await page.locator('#view-list').click();
+    await page.locator('#library-display-toggle').click();
     await page.locator('#density-comfortable').click();
     await page.locator('#tracks-sort').selectOption('artist');
     await page.locator('#tracks-order').selectOption('asc');
     await page.locator('#tracks-pagesize').selectOption('100');
+    await page.keyboard.press('Escape');
     await page.locator('.saved-filter-chip').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-grid .track-card').length === 1 && !document.querySelector('#tracks-grid').hidden);
     assert.deepEqual(await snapshot(page), before);
@@ -329,6 +333,82 @@ try {
     assert.equal(await page.locator('.saved-filter-chip').innerText(), '周杰伦待补歌词');
     assert.equal(await page.locator('.saved-filter-chip').getAttribute('aria-pressed'), 'true');
     await page.screenshot({ path: path.join(outputDir, 'saved-filter-library.png'), fullPage: true, animations: 'disabled' });
+  }));
+
+  await check('Display settings keep search visible, persist choices, and close with Escape or outside interaction', () => withPage(async ({ page }) => {
+    await ready(page);
+    assert.equal(await page.locator('#tracks-sort').isVisible(), false);
+    assert.equal(await page.locator('#btn-edit-selected').isVisible(), false);
+    await page.locator('#library-display-toggle').click();
+    await page.locator('#tracks-sort').selectOption('title');
+    await page.locator('#tracks-order').selectOption('desc');
+    await page.locator('#tracks-pagesize').selectOption('50');
+    await page.locator('#density-compact').click();
+    await page.waitForFunction(() => document.querySelector('#library-display-summary')?.textContent === '标题 · 降序 · 50 首');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#library-display-settings').getAttribute('open'), null);
+    assert.equal(await page.locator('#library-display-toggle').evaluate(node => node === document.activeElement), true);
+    await page.reload(); await ready(page);
+    assert.equal(await page.locator('#library-display-summary').innerText(), '标题 · 降序 · 50 首');
+    assert.equal(await page.locator('.library-card').getAttribute('data-library-density'), 'compact');
+    await page.locator('#library-display-toggle').click();
+    await page.locator('#tracks-q').click();
+    assert.equal(await page.locator('#tracks-sort').isVisible(), false);
+    for (const width of [320, 390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.locator('#library-display-toggle').click();
+      await noOverflow(page, '.library-display-panel');
+      const bounds = await page.locator('.library-display-panel').boundingBox();
+      assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width);
+      assert.equal(await page.locator('#tracks-pagesize').isVisible(), true);
+      await page.screenshot({ path: path.join(outputDir, `library-display-${width}.png`), animations: 'disabled' });
+      await page.keyboard.press('Escape');
+    }
+  }));
+
+  await check('Saved folder scopes preserve exact path spaces and direct-only mode across restore', () => withPage(async ({ page }) => {
+    await ready(page);
+    const folder = '/fixture-music/  收藏 %_! \\ 名称  ';
+    await page.evaluate(async folder => {
+      (await import('/tracks.js')).setFolderScope({ folder, recursive: false });
+    }, folder);
+    await saveFilter(page, '目录收藏');
+    await page.locator('[data-quick-filter="all"]').click();
+    await page.locator('.saved-filter-chip').click();
+    await page.waitForFunction(folder => document.querySelector('[data-filter-key="folder"]')?.textContent.includes(folder), folder);
+    const restored = await snapshot(page);
+    assert.equal(restored.filters.folder, folder);
+    assert.equal(restored.filters.folder_recursive, false);
+    assert.match(await page.locator('[data-filter-key="folder"]').innerText(), /仅本层/);
+    await page.reload();
+    await page.waitForFunction(async () => {
+      const { tracks } = (await import('/store.js')).state;
+      return !tracks.loading && tracks.loadedAt > 0;
+    });
+    assert.equal((await snapshot(page)).filters.folder, folder);
+    assert.equal((await snapshot(page)).filters.folder_recursive, false);
+    await page.locator('[data-filter-key="folder"] button').click();
+    assert.equal((await snapshot(page)).filters.folder, '');
+    assert.equal((await snapshot(page)).filters.folder_recursive, true);
+  }));
+
+  await check('Folder scan preparation preserves exact paths and rejects browser-normalized names without starting jobs', () => withPage(async ({ page }) => {
+    await ready(page);
+    const writes = [];
+    page.on('request', request => { if (request.method() === 'POST') writes.push(request.url()); });
+    const validPath = '/fixture-music/  名称 %_! \\ 保留  ';
+    const prepared = await page.evaluate(async folder => (await import('/tracks.js')).prepareFolderScan(folder), validPath);
+    assert.equal(prepared, true);
+    assert.equal(await page.locator('#scan-root').inputValue(), validPath);
+    assert.equal(await page.locator('#scan-root').evaluate(node => node.closest('details').open), true);
+    await page.locator('#scan-root').evaluate(node => { node.closest('details').open = false; });
+    for (const separator of ['\n', '\r', '\r\n']) {
+      const accepted = await page.evaluate(async folder => (await import('/tracks.js')).prepareFolderScan(folder), `/fixture-music/A${separator}B`);
+      assert.equal(accepted, false);
+      assert.equal(await page.locator('#scan-root').inputValue(), validPath);
+      assert.equal(await page.locator('#scan-root').evaluate(node => node.closest('details').open), false);
+    }
+    assert.deepEqual(writes, []);
   }));
 
   await check('Saved filter names validate and management renames or confirms deletion', () => withPage(async ({ page }) => {

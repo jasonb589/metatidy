@@ -42,6 +42,7 @@ from tests.selection_acceptance import check_selection  # noqa: E402
 from tests.album_detail_acceptance import check_album_detail  # noqa: E402
 from tests.portraits_acceptance import check_portraits  # noqa: E402
 from tests.duplicates_acceptance import check_duplicates  # noqa: E402
+from tests.folders_acceptance import check_empty_folders, check_folders  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -140,6 +141,7 @@ def main() -> int:
         check("服务可用", st["version"].count(".") == 2 and st["version"][0].isdigit(), f"版本 {st['version']}")
         check("迁移层 13 个源就绪", st["scraper"]["count"] >= 12, f"可用 {st['scraper']['count']} 个")
         check_storage(BASE, data, music, check)
+        check_empty_folders(BASE, music, check)
 
         print("\n=== 1. 扫描（功能底座） ===")
         t0 = time.time()
@@ -437,6 +439,10 @@ def main() -> int:
                   requests.get(f"{auth_base}/api/duplicates", timeout=20).status_code == 401
                   and requests.get(f"{auth_base}/api/duplicates/detail", timeout=20).status_code == 401
                   and requests.post(f"{auth_base}/api/duplicates/selection", json={}, timeout=20).status_code == 401)
+            check("未登录不能浏览目录或按目录读取曲目，非法路径也先返回401",
+                  requests.get(f"{auth_base}/api/folders", timeout=20).status_code == 401
+                  and requests.get(f"{auth_base}/api/folders", params={"folder": "../outside"}, timeout=20).status_code == 401
+                  and requests.get(f"{auth_base}/api/tracks", params={"folder": str(music)}, timeout=20).status_code == 401)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -510,6 +516,8 @@ def main() -> int:
         check_portraits(REPO, WORK, music, portrait_argv, env, portrait_port, check)
         print("\n=== 17. 疑似重复只读比较与逐首确认 ===")
         check_duplicates(BASE, music, check)
+        print("\n=== 18. 目录浏览、面包屑与精确曲目范围 ===")
+        check_folders(BASE, music, check)
     finally:
         proc.terminate()
         try:

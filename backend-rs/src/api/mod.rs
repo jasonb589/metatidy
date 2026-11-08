@@ -31,6 +31,7 @@ use crate::AppState;
 
 mod albums;
 mod duplicates;
+mod folders;
 mod moves;
 mod portraits;
 mod scrape;
@@ -802,6 +803,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/sources", get(status::api_sources))
         .route("/api/tracks", get(tracks::list_tracks))
+        .route("/api/folders", get(folders::list))
         .route("/api/artists", get(portraits::artists))
         .route("/api/artist-portraits/status", get(portraits::status))
         .route("/api/artist-portraits/library", get(portraits::library))
@@ -813,6 +815,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/artist-portraits/sync/:token/target-image", get(portraits::target_image))
         .route("/api/artist-portraits/:id", get(portraits::detail))
         .route("/api/artist-portraits/:id/preview", get(portraits::preview))
+        .route("/api/artist-portraits/:id/image", get(portraits::image))
+        .route("/api/artist-portraits/:id/download", get(portraits::download))
         .route("/api/navidrome/test", post(portraits::connection))
         .route("/api/navidrome/artists", get(portraits::targets))
         .route("/api/tracks/selection", post(tracks::selection))

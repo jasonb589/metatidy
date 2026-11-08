@@ -52,6 +52,8 @@ export const state = {
     view: "list",
     density: "comfortable",
     filters: {
+      folder: "",
+      folder_recursive: true,
       album_group: "",
       artist: "",
       album: "",

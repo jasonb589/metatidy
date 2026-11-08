@@ -50,7 +50,7 @@ const EDIT_FIELDS = [
 /** 打开面板时从文件里读回来的歌词基线：只有改动过才带进预览 / 写入。 */
 let lyricsBase = "";
 
-const FILTER_KEYS = ["album_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
+const FILTER_KEYS = ["folder", "album_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
 const SORT_KEYS = ["artist", "album", "title", "year", "track", "disc_track", "path", "indexed", "edited"];
 
 let nodes = null;
@@ -359,7 +359,26 @@ function initLibraryViews() {
       },
     }));
   }
-  nodes.viewControls.append(views, nodes.densityControls, ui.el("button", {
+  nodes.displaySettings = ui.byId("library-display-settings");
+  nodes.displaySummary = ui.byId("library-display-summary");
+  nodes.displayDensity = ui.byId("library-display-density");
+  nodes.displayDensity.append(nodes.densityControls);
+  const closeDisplaySettings = (restoreFocus = false) => {
+    if (!nodes.displaySettings.open) return;
+    nodes.displaySettings.open = false;
+    if (restoreFocus) ui.byId("library-display-toggle").focus({ preventScroll: true });
+  };
+  document.addEventListener("click", event => {
+    if (!nodes.displaySettings.contains(event.target)) closeDisplaySettings();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || event.defaultPrevented || !nodes.displaySettings.open || document.querySelector("dialog[open]")) return;
+    event.preventDefault();
+    closeDisplaySettings(true);
+  });
+  window.addEventListener("hashchange", () => closeDisplaySettings());
+  window.addEventListener("metatidy:unauthorized", () => closeDisplaySettings());
+  nodes.viewControls.append(views, ui.el("button", {
     type: "button", id: "btn-library-shortcuts", class: "library-help-button", text: "?",
     title: "键盘快捷键（?）", "aria-label": "查看键盘快捷键", onClick: showKeyboardHelp,
   }));
@@ -431,6 +450,10 @@ function syncViewControls() {
   for (const view of ["list", "cards"]) ui.byId(`view-${view}`).setAttribute("aria-pressed", String(state.tracks.view === view));
   for (const density of ["comfortable", "compact"]) ui.byId(`density-${density}`).setAttribute("aria-pressed", String(state.tracks.density === density));
   nodes.densityControls.hidden = state.tracks.view !== "list";
+  nodes.displayDensity.hidden = state.tracks.view !== "list";
+  const sortLabel = nodes.sort.selectedOptions[0]?.textContent || "歌手";
+  nodes.displaySummary.textContent = `${sortLabel} · ${state.tracks.order === "desc" ? "降序" : "升序"} · ${state.tracks.page_size} 首`;
+  nodes.displaySummary.title = nodes.displaySummary.textContent;
   savedFilters?.sync();
 }
 
@@ -453,9 +476,38 @@ function resetFilters() {
   FILTER_KEYS.forEach((key) => {
     state.tracks.filters[key] = typeof state.tracks.filters[key] === "boolean" ? false : "";
   });
+  state.tracks.filters.folder_recursive = true;
   state.tracks.q = "";
   state.tracks.page = 1;
   syncControls();
+}
+
+/** A folder is an exact server-returned scope; keep the current search and tags. */
+export function setFolderScope({ folder, recursive = true } = {}) {
+  if (typeof folder !== "string" || !folder || folder.includes("\0")) return false;
+  cancelPendingSearch();
+  state.tracks.filters.folder = folder;
+  state.tracks.filters.folder_recursive = recursive !== false;
+  state.tracks.page = 1;
+  syncControls();
+  return true;
+}
+
+/** Prepare the existing scan form. The user still chooses options and starts it. */
+export function prepareFolderScan(folder) {
+  if (typeof folder !== "string" || !folder || folder.includes("\0")) return false;
+  const previous = nodes.scanRoot.value;
+  nodes.scanRoot.value = folder;
+  if (nodes.scanRoot.value !== folder) {
+    nodes.scanRoot.value = previous;
+    ui.toast("warn", "无法预填扫描目录", "目录名称包含扫描输入框无法保留的字符，请从上一级目录准备扫描。");
+    return false;
+  }
+  const options = nodes.scanRoot.closest("details");
+  if (options) options.open = true;
+  nodes.scanRoot.scrollIntoView({ block: "center", behavior: "instant" });
+  nodes.scanRoot.focus({ preventScroll: true });
+  return true;
 }
 
 /** Prepare an exact album scope before app.js navigates and loads the track page. */
@@ -517,6 +569,7 @@ function syncFilterShortcuts() {
 
 /** 筛选键 → 中文名（chips 上显示）。 */
 const FILTER_LABELS = {
+  folder: "目录",
   album_group: "专辑分组",
   artist: "艺术家",
   album: "专辑",
@@ -548,10 +601,12 @@ function renderFilterChips() {
     const text =
       typeof value === "boolean"
         ? FILTER_LABELS[key] || key
+        : key === "folder" ? `目录：${value}${state.tracks.filters.folder_recursive ? "（含子目录）" : "（仅本层）"}`
         : `${FILTER_LABELS[key] || key}：${key === "album_group" ? albumGroupLabel(value) : value}`;
     const x = ui.el("button", { class: "x", type: "button", title: "移除这个条件", "aria-label": `移除筛选：${text}`, text: "×" });
     x.addEventListener("click", () => {
       state.tracks.filters[key] = typeof value === "boolean" ? false : "";
+      if (key === "folder") state.tracks.filters.folder_recursive = true;
       syncControls();
       state.tracks.page = 1;
       refresh();
@@ -593,9 +648,11 @@ function loadPrefs() {
       if (saved.density === "comfortable" || saved.density === "compact") state.tracks.density = saved.density;
       FILTER_KEYS.forEach((key) => {
         const value = saved.filters ? saved.filters[key] : undefined;
+        if (key === "folder") { state.tracks.filters.folder = typeof value === "string" && !value.includes("\0") ? value : ""; return; }
         if (key === "album_group") { state.tracks.filters[key] = normalizeAlbumGroup(value); return; }
         if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = typeof value === "string" ? value.slice(0, 1000) : value;
       });
+      state.tracks.filters.folder_recursive = saved.filters?.folder_recursive !== false;
     }
   } catch {
     /* 存坏了就当没有 */
@@ -687,6 +744,7 @@ export async function refresh({ background = false, canApply = () => true } = {}
   state.tracks.loading = true;
   if (!background) {
     state.tracks.error = "";
+    syncViewControls();
     syncFilterShortcuts();
     renderFilterChips();
     renderTableStatus();
