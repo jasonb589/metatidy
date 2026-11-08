@@ -18,6 +18,9 @@ mod cover_images;
 mod db;
 mod error;
 mod jobs;
+mod lastfm_portraits;
+mod navidrome_portraits;
+mod portraits;
 
 use std::sync::Arc;
 mod fixtures;
@@ -50,6 +53,7 @@ pub struct AppState {
     pub db: PgPool,
     /// Redis 连接管理器；未配置 REDIS_URL 时为 None（服务仍可跑）
     pub redis: Option<redis::aio::ConnectionManager>,
+    pub portraits: Arc<portraits::PortraitServices>,
 }
 
 #[tokio::main]
@@ -124,10 +128,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let portraits = Arc::new(portraits::PortraitServices::new(&config));
     let state = AppState {
         config: Arc::new(config.clone()),
         db,
         redis,
+        portraits,
     };
 
     match &config.auth_password {

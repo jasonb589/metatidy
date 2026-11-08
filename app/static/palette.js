@@ -12,6 +12,7 @@ import { icon } from "./ui.js";
 const TABS = [
   { name: "tracks", label: "曲库", ico: "music" },
   { name: "albums", label: "专辑收藏", ico: "album" },
+  { name: "artist-portraits", label: "歌手头像", ico: "artist" },
   { name: "scrape", label: "搜索刮削", ico: "search" },
   { name: "move", label: "整理移动", ico: "move" },
   { name: "settings", label: "设置", ico: "settings" },

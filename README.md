@@ -1,10 +1,11 @@
 # metatidy
 
-轻量音乐元数据工作台。只做三件事，并且把这三件事做快：
+轻量音乐元数据工作台，提供以下功能：
 
 1. **元数据编辑** —— 浏览/检索全库，改字段前先看差异，确认后才落盘；支持批量。
 2. **元数据搜索（刮削）** —— 一个入口并行查 13 个数据源，候选按分数排序、逐字段挑选写入。
 3. **按目录层级整理移动** —— 用可配置模板（`{语言}/{歌手}/{专辑}/{曲序} - {标题}`）生成计划，预览确认后才动文件。
+4. **歌手头像（v0.22）** —— 按需获取 Last.fm 头像，核对图片和 Navidrome 中的具体歌手后，确认上传。
 
 Web 界面，单容器部署，适合放在 NAS / 小主机上长期跑。
 
@@ -106,7 +107,7 @@ AVIF 质量设为 60，图片处理最多同时进行两份；常见 JPEG、PNG�
 
 ---
 
-## 三个功能怎么用
+## 功能怎么用
 
 ### 1. 元数据编辑
 
@@ -170,6 +171,54 @@ AVIF 质量设为 60，图片处理最多同时进行两份；常见 JPEG、PNG�
 - 跨磁盘/云盘搬运时先复制、校验字节数一致，才删除源文件；任何异常都**保留源文件**并把失败明细列出来。
 - 索引里的路径会随文件移动同步更新。
 
+### 4. 歌手头像与 Navidrome 同步（v0.22）
+
+进入「歌手头像」页，从本地索引选择歌手或输入名称，点击获取 Last.fm 头像。获取成功后，
+再连接 Navidrome、搜索并**手动选择目标歌手**，对照来源图片与目标当前图片，最后确认同步。
+同名歌手也使用各自的 Navidrome ID，名称相同不会自动触发覆盖。浏览本地歌手列表不会请求 Last.fm。
+
+首次使用，在 compose 同目录的 `.env` 中填写下面三项，并取消 `docker-compose.yml` 对应环境变量的注释：
+
+```dotenv
+METATIDY_NAVIDROME_URL=http://navidrome:4533
+METATIDY_NAVIDROME_USERNAME=你的Navidrome用户名
+METATIDY_NAVIDROME_PASSWORD=你的Navidrome密码
+```
+
+地址必须能从 metatidy 容器访问；`navidrome` 这个服务名要求两个容器在同一个 Docker 网络中，
+也可以填写 NAS 的局域网地址。反代的路径前缀可保留，例如 `https://music.example.com/navidrome`。
+地址中不要嵌入账号、密码、查询参数或 `#` 片段。修改后执行 `docker compose up -d metatidy` 重建容器，
+在头像页点击测试连接。Navidrome 凭据从服务端环境变量读取，不保存到网页或 metatidy 数据库；会话令牌只缓存在服务端内存。
+
+需要 **Navidrome 0.61.0 或以上**，使用其原生头像上传接口。Navidrome 的 `EnableArtworkUpload`
+默认开启，开启时普通登录用户可以上传；关闭时只有管理员可以上传。连接测试确认读权限和可识别的版本，
+具体上传权限由 Navidrome 在上传时检查。图片由 Navidrome 保存并刷新，通常不需要全库扫描；客户端缓存可能稍后更新。
+支持起点见 [Navidrome v0.61.0 发布说明](https://github.com/navidrome/navidrome/releases/tag/v0.61.0)，
+权限配置见 [Navidrome 官方头像说明](https://www.navidrome.org/docs/usage/library/artwork/#artwork-uploads)。
+
+Last.fm 歌手头像使用普通歌手页中的公开图片信息，**不需要 `LASTFM_API_KEY`**；下方数据源表中的
+Last.fm 元数据刮削接口仍需要 API key。如果页面没有可用图片或出现验证页，界面会说明失败原因；
+可以在浏览器中自行查看 Last.fm，粘贴图片的 `lastfm.freetls.fastly.net` HTTPS 地址。只接受该图片域名和指定格式，
+不会自动打开图集、执行验证页面或更换身份重试。
+
+- 只提供逐位歌手的手动获取和同步，不安排全库批量抓取；所有 Last.fm 请求串行，间隔至少 **5 秒**。
+- 成功来源缓存 **7 天**；无图、默认占位图和解析失败缓存 **24 小时**。命中缓存不会再次请求来源。
+- 遇到 HTTP 403 或验证页暂停 **1 小时**；HTTP 429 遵守 `Retry-After`，缺少有效值时暂停 1 小时。
+  连续 3 次临时失败暂停 **15 分钟**；不会自动重试，冷却状态随数据目录持久保存。
+- 同步确认 **10 分钟**内有效且只能提交一次。目标信息变化或图片校验失败时停止上传；连接中断、远端 5xx
+  或服务重启导致结果无法确认时，先去 Navidrome 核对，再重新预览，避免重复替换。
+
+使用本功能时部署**单个 metatidy 实例**，并持久挂载 `/data`。限速和重启恢复按单实例设计。
+
+| 内容 | 容器内路径（默认） | 用途 |
+| --- | --- | --- |
+| 歌手头像预览 | `/data/artist-portraits/{UUID}.avif` | 最长边 512 像素的真实 AVIF，供网页核对 |
+| 上传图片 | `/data/artist-portraits/{UUID}.jpg` | 最长边 1024 像素的 JPEG，确认后发给 Navidrome |
+| Last.fm 请求保护状态 | `/data/lastfm-portraits/gate.json` | 保存请求间隔、失败次数与冷却期限 |
+
+图片与内容摘要独立保存，预览和同步记录在 PostgreSQL 中；获取和同步头像不会改写音频标签。
+成功缓存的 7 天是请求复用期限，图片文件不会到期自动清理。
+
 ---
 
 ## 数据源
@@ -218,6 +267,9 @@ AVIF 质量设为 60，图片处理最多同时进行两份；常见 JPEG、PNG�
 | `METATIDY_PASSWORD` | 无（**强烈建议设**） | 访问口令。设了就启用密码登录；不设则整个界面完全开放（同网段谁都能改你的标签、移动你的文件） |
 | `METATIDY_SESSION_DAYS` | `30` | 登录会话有效期（天），到期后需重新登录 |
 | `METATIDY_COOKIE_SECURE` | 关 | 给会话 Cookie 加 `Secure`；只在走 HTTPS/反代时打开（http 访问打开会登不进去） |
+| `METATIDY_NAVIDROME_URL` | 无（可选） | 歌手头像同步目标的基础地址，可保留反代路径前缀 |
+| `METATIDY_NAVIDROME_USERNAME` | 无（可选） | 用于歌手头像同步的 Navidrome 用户名 |
+| `METATIDY_NAVIDROME_PASSWORD` | 无（可选） | Navidrome 密码，仅服务端读取；填写全部三项后启用连接 |
 | `METATIDY_TRUST_PROXY` | 关 | 信任 `X-Forwarded-For`：反代后面限速才按真实客户端 IP 算（**默认不信**，否则谁都能伪造这个头绕过限速） |
 
 用户可改的设置（目录模板、冲突策略、默认数据源）与别名库存在 PostgreSQL 里，重启不丢。

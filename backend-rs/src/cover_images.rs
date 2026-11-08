@@ -96,6 +96,26 @@ fn decode_thumbnail(bytes: &[u8], edge: u32) -> anyhow::Result<DynamicImage> {
     Ok(thumbnail)
 }
 
+/// Navidrome's native upload supports JPEG; keep its upload artifact separate
+/// from the AVIF preview. Decode once with the existing resource limits.
+pub fn encode_portrait(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, u32, u32)> {
+    let portrait = decode_thumbnail(bytes, 1024)?;
+    let (width, height) = (portrait.width(), portrait.height());
+    let rgba = portrait.to_rgba8();
+    let rgb = image::RgbImage::from_fn(width, height, |x, y| {
+        let pixel = rgba.get_pixel(x, y);
+        let alpha = u32::from(pixel[3]);
+        image::Rgb(std::array::from_fn(|channel| {
+            ((u32::from(pixel[channel]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8
+        }))
+    });
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&DynamicImage::ImageRgb8(rgb))?;
+    let preview = encode_thumbnail(&jpeg, 512)?;
+    Ok((jpeg, preview, width, height))
+}
+
 /// 原图按实际字节确定 MIME，不依赖旧缓存的 `.jpg` 扩展名或不可靠标签 MIME。
 pub fn detected_mime(bytes: &[u8]) -> Option<&'static str> {
     // image 的 AVIF 猜测只覆盖主要品牌；也接纳 ftyp 中合法的兼容品牌。
@@ -184,6 +204,28 @@ mod tests {
         let sizes = avif_sizes(&encoded);
         assert!(!sizes.is_empty());
         assert!(sizes.iter().all(|&size| size == (24, 36)), "{sizes:?}");
+    }
+
+    #[test]
+    fn portrait_upload_and_preview_keep_aspect_and_flatten_alpha() {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_fn(1600, 800, |x, _| {
+            Rgba([30, 90, 160, if x < 800 { 0 } else { 255 }])
+        }));
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        let (jpeg, avif, width, height) = encode_portrait(bytes.get_ref()).unwrap();
+        assert_eq!((width, height), (1024, 512));
+        assert_eq!(detected_mime(&jpeg), Some("image/jpeg"));
+        let uploaded = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(uploaded.dimensions(), (1024, 512));
+        assert!(uploaded
+            .get_pixel(0, 0)
+            .0
+            .iter()
+            .all(|channel| *channel >= 253));
+        assert_eq!(detected_mime(&avif), Some("image/avif"));
+        assert_eq!(avif_sizes(&avif), vec![(512, 256)]);
+        assert!(encode_portrait(b"not a portrait").is_err());
     }
 
     #[test]

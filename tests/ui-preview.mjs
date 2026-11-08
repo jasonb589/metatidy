@@ -79,6 +79,9 @@ const jobs = empty ? [] : [{
   result: JSON.stringify({ scanned: tracks.length, added: tracks.length, updated: 0, skipped: 0, removed: 0 }),
 }];
 const plans = new Map();
+const portraitCache = new Map();
+const portraitSyncs = new Map();
+const portraitTarget = { id: 'fixture-artist-1', name: '周杰伦', album_count: 3, song_count: 3, mbid: '', uploaded_image: null, updated_at: '2026-01-01T00:00:00Z', image_hash: '' };
 const albumText = value => String(value || '').replace(/^ +| +$/g, '');
 
 function discTrackSort(rows, descending = false) {
@@ -388,6 +391,50 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
+  if (route === '/api/artists') {
+    const grouped = new Map();
+    for (const row of tracks) {
+      const name = albumText(row.artist); if (!name) continue;
+      if (!grouped.has(name)) grouped.set(name, { name, track_count: 0, albums: new Set() });
+      const item = grouped.get(name); item.track_count++; if (albumText(row.album)) item.albums.add(albumText(row.album));
+    }
+    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    const items = [...grouped.values()].filter(item => item.name.toLowerCase().includes(q)).sort((a, b) => a.name.localeCompare(b.name)).map(({ name, track_count, albums }) => ({ name, track_count, album_count: albums.size }));
+    const size = Math.max(1, Math.min(100, Number(url.searchParams.get('page_size')) || 50)), pages = Math.ceil(items.length / size), page = Math.max(1, Math.min(pages || 1, Number(url.searchParams.get('page')) || 1));
+    return json(res, { items: items.slice((page - 1) * size, page * size), total: items.length, page, page_size: size, pages });
+  }
+  if (route === '/api/artist-portraits/status') return json(res, { lastfm: { busy: false, cooldown: false, retry_at: null, retry_after_seconds: null, reason: null, min_interval_seconds: 5 }, navidrome: { configured: true, url: 'http://navidrome.example.test', min_version: '0.61.0' }, cache_days: 7 });
+  if (route === '/api/artist-portraits/fetch') {
+    const artist = String(payload.artist || '').trim(); if (!artist || [...artist].length > 200) throw fixtureError('请填写歌手名', 400);
+    const key = JSON.stringify([artist, payload.image_url || null]), cached = portraitCache.has(key);
+    if (!cached) {
+      const id = `00000000-0000-4000-8000-${String(portraitCache.size + 1).padStart(12, '0')}`;
+      portraitCache.set(key, { id, artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: payload.image_url || 'https://lastfm.freetls.fastly.net/i/u/770x0/1234567890abcdef1234567890abcdef.jpg', width: 512, height: 512, created_at: now, preview_url: `/api/artist-portraits/${id}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
+    }
+    return json(res, { portrait: portraitCache.get(key), cached });
+  }
+  if (route === '/api/navidrome/test') return json(res, { connected: true, user: { name: 'fixture', is_admin: false }, server_version: '0.64.2', supports_upload: true, min_version: '0.61.0', message: '本地示例服务，未连接真实 Navidrome' });
+  if (route === '/api/navidrome/artists') {
+    const q = (url.searchParams.get('q') || '').trim(); const items = !q || portraitTarget.name.includes(q) ? [portraitTarget] : [];
+    return json(res, { items, total: items.length, page: 1, pages: items.length ? 1 : 0, page_size: 50 });
+  }
+  if (route === '/api/artist-portraits/sync-preview') {
+    const portrait = [...portraitCache.values()].find(item => item.id === payload.portrait_id);
+    if (!portrait || payload.artist_id !== portraitTarget.id) throw fixtureError('来源或目标不存在', 404);
+    const token = `00000000-0000-4000-9000-${String(portraitSyncs.size + 1).padStart(12, '0')}`;
+    const record = { token, portrait, target: { ...portraitTarget }, sync_state: 'ready', state: 'ready', expires_at: Date.now() / 1000 + 600, target_image_url: `/api/artist-portraits/sync/${token}/target-image` };
+    portraitSyncs.set(token, record); return json(res, record);
+  }
+  if (route === '/api/artist-portraits/sync') {
+    const record = portraitSyncs.get(payload.token); if (!record) throw fixtureError('同步记录不存在', 404);
+    if (record.state !== 'ready') throw fixtureError('同步已提交', 409);
+    record.state = 'uploaded'; record.message = '仅更新内存示例；未同步真实服务'; return json(res, record);
+  }
+  const portraitStatus = route.match(/^\/api\/artist-portraits\/sync\/([^/]+)$/);
+  if (portraitStatus) { const record = portraitSyncs.get(portraitStatus[1]); if (!record) throw fixtureError('同步记录不存在', 404); return json(res, record); }
+  if (/^\/api\/artist-portraits\/(?:[^/]+\/preview|sync\/[^/]+\/target-image)$/.test(route)) {
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' }); return res.end(coverSvg(route.endsWith('target-image') ? 3 : 1));
+  }
   if (route === '/api/status') return json(res, {
     version: '0.4.1-ui-fixture', engine: 'fixture', postgres: true, redis: true, music_dir_exists: true,
     music_dir: '/fixture-music', library_root: '/fixture-music', data_dir: '/fixture-data', db_path: 'memory-only',

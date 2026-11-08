@@ -42,6 +42,11 @@ pub async fn connect_and_migrate(config: &Config) -> anyhow::Result<PgPool> {
         tracing::warn!("清理中断任务失败（不影响启动）：{err}");
     }
 
+    // An interrupted remote upload may already have reached Navidrome. Never
+    // relaunch it when the application restarts.
+    sqlx::query("UPDATE artist_portrait_syncs SET state='uncertain', message='服务重启前同步尚未完成确认，请到 Navidrome 核对后重新预览', updated_at=now() WHERE state='uploading'")
+        .execute(&pool).await.context("恢复歌手头像同步状态失败")?;
+
     let version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&pool)
         .await

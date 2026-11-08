@@ -47,6 +47,10 @@ pub struct Config {
     pub lastfm_api_key: String,
     pub siliconflow_key: String,
     pub acoustid_key: String,
+    /// Optional Navidrome native API connection; never exposed through settings.
+    pub navidrome_url: String,
+    pub navidrome_username: String,
+    pub navidrome_password: String,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -152,6 +156,9 @@ impl Config {
             lastfm_api_key: env_or("LASTFM_API_KEY", ""),
             siliconflow_key: env_first(&["SILICONFLOW_KEY", "SILICONFLOW_API_KEY"]),
             acoustid_key: env_first(&["ACOUSTID_KEY", "ACOUSTID_API_KEY"]),
+            navidrome_url: env_or("METATIDY_NAVIDROME_URL", ""),
+            navidrome_username: env_or("METATIDY_NAVIDROME_USERNAME", ""),
+            navidrome_password: env::var("METATIDY_NAVIDROME_PASSWORD").unwrap_or_default(),
         })
     }
 

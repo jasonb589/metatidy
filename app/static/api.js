@@ -101,6 +101,15 @@ export const api = {
   saveSettings: (values) => request(`${API}/settings`, { method: "PUT", body: { values } }),
   sources: () => request(`${API}/sources`),
 
+  artists: (params, options = {}) => request(`${API}/artists?${qs(params)}`, options),
+  artistPortraitStatus: (options = {}) => request(`${API}/artist-portraits/status`, options),
+  artistPortraitFetch: (payload, options = {}) => request(`${API}/artist-portraits/fetch`, { ...options, method: "POST", body: payload, timeout: 90000 }),
+  navidromeTest: (options = {}) => request(`${API}/navidrome/test`, { ...options, method: "POST", timeout: 45000 }),
+  navidromeArtists: (params, options = {}) => request(`${API}/navidrome/artists?${qs(params)}`, options),
+  artistPortraitSyncPreview: (payload, options = {}) => request(`${API}/artist-portraits/sync-preview`, { ...options, method: "POST", body: payload, timeout: 45000 }),
+  artistPortraitSync: (token) => request(`${API}/artist-portraits/sync`, { method: "POST", body: { token }, timeout: 90000 }),
+  artistPortraitSyncStatus: (token, options = {}) => request(`${API}/artist-portraits/sync/${encodeURIComponent(token)}`, options),
+
   // 登录（后端没设 METATIDY_PASSWORD 时 session 直接回 required:false，前端就不弹框）
   session: () => request(`${API}/session`),
   login: (password) => request(`${API}/login`, { method: "POST", body: { password } }),

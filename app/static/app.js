@@ -8,6 +8,7 @@ import * as ui from "./ui.js";
 import { state, on, selectionRevision } from "./store.js";
 import * as tracks from "./tracks.js";
 import * as albums from "./albums.js";
+import * as artistPortraits from "./artist-portraits.js";
 import * as scrape from "./scrape.js";
 import * as move from "./move.js";
 import * as settings from "./settings.js";
@@ -19,10 +20,11 @@ import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOvervi
 import { initKeyboardHelp } from "./keyboard-help.js";
 import { openSelectionReview } from "./selection-review.js";
 
-const TABS = ["tracks", "albums", "scrape", "move", "settings"];
+const TABS = ["tracks", "albums", "artist-portraits", "scrape", "move", "settings"];
 const PAGE_COPY = {
   tracks: { eyebrow: "YOUR MUSIC ARCHIVE", title: "我的音乐库", description: "收藏有序，热爱如初。" },
   albums: { eyebrow: "THE ALBUM COLLECTION", title: "专辑收藏", description: "让散落的曲目，在专辑里重逢。" },
+  "artist-portraits": { eyebrow: "FACES BEHIND THE MUSIC", title: "歌手头像", description: "为熟悉的声音，找到一张合适的肖像。" },
   scrape: { eyebrow: "METADATA DISCOVERY", title: "元数据刮削", description: "找到每首歌的完整故事。" },
   move: { eyebrow: "LIBRARY ORGANIZATION", title: "整理音乐库", description: "让每一份收藏，都有自己的位置。" },
   settings: { eyebrow: "MAKE IT YOURS", title: "工作台设置", description: "按照你的习惯，打理你的音乐。" },
@@ -52,6 +54,7 @@ function boot() {
   booted = true;
   tracks.init();
   albums.init();
+  artistPortraits.init();
   scrape.init();
   move.init();
   settings.init();
@@ -309,6 +312,7 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
   if (!TABS.includes(name) || !canUseWorkspace()) return;
   const changed = name !== state.tab;
   if (state.tab === "albums" && name !== "albums") albums.leave();
+  if (state.tab === "artist-portraits" && name !== "artist-portraits") artistPortraits.leave();
   state.tab = name;
   document.querySelectorAll(".tab").forEach((tab) => {
     const active = tab.dataset.tab === name;
@@ -344,6 +348,9 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
     pendingAlbumsRefresh = false;
     await albums.activate();
     loadedTabs.add("albums");
+  } else if (name === "artist-portraits") {
+    await artistPortraits.activate();
+    loadedTabs.add("artist-portraits");
   } else if (name === "scrape") {
     await scrape.refreshAll();
     loadedTabs.add("scrape");
@@ -372,6 +379,7 @@ function setWorkspaceLocked(locked) {
     closeJobs({ restoreFocus: false });
     palette.closePalette();
     albums.leave();
+    artistPortraits.leave();
     // 原生 dialog 位于浏览器顶层，会遮住登录框；失效会话下按取消处理。
     document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
     const drawer = ui.byId("edit-drawer");

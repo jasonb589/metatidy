@@ -40,6 +40,7 @@ from tests.move_acceptance import check_moves  # noqa: E402
 from tests.jobs_acceptance import check_jobs  # noqa: E402
 from tests.selection_acceptance import check_selection  # noqa: E402
 from tests.album_detail_acceptance import check_album_detail  # noqa: E402
+from tests.portraits_acceptance import check_portraits  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -498,6 +499,10 @@ def main() -> int:
         check_selection(BASE, music, check, wait_job)
         print("\n=== 15. 专辑详情与完整成员快照 ===")
         check_album_detail(BASE, music, check, wait_job)
+        print("\n=== 16. 歌手头像预览与 Navidrome 一次上传（本地上游） ===")
+        portrait_port = PORT + 3
+        portrait_argv = [token.replace(str(PORT), str(portrait_port)) for token in argv]
+        check_portraits(REPO, WORK, music, portrait_argv, env, portrait_port, check)
     finally:
         proc.terminate()
         try:
