@@ -407,8 +407,10 @@ def check_portraits(
                                    and all(symbol in item["name"] for item in result["items"]))
         check("本地歌手搜索把百分号和下划线作为字面字符", all(literal_results))
 
+        # Fixture metadata exercises the additional Last.fm image CDN; no CDN request is made.
+        source_image = "https://lastfm-img.freetls.fastly.net/i/u/300x300/11111111111111111111111111111111.jpg"
         rows = [{"id": identifier, "artist": artist, "source_page": "https://www.last.fm/music/Fixture",
-                 "source_image": "https://lastfm.freetls.fastly.net/i/u/300x300/11111111111111111111111111111111.jpg",
+                 "source_image": source_image,
                  "jpeg_digest": hashlib.sha256(jpeg).hexdigest(), "preview_digest": hashlib.sha256(avif).hexdigest(),
                  "width": 32, "height": 24} for identifier in (portrait_id, damaged_id)]
         document = _literal(json.dumps(rows, ensure_ascii=False))
@@ -424,12 +426,21 @@ def check_portraits(
         fetches = [request("POST", "/api/artist-portraits/fetch", json={"artist": artist}) for _ in range(2)]
         check("歌手头像缓存命中不访问 Last.fm 或 Navidrome",
               all(response.status_code == 200 and response.json().get("cached") is True
-                  and response.json()["portrait"]["id"] == portrait_id for response in fetches)
+                  and response.json()["portrait"]["id"] == portrait_id
+                  and response.json()["portrait"]["source_image"] == source_image for response in fetches)
               and upstream.external_attempts == 0 and upstream.login_count == 0, "same cached UUID twice")
         missing = request("POST", "/api/artist-portraits/fetch", json={"artist": missing_artist})
         check("歌手头像负缓存保留明确失败且不再次联网",
               missing.status_code == 404 and missing.json().get("cached") is True
               and missing.json().get("code") == "image_not_found" and upstream.external_attempts == 0)
+        _postgres(f"""UPDATE artist_portrait_fetches
+            SET failure='{{"code":"upstream_image_unsupported","message":"Fixture upstream image format is unsupported"}}'::jsonb
+            WHERE cache_key={_literal(negative_key)};""")
+        unsupported = [request("POST", "/api/artist-portraits/fetch", json={"artist": missing_artist}) for _ in range(2)]
+        check("上游图片格式不支持的负缓存保留 502，重复获取不再次联网",
+              all(response.status_code == 502 and response.json().get("cached") is True
+                  and response.json().get("code") == "upstream_image_unsupported" for response in unsupported)
+              and upstream.external_attempts == 0 and upstream.login_count == 0)
         image = request("GET", f"/api/artist-portraits/{portrait_id}/preview")
         decoded = Image.open(io.BytesIO(image.content))
         decoded.load()
@@ -449,6 +460,7 @@ def check_portraits(
         prepared = preview()
         check("同步预览只读取所选目标，不按同名自动覆盖",
               prepared["target"]["id"] == "artist-b" and prepared["portrait"]["id"] == portrait_id
+              and prepared["portrait"]["source_image"] == source_image
               and prepared["sync_state"] == "ready" and upstream.count() == 0)
         current = request("GET", prepared["target_image_url"])
         current_image = Image.open(io.BytesIO(current.content))

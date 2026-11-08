@@ -715,7 +715,10 @@ fn image_url(input: &str) -> Result<Url, ProviderError> {
         .map(|(_, remainder)| remainder.split('/').next().unwrap_or_default())
         .unwrap_or_default();
     if url.scheme() != "https"
-        || url.host_str() != Some("lastfm.freetls.fastly.net")
+        || !matches!(
+            url.host_str(),
+            Some("lastfm.freetls.fastly.net" | "lastfm-img.freetls.fastly.net")
+        )
         || url.port_or_known_default() != Some(443)
         || !url.username().is_empty()
         || url.password().is_some()
@@ -806,7 +809,16 @@ fn main_image(html: &str) -> Result<Url, ProviderError> {
             .is_some_and(|value| value.eq_ignore_ascii_case("og:image"))
         {
             let value = content.ok_or_else(missing)?;
-            return image_url(&value);
+            return image_url(&value).map_err(|error| {
+                if error.code == "invalid_image_url" {
+                    ProviderError::new(
+                        "upstream_image_unsupported",
+                        "Last.fm 主页返回的头像地址暂不受支持，本次未下载；可手动提供受支持的 Last.fm 图片链接。",
+                    )
+                } else {
+                    error
+                }
+            });
         }
     }
     Err(missing())
@@ -904,6 +916,15 @@ mod tests {
 
     const IMAGE: &str =
         "https://lastfm.freetls.fastly.net/i/u/300x300/0123456789abcdef0123456789abcdef.png";
+    // Minimal metadata from the observed public 二珂 page, without embedding
+    // the full page or requiring a real Last.fm request during tests.
+    const ERKE_IMAGE: &str =
+        "https://lastfm-img.freetls.fastly.net/i/u/ar0/58a46edad6d325e9b4034258587509a9.jpg";
+    const ERKE_HEAD: &str = r#"<html><head>
+    <meta property="og:image"           content="https://lastfm-img.freetls.fastly.net/i/u/ar0/58a46edad6d325e9b4034258587509a9.jpg" data-replaceable-head-tag>
+    <meta property="og:image:width"     content="1200" data-replaceable-head-tag>
+    <meta property="og:image:height"    content="630" data-replaceable-head-tag>
+    </head><body></body></html>"#;
 
     struct TestDirectory(PathBuf);
     impl TestDirectory {
@@ -949,6 +970,13 @@ mod tests {
             Self {
                 mime: "image/png",
                 bytes: png(),
+                ..Self::html("")
+            }
+        }
+        fn jpeg() -> Self {
+            Self {
+                mime: "image/jpeg",
+                bytes: jpeg(),
                 ..Self::html("")
             }
         }
@@ -1066,6 +1094,13 @@ mod tests {
         output.into_inner()
     }
 
+    fn jpeg() -> Vec<u8> {
+        let image = image::DynamicImage::new_rgb8(2, 3);
+        let mut output = Cursor::new(Vec::new());
+        image.write_to(&mut output, ImageFormat::Jpeg).unwrap();
+        output.into_inner()
+    }
+
     fn html(image: &str) -> String {
         format!("<html><head><meta property=\"og:image\" content=\"{image}\"></head><body></body></html>")
     }
@@ -1084,6 +1119,14 @@ mod tests {
             assert!(artist_page(artist).is_err());
         }
         assert!(image_url(IMAGE).is_ok());
+        for accepted in [
+            ERKE_IMAGE.to_owned(),
+            ERKE_IMAGE.replace("lastfm-img.freetls.fastly.net", "lastfm.freetls.fastly.net"),
+            ERKE_IMAGE.replace(".net/", ".net:443/"),
+            IMAGE.replace("lastfm.freetls.fastly.net", "lastfm-img.freetls.fastly.net"),
+        ] {
+            assert!(image_url(&accepted).is_ok(), "{accepted}");
+        }
         for bad in [
             IMAGE.replace("https:", "http:"),
             IMAGE.replace(".net/", ".net:444/"),
@@ -1113,6 +1156,30 @@ mod tests {
                 .code,
             "placeholder_image"
         );
+        for bad in [
+            ERKE_IMAGE.replace("https:", "http:"),
+            ERKE_IMAGE.replace(".net/", ".net:444/"),
+            ERKE_IMAGE.replace(
+                "lastfm-img.freetls.fastly.net",
+                "lastfm-img.freetls.fastly.net.evil.test",
+            ),
+            ERKE_IMAGE.replace(
+                "lastfm-img.freetls.fastly.net",
+                "fake-lastfm-img.freetls.fastly.net",
+            ),
+            ERKE_IMAGE.replace("https://", "https://user@"),
+            ERKE_IMAGE.replace("https://", "https://@"),
+            format!("{ERKE_IMAGE}?redirect=https://evil.test"),
+            format!("{ERKE_IMAGE}#fragment"),
+            ERKE_IMAGE.replace("/i/u/ar0/", "/api/"),
+            ERKE_IMAGE.replace(".jpg", ".svg"),
+        ] {
+            assert_eq!(
+                image_url(&bad).unwrap_err().code,
+                "invalid_image_url",
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -1136,7 +1203,21 @@ mod tests {
             main_image(&html(&format!("{IMAGE}?a=1&amp;b=2")))
                 .unwrap_err()
                 .code,
-            "invalid_image_url"
+            "upstream_image_unsupported"
+        );
+    }
+
+    #[test]
+    fn observed_artist_metadata_supports_new_cdn_and_preserves_placeholder_detection() {
+        assert_eq!(main_image(ERKE_HEAD).unwrap().as_str(), ERKE_IMAGE);
+        let placeholder = ERKE_IMAGE.replace("58a46edad6d325e9b4034258587509a9", PLACEHOLDER_HASH);
+        assert_eq!(
+            main_image(&html(&placeholder)).unwrap_err().code,
+            "placeholder_image"
+        );
+        assert_eq!(
+            image_url(&placeholder).unwrap_err().code,
+            "placeholder_image"
         );
     }
 
@@ -1197,6 +1278,49 @@ mod tests {
         assert!(!requests
             .iter()
             .any(|request| request.to_lowercase().contains("cookie:")));
+    }
+
+    #[tokio::test]
+    async fn observed_new_cdn_image_fetches_in_two_bounded_requests() {
+        let directory = TestDirectory::new();
+        let server = MockServer::new(vec![Reply::html(ERKE_HEAD), Reply::jpeg()]).await;
+        let client = test_client(&directory, &server);
+        let portrait = client.fetch_artist("二珂").await.unwrap();
+        assert_eq!(portrait.artist, "二珂");
+        assert_eq!(
+            portrait.source_page,
+            "https://www.last.fm/music/%E4%BA%8C%E7%8F%82"
+        );
+        assert_eq!(portrait.source_image, ERKE_IMAGE);
+        assert_eq!(portrait.bytes, jpeg());
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /music/%E4%BA%8C%E7%8F%82 HTTP/1.1"));
+        assert!(
+            requests[1].starts_with("GET /i/u/ar0/58a46edad6d325e9b4034258587509a9.jpg HTTP/1.1")
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_upstream_image_is_distinct_from_invalid_manual_input() {
+        let invalid = ERKE_IMAGE.replace(
+            "lastfm-img.freetls.fastly.net",
+            "lastfm-img.freetls.fastly.net.evil.test",
+        );
+        let directory = TestDirectory::new();
+        let server = MockServer::new(vec![Reply::html(html(&invalid))]).await;
+        let client = test_client(&directory, &server);
+        let manual = client.fetch_image("二珂", &invalid).await.unwrap_err();
+        assert_eq!(manual.code, "invalid_image_url");
+        assert_eq!(server.count(), 0);
+        let automatic = client.fetch_artist("二珂").await.unwrap_err();
+        assert_eq!(automatic.code, "upstream_image_unsupported");
+        assert!(automatic.message.starts_with("Last.fm 主页返回的头像地址"));
+        assert_eq!(
+            server.count(),
+            1,
+            "unsupported URLs must not trigger an image request"
+        );
     }
 
     #[tokio::test]

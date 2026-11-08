@@ -249,7 +249,11 @@ pub async fn fetch(State(state): State<AppState>, body: Bytes) -> ApiResult<Resp
         Err(error) => {
             if matches!(
                 error.code.as_str(),
-                "artist_not_found" | "image_not_found" | "placeholder_image" | "parse_error"
+                "artist_not_found"
+                    | "image_not_found"
+                    | "placeholder_image"
+                    | "parse_error"
+                    | "upstream_image_unsupported"
             ) {
                 sqlx::query("INSERT INTO artist_portrait_fetches(cache_key,failure,expires_at) VALUES($1,$2,now()+interval '1 day') ON CONFLICT(cache_key) DO UPDATE SET portrait_id=NULL,failure=excluded.failure,expires_at=excluded.expires_at")
                     .bind(&key).bind(SqlJson(json!({"code":error.code,"message":error.message}))).execute(&state.db).await.map_err(db)?;

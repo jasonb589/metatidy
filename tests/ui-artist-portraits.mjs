@@ -193,6 +193,31 @@ try {
     assert.equal(await page.locator('#portraits-preview a').count(), 2);
   }));
 
+  await check('Last.fm source links accept both exact CDN hosts and reject lookalike domains', () => withPage(async ({ page, model }) => {
+    let sourceImage = '';
+    const externalRequests = [];
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (url.hostname.includes('fastly')) externalRequests.push(url.href);
+    });
+    model.handlers['/api/artist-portraits/fetch'] = ({ route, body }) => route.fulfill({ json: { portrait: { ...portraitFor(body.artist), source_image: sourceImage }, cached: true } });
+    await ready(page);
+    for (const host of ['lastfm.freetls.fastly.net', 'lastfm-img.freetls.fastly.net']) {
+      sourceImage = `https://${host}/i/u/770x0/0123456789abcdef0123456789abcdef.jpg`;
+      await source(page, '二珂');
+      assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源图片' }).getAttribute('href'), sourceImage);
+      assert.equal(await page.locator('#portraits-preview a').count(), 2);
+    }
+    for (const host of ['lastfm-img.freetls.fastly.net.evil.test', 'evil-lastfm-img.freetls.fastly.net', 'lastfm.freetls.fastly.net.evil.test']) {
+      sourceImage = `https://${host}/i/u/770x0/0123456789abcdef0123456789abcdef.jpg`;
+      await source(page, '二珂');
+      assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源图片' }).count(), 0);
+      assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源页面' }).count(), 1);
+    }
+    assert.deepEqual(externalRequests, [], 'Displaying source links must not fetch either CDN');
+    assert.match(await page.locator('#portraits-image-url').getAttribute('placeholder'), /Last.fm 图片链接/);
+  }));
+
   await check('429 errors enforce server cooldown for both automatic and manual inputs', () => withPage(async ({ page, model }) => {
     model.handlers['/api/artist-portraits/fetch'] = ({ route }) => {
       model.lastfm = { cooldown: true, retry_after_seconds: 120, retry_at: Math.floor(Date.now() / 1000) + 120, reason: 'Last.fm 429，请稍后重试' };

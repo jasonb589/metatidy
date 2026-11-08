@@ -113,7 +113,7 @@ export function init() {
   const libraryPage = ui.el("span", { id: "portraits-library-page", class: "portraits-page" });
   libraryPager.append(libraryPrev, libraryPage, libraryNext);
   const artist = ui.el("input", { id: "portraits-artist", type: "text", autocomplete: "off", maxlength: 200, placeholder: "例如：周杰伦" });
-  const imageUrl = ui.el("input", { id: "portraits-image-url", type: "url", autocomplete: "off", placeholder: "https://lastfm.freetls.fastly.net/…", spellcheck: "false" });
+  const imageUrl = ui.el("input", { id: "portraits-image-url", type: "url", autocomplete: "off", placeholder: "粘贴 Last.fm 图片链接（https://…）", spellcheck: "false" });
   const fetchButton = button("portraits-fetch", "获取 Last.fm 头像", () => void fetchPortrait(), "btn-primary");
   const fetchStatus = ui.el("p", { id: "portraits-fetch-status", class: "portraits-status", role: "status", text: "填写或选择歌手后，手动获取头像。" });
   const limitStatus = ui.el("p", { id: "portraits-limit-status" });
@@ -353,7 +353,7 @@ function portraitUrl(value) {
 function sourceLink(label, value) {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || !["www.last.fm", "last.fm", "lastfm.freetls.fastly.net"].includes(url.hostname) || url.username || url.password || (url.port && url.port !== "443")) return null;
+    if (url.protocol !== "https:" || !["www.last.fm", "last.fm", "lastfm.freetls.fastly.net", "lastfm-img.freetls.fastly.net"].includes(url.hostname) || url.username || url.password || (url.port && url.port !== "443")) return null;
     return ui.el("a", { href: url.href, target: "_blank", rel: "noopener noreferrer", text: label });
   } catch { return null; }
 }
