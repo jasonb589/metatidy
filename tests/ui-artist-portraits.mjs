@@ -24,6 +24,7 @@ const deferred = () => { let resolve; const promise = new Promise(done => { reso
 const artists = [{ name: '周杰伦', track_count: 12, album_count: 3 }, { name: '王菲', track_count: 8, album_count: 2 }];
 const targets = [{ id: 'nd-1', name: '周杰伦', album_count: 3, song_count: 12, mbid: 'mbid-a' }, { id: 'nd-2', name: '周杰伦', album_count: 1, song_count: 2, mbid: 'mbid-b' }];
 const pageResult = (items, extra = {}) => ({ items, total: items.length, page: 1, page_size: 50, pages: 1, ...extra });
+const serviceStatus = model => ({ lastfm: { busy: false, cooldown: false, retry_after_seconds: 0, retry_at: 0, reason: '', min_interval_seconds: 5, ...model.lastfm }, navidrome: { configured: model.configured, url: 'https://music.example.test', min_version: '0.61.0' }, cache_days: 7 });
 const uuid = value => createHash('md5').update(String(value)).digest('hex').replace(/^(........)(....)(....)(....)(............)$/, '$1-$2-$3-$4-$5');
 const portraitFor = artist => ({ id: uuid(artist), artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: 'https://lastfm.freetls.fastly.net/i/u/512x512/0123456789abcdef0123456789abcdef.jpg', width: 512, height: 512, created_at: Math.floor(Date.now() / 1000), preview_url: `/api/artist-portraits/${uuid(artist)}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
 const image = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#e8ded3"/><circle cx="256" cy="185" r="87" fill="#76645c"/><path d="M95 512v-80a161 161 0 0 1 322 0v80" fill="#596e69"/></svg>';
@@ -61,7 +62,7 @@ async function withPage(action, options = {}) {
     const handler = model.handlers[`${request.method()} ${url.pathname}`] || model.handlers[url.pathname];
     if (handler) return handler({ route, url, body, call });
     if (url.pathname === '/api/artists') return route.fulfill({ json: pageResult(artists) });
-    if (url.pathname === '/api/artist-portraits/status') return route.fulfill({ json: { lastfm: { busy: false, cooldown: false, retry_after_seconds: 0, retry_at: 0, reason: '', min_interval_seconds: 5, ...model.lastfm }, navidrome: { configured: model.configured, url: 'https://music.example.test', min_version: '0.61.0' }, cache_days: 7 } });
+    if (url.pathname === '/api/artist-portraits/status') return route.fulfill({ json: serviceStatus(model) });
     if (url.pathname === '/api/artist-portraits/fetch') {
       const portrait = portraitFor(body.artist);
       model.portraits.set(portrait.id, portrait);
@@ -91,10 +92,10 @@ async function source(page, name = '周杰伦') {
   await page.locator('#portraits-fetch').click();
   await page.locator('#portraits-preview').waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.querySelector('#portraits-fetch')?.disabled);
-    await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0);
+  await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0);
 }
 async function remote(page) {
-  await page.locator('#portraits-target-q').fill('周杰伦');
+  if (await page.locator('#portraits-target-q').inputValue() !== '周杰伦') await page.locator('#portraits-target-q').fill('周杰伦');
   await page.locator('#portraits-target-search').click();
   await page.waitForFunction(() => document.querySelectorAll('.portraits-target').length === 2 && document.querySelector('#portraits-target-list')?.getAttribute('aria-busy') === 'false');
 }
@@ -102,6 +103,16 @@ async function selected(page) { await source(page); await remote(page); await pa
 async function confirmation(page) { await page.locator('#portraits-sync-preview').click(); await page.locator('#portraits-confirmation').waitFor(); }
 const uploads = model => model.calls.filter(call => call.url.pathname === '/api/artist-portraits/sync');
 const fetches = model => model.calls.filter(call => call.url.pathname === '/api/artist-portraits/fetch');
+const targetReads = model => model.calls.filter(call => call.method === 'GET' && call.url.pathname === '/api/navidrome/artists');
+const localArtist = (page, name) => page.locator('.portraits-artist').filter({ has: page.locator('strong', { hasText: name }) });
+async function settledTargets(page, expected = 2) {
+  await page.waitForFunction(expected => document.querySelectorAll('.portraits-target').length === expected && document.querySelector('#portraits-target-list')?.getAttribute('aria-busy') === 'false', expected);
+}
+async function waitDeferred(pending, label) {
+  let timer;
+  try { await Promise.race([pending.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Timed out: ${label}`)), 5000); })]); }
+  finally { clearTimeout(timer); }
+}
 async function noOverflow(page) {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), true, 'No horizontal page overflow');
   assert.equal(await page.locator('#artist-portraits-root').evaluate(node => node.scrollWidth <= node.clientWidth + 1), true, 'No portrait workspace overflow');
@@ -114,18 +125,197 @@ try {
   const authBase = await startFixture(port + 1, ['--auth']);
   browser = await playwright.chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || (process.platform === 'win32' ? 'msedge' : undefined) });
 
-  await check('Local browsing and selecting a singer never fetch portraits or Navidrome data', () => withPage(async ({ page, model }) => {
+  await check('Entering and filtering the local singer list never fetch portraits or Navidrome data', () => withPage(async ({ page, model }) => {
     await ready(page);
-    await page.locator('.portraits-artist').first().click();
-    assert.equal(await page.locator('#portraits-artist').inputValue(), '周杰伦');
+    assert.equal(await page.locator('#portraits-artist').inputValue(), '');
     assert.equal(fetches(model).length, 0);
     assert.equal(model.calls.some(call => call.url.pathname.startsWith('/api/navidrome/')), false);
     assert.equal(await page.locator('#artist-portraits-root img').count(), 0);
-    await page.locator('#portraits-target-q').fill('周杰伦');
-    assert.equal(model.calls.some(call => call.url.pathname === '/api/navidrome/artists'), false);
+    await page.locator('#portraits-library-q').fill('周杰伦');
     await page.locator('#portraits-library-search').click();
     await page.waitForFunction(() => document.querySelector('#portraits-library-list')?.getAttribute('aria-busy') === 'false');
     assert.equal(fetches(model).length, 0);
+    assert.equal(model.calls.some(call => call.url.pathname.startsWith('/api/navidrome/')), false);
+  }));
+
+  await check('Choosing a library singer follows both names and reads candidates once without fetching or choosing an ID', () => withPage(async ({ page, model }) => {
+    await ready(page);
+    await localArtist(page, '周杰伦').click();
+    await settledTargets(page);
+    assert.equal(await page.locator('#portraits-artist').inputValue(), '周杰伦');
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), '周杰伦');
+    assert.deepEqual(targetReads(model).map(call => call.url.searchParams.get('q')), ['周杰伦']);
+    assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+    assert.equal(await page.locator('#portraits-sync-preview').isDisabled(), true);
+    assert.equal(await page.locator('#artist-portraits-root img').count(), 0);
+    assert.equal(fetches(model).length, 0);
+    assert.equal(model.calls.some(call => call.url.pathname === '/api/navidrome/test' || call.url.pathname === '/api/artist-portraits/sync-preview'), false);
+    assert.equal(uploads(model).length, 0);
+    await page.locator('#portraits-fetch').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+    await settledTargets(page);
+    assert.equal(targetReads(model).length, 1, 'Fetching the selected source reuses the already searched candidates');
+    assert.equal(fetches(model).length, 1);
+    assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+  }));
+
+  await check('Changing library singers clears the target and stale preflight while a late candidate response stays discarded', () => withPage(async ({ page, model }) => {
+    const preflightEntered = deferred(), preflightRelease = deferred();
+    const oldSearchEntered = deferred(), oldSearchRelease = deferred();
+    await ready(page);
+    await selected(page);
+    model.handlers['/api/artist-portraits/sync-preview'] = async ({ route, body }) => {
+      preflightEntered.resolve(); await preflightRelease.promise;
+      return route.fulfill({ json: { token: uuid('stale-follow-preview'), portrait: model.portraits.get(body.portrait_id), target: targets[1], expires_at: Date.now() / 1000 + 600 } }).catch(() => {});
+    };
+    model.handlers['/api/navidrome/artists'] = async ({ route, url }) => {
+      if (url.searchParams.get('q') === '王菲') {
+        oldSearchEntered.resolve(); await oldSearchRelease.promise;
+        return route.fulfill({ json: pageResult([{ ...targets[0], id: 'late-faye', name: 'STALE 王菲' }]) }).catch(() => {});
+      }
+      return route.fulfill({ json: pageResult(targets) });
+    };
+    try {
+      await page.locator('#portraits-sync-preview').click();
+      await waitDeferred(preflightEntered, 'old source preflight');
+      await localArtist(page, '王菲').click();
+      await waitDeferred(oldSearchEntered, 'automatic search for the next singer');
+      assert.equal(await page.locator('#portraits-artist').inputValue(), '王菲');
+      assert.equal(await page.locator('#portraits-target-q').inputValue(), '王菲');
+      assert.equal(await page.locator('.portraits-target').count(), 0);
+      assert.equal(await page.locator('#portraits-preview').isVisible(), false);
+      assert.equal(await page.locator('#portraits-sync-preview').isDisabled(), true);
+      preflightRelease.resolve();
+      await localArtist(page, '周杰伦').click();
+      await settledTargets(page);
+      oldSearchRelease.resolve();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('#portraits-target-q').inputValue(), '周杰伦');
+      assert.equal(await page.locator('.portraits-target[data-artist-id="late-faye"]').count(), 0);
+      assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+      assert.equal(await page.locator('dialog[open]').count(), 0);
+      assert.equal(fetches(model).length, 1, 'Changing library singers does not start another Last.fm request');
+      assert.equal(uploads(model).length, 0);
+    } finally { preflightRelease.resolve(); oldSearchRelease.resolve(); }
+  }));
+
+  await check('Manual source typing follows the target without requests and preserves an edited Navidrome query', () => withPage(async ({ page, model }) => {
+    await ready(page);
+    for (const name of ['周', '周杰', '周杰伦']) {
+      await page.locator('#portraits-artist').fill(name);
+      assert.equal(await page.locator('#portraits-target-q').inputValue(), name);
+    }
+    assert.equal(targetReads(model).length, 0);
+    await page.locator('#portraits-target-q').fill('Jay Chou');
+    await page.locator('#portraits-artist').fill('王菲');
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), 'Jay Chou');
+    assert.equal(targetReads(model).length, 0);
+    await page.locator('#portraits-fetch').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+    assert.equal(targetReads(model).length, 0, 'Fetching a source does not automatically submit a manually edited target query');
+    await page.locator('#portraits-target-search').click();
+    await settledTargets(page);
+    assert.deepEqual(targetReads(model).map(call => call.url.searchParams.get('q')), ['Jay Chou']);
+    await localArtist(page, '周杰伦').click();
+    await settledTargets(page);
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), '周杰伦', 'A deliberate library selection restarts target-name following');
+    assert.deepEqual(targetReads(model).map(call => call.url.searchParams.get('q')), ['Jay Chou', '周杰伦']);
+    assert.equal(fetches(model).length, 1);
+  }));
+
+  await check('Fetching a manually entered source searches its untouched target once and reuses candidates on another fetch', () => withPage(async ({ page, model }) => {
+    await ready(page);
+    await page.locator('#portraits-artist').fill('周杰伦');
+    assert.equal(targetReads(model).length, 0);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.locator('#portraits-fetch').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+      await settledTargets(page);
+      assert.equal(targetReads(model).length, 1);
+    }
+    await page.locator('#portraits-artist').fill('王菲');
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), '王菲');
+    assert.equal(await page.locator('.portraits-target').count(), 0);
+    assert.equal(targetReads(model).length, 1, 'Editing the source name alone does not contact Navidrome');
+    await page.locator('#portraits-fetch').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+    await settledTargets(page);
+    assert.deepEqual(targetReads(model).map(call => call.url.searchParams.get('q')), ['周杰伦', '王菲']);
+    assert.equal(fetches(model).length, 3);
+    assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+    assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Selecting singers while configuration loads searches only the latest selection after configuration succeeds', () => withPage(async ({ page, model }) => {
+    const statusEntered = deferred(), statusRelease = deferred();
+    model.handlers['/api/artist-portraits/status'] = async ({ route }) => {
+      statusEntered.resolve(); await statusRelease.promise;
+      return route.fulfill({ json: serviceStatus(model) }).catch(() => {});
+    };
+    try {
+      await page.goto(`${base}/#artist-portraits`);
+      await waitDeferred(statusEntered, 'initial configuration request');
+      await page.locator('.portraits-artist').first().waitFor();
+      await localArtist(page, '周杰伦').click();
+      await localArtist(page, '王菲').click();
+      assert.equal(await page.locator('#portraits-artist').inputValue(), '王菲');
+      assert.equal(await page.locator('#portraits-target-q').inputValue(), '王菲');
+      assert.equal(targetReads(model).length, 0);
+      statusRelease.resolve();
+      await settledTargets(page);
+      assert.deepEqual(targetReads(model).map(call => call.url.searchParams.get('q')), ['王菲']);
+      assert.equal(fetches(model).length, 0);
+      assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+      assert.equal(uploads(model).length, 0);
+    } finally { statusRelease.resolve(); }
+  }));
+
+  await check('An unconfigured Navidrome still receives the selected name locally without any remote request', () => withPage(async ({ page, model }) => {
+    model.configured = false;
+    await page.goto(`${base}/#artist-portraits`);
+    await page.waitForFunction(() => document.querySelector('#portraits-connection')?.textContent.includes('尚未配置'));
+    await localArtist(page, '王菲').click();
+    assert.equal(await page.locator('#portraits-artist').inputValue(), '王菲');
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), '王菲');
+    assert.equal(await page.locator('#portraits-target-search').isDisabled(), true);
+    await page.locator('#portraits-fetch').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+    assert.equal(model.calls.some(call => call.url.pathname.startsWith('/api/navidrome/')), false);
+    assert.equal(fetches(model).length, 1);
+    assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Leaving cancels an in-flight candidate search and a later explicit fetch retries it once', () => withPage(async ({ page, model }) => {
+    const entered = deferred(), release = deferred();
+    let attempts = 0;
+    model.handlers['/api/navidrome/artists'] = async ({ route }) => {
+      if (++attempts === 1) {
+        entered.resolve(); await release.promise;
+        return route.fulfill({ json: pageResult([{ ...targets[0], id: 'left-page-result', name: 'STALE AFTER LEAVING' }]) }).catch(() => {});
+      }
+      return route.fulfill({ json: pageResult(targets) });
+    };
+    try {
+      await ready(page);
+      await localArtist(page, '周杰伦').click();
+      await waitDeferred(entered, 'candidate search before leaving');
+      await page.locator('#tab-settings').click();
+      release.resolve();
+      await page.locator('#tab-artist-portraits').click();
+      await page.waitForFunction(() => !document.querySelector('#portraits-status-refresh')?.disabled);
+      assert.equal(targetReads(model).length, 1, 'Returning does not automatically restart external searches');
+      assert.equal(await page.locator('#portraits-target-q').inputValue(), '周杰伦');
+      assert.equal(await page.locator('.portraits-target').count(), 0);
+      assert.equal(fetches(model).length, 0);
+      await page.locator('#portraits-fetch').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-preview img')?.naturalWidth > 0 && !document.querySelector('#portraits-fetch')?.disabled);
+      await settledTargets(page);
+      assert.equal(targetReads(model).length, 2);
+      assert.equal(await page.locator('.portraits-target[data-artist-id="left-page-result"]').count(), 0);
+      assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+      assert.equal(fetches(model).length, 1);
+      assert.equal(uploads(model).length, 0);
+    } finally { release.resolve(); }
   }));
 
   await check('Local paging uses indexed summaries and an edited delayed query cannot replace its successor', () => withPage(async ({ page, model }) => {
@@ -150,6 +340,8 @@ try {
       assert.equal(await page.locator('.portraits-artist').count(), 1);
       assert.match(await page.locator('.portraits-artist').innerText(), /NEW/);
       assert.ok(model.calls.filter(call => call.url.pathname === '/api/artists').every(call => call.url.searchParams.get('page_size') === '50'));
+      assert.equal(targetReads(model).length, 0);
+      assert.equal(fetches(model).length, 0);
     } finally { release.resolve(); }
   }));
 
@@ -281,6 +473,8 @@ try {
       assert.equal(await page.getByRole('button', { name: '确认替换此歌手头像' }).isDisabled(), true);
       await page.keyboard.press('Escape');
       await source(page, '王菲');
+      await remote(page);
+      await page.locator('[data-artist-id="nd-2"]').click();
       await page.locator('#portraits-preview img').evaluate(image => image.remove());
       await cdp.send('Network.clearBrowserCache');
       model.handlers[portraitFor('王菲').preview_url] = ({ route }) => route.fulfill({ status: 404, body: '' });
@@ -378,6 +572,8 @@ try {
       await page.locator('dialog[open]').waitFor({ state: 'detached' });
       assert.equal(uploads(model).length, 0);
       await source(page);
+      await remote(page);
+      await page.locator('[data-artist-id="nd-2"]').click();
       await confirmation(page);
       await page.evaluate(() => { location.hash = '#settings'; });
       await page.locator('dialog[open]').waitFor({ state: 'detached' });
@@ -407,6 +603,15 @@ try {
     await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uncertain' && !document.querySelector('#portraits-sync-check')?.disabled);
     assert.equal(await page.locator('#portraits-artist').isDisabled(), true);
     assert.equal(await page.locator('#portraits-sync-preview').isDisabled(), true);
+    assert.equal(await localArtist(page, '王菲').isDisabled(), true);
+    assert.equal(await page.locator('#portraits-target-q').isDisabled(), true);
+    const searchesBeforeLockedSelection = targetReads(model).length;
+    const artistBeforeLockedSelection = await page.locator('#portraits-artist').inputValue();
+    const queryBeforeLockedSelection = await page.locator('#portraits-target-q').inputValue();
+    await localArtist(page, '王菲').evaluate(node => node.click());
+    assert.equal(await page.locator('#portraits-artist').inputValue(), artistBeforeLockedSelection);
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), queryBeforeLockedSelection);
+    assert.equal(targetReads(model).length, searchesBeforeLockedSelection);
     assert.equal(uploads(model).length, 1);
     assert.ok(model.calls.some(call => call.method === 'GET' && /\/sync\/[^/]+$/.test(call.url.pathname)));
     await page.reload();

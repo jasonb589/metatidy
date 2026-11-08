@@ -1,4 +1,4 @@
-/** Explicit, one-artist portrait review. Browsing never contacts Last.fm or Navidrome. */
+/** Explicit portrait review. Selecting a singer searches Navidrome; Last.fm fetching stays manual. */
 import { api } from "./api.js";
 import * as ui from "./ui.js";
 
@@ -28,8 +28,10 @@ let syncChecking = false;
 let uploadInFlight = false;
 let syncTimer = 0;
 let syncPolls = 0;
+let targetFollowsSource = true;
+let pendingTargetQuery = null;
 const library = { q: "", page: 1, pages: 1, total: 0, loading: false, loaded: false, items: [] };
-const remote = { q: "", page: 1, pages: 1, total: 0, loading: false, items: [], searched: false };
+const remote = { q: "", page: 1, pages: 1, total: 0, loading: false, items: [], searched: false, attempted: false };
 
 const text = (value) => typeof value === "string" ? value : "";
 const count = (value) => Math.max(0, Math.trunc(Number(value) || 0));
@@ -81,14 +83,51 @@ function invalidateTarget({ clearResults = false } = {}) {
   closePreview();
   clearFinishedSync();
   if (clearResults) {
+    pendingTargetQuery = null;
     cancel("remote");
     remote.loading = false;
     remote.items = [];
     remote.searched = false;
+    remote.attempted = false;
+    remote.q = "";
     remote.page = 1;
     renderRemote();
   } else updateSelection();
   updateControls();
+}
+
+function followSource({ search = false, force = false } = {}) {
+  if (pendingSync()) return;
+  if (force) targetFollowsSource = true;
+  if (targetFollowsSource) {
+    nodes.targetQ.value = nodes.artist.value.trim();
+    invalidateTarget({ clearResults: true });
+    message(nodes.targetStatus, nodes.targetQ.value ? "搜索名已跟随当前歌手，也可以修改为 Navidrome 中的名称。" : "选择或填写来源歌手后，目标搜索名会自动填入。 ");
+    if (search) queueTargetSearch();
+  } else {
+    // Keep a deliberate alias query, but require a fresh target choice for the
+    // changed source. An old confirmation must never survive a source change.
+    invalidateTarget();
+  }
+}
+
+function queueTargetSearch() {
+  const q = nodes.targetQ.value.trim();
+  if (!targetFollowsSource || pendingSync() || !q || (remote.attempted && remote.q === q)) return;
+  pendingTargetQuery = q;
+  flushTargetSearch();
+}
+
+function flushTargetSearch() {
+  if (!active || pendingTargetQuery === null || !statusKnown) return;
+  const q = pendingTargetQuery;
+  if (pendingSync() || !targetFollowsSource || q !== nodes.targetQ.value.trim() || !status?.navidrome?.configured) {
+    pendingTargetQuery = null;
+    return;
+  }
+  if (remote.loading) return;
+  pendingTargetQuery = null;
+  void searchRemote(1);
 }
 
 function card(title, step, content) {
@@ -121,9 +160,9 @@ export function init() {
   const preview = ui.el("div", { id: "portraits-preview", class: "portraits-preview", hidden: true });
   const connection = ui.el("p", { id: "portraits-connection", class: "portraits-status", role: "status", text: "正在读取 Navidrome 配置状态…" });
   const test = button("portraits-test", "测试连接", () => void testConnection(), "btn-sm");
-  const targetQ = ui.el("input", { id: "portraits-target-q", type: "search", autocomplete: "off", placeholder: "输入 Navidrome 中的歌手名" });
+  const targetQ = ui.el("input", { id: "portraits-target-q", type: "search", autocomplete: "off", placeholder: "跟随所选歌手，也可修改名称" });
   const targetSearch = button("portraits-target-search", "搜索目标歌手", () => void searchRemote(1), "btn-sm");
-  const targetStatus = ui.el("p", { id: "portraits-target-status", class: "portraits-status", role: "status", text: "点击搜索，再选择准确的目标。相同名称也需要手动确认。" });
+  const targetStatus = ui.el("p", { id: "portraits-target-status", class: "portraits-status", role: "status", text: "选择曲库歌手后自动查找 Navidrome 候选，再点选准确目标。" });
   const targetList = ui.el("ul", { id: "portraits-target-list", class: "portraits-list portraits-targets", "aria-label": "Navidrome 目标歌手" });
   const targetPager = ui.el("nav", { class: "portraits-pager", "aria-label": "Navidrome 歌手分页", hidden: true });
   const targetPrev = button("portraits-target-prev", "上一页", () => void searchRemote(remote.page - 1), "btn-sm");
@@ -141,7 +180,7 @@ export function init() {
   host.append(
     ui.el("div", { class: "portraits-intro" }, [ui.icon("artist", { size: 34 }), ui.el("div", {}, [ui.el("h2", { text: "从一张肖像，认识熟悉的声音。" }), ui.el("p", { text: "逐位获取 Last.fm 图片，核对来源与歌手，再同步到 Navidrome。浏览列表只读取本地索引。" })])]),
     ui.el("div", { class: "portraits-layout" }, [
-      card("曲库歌手", "", [ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void loadLibrary(1); } }, [field("筛选本地歌手", libraryQ), librarySearch]), libraryStatus, libraryList, libraryPager, ui.el("p", { class: "hint", text: "选择只会填入歌手名；也可以直接在右侧手动输入。" })]),
+      card("曲库歌手", "", [ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void loadLibrary(1); } }, [field("筛选本地歌手", libraryQ), librarySearch]), libraryStatus, libraryList, libraryPager, ui.el("p", { class: "hint", text: "选中后自动填入歌手名并查找 Navidrome 候选；Last.fm 头像仍需点击获取。" })]),
       ui.el("div", { class: "portraits-editor" }, [
         card("获取与核对来源", "1", [
           field("歌手名（Last.fm 查询）", artist),
@@ -159,9 +198,13 @@ export function init() {
       ]),
     ]),
   );
-  artist.addEventListener("input", invalidateSource);
+  artist.addEventListener("input", () => { invalidateSource(); followSource(); });
   imageUrl.addEventListener("input", invalidateSource);
-  targetQ.addEventListener("input", () => { invalidateTarget({ clearResults: true }); message(targetStatus, "查询已修改，请点击搜索以载入新的候选。 "); });
+  targetQ.addEventListener("input", () => {
+    targetFollowsSource = targetQ.value.trim() === artist.value.trim();
+    invalidateTarget({ clearResults: true });
+    message(targetStatus, "查询已修改，请点击搜索以载入新的候选。 ");
+  });
   libraryQ.addEventListener("input", () => {
     cancel("library");
     library.loading = false;
@@ -193,9 +236,11 @@ export async function activate() {
 export function leave() {
   active = false;
   lifecycle++;
+  pendingTargetQuery = null;
   for (const kind of requests.keys()) cancel(kind);
   closePreview();
   if (library.loading) library.loaded = false;
+  if (remote.loading) remote.attempted = false;
   library.loading = remote.loading = sourceLoading = testLoading = syncChecking = false;
   clearInterval(statusTimer);
   statusTimer = 0;
@@ -250,6 +295,7 @@ async function refreshStatus() {
       message(nodes.connection, "Navidrome 尚未配置。展开配置说明，在服务端设置连接信息。 ");
     } else if (!connected) message(nodes.connection, `已配置 ${text(result.navidrome.url)}；可点击测试连接。要求 Navidrome ≥ ${text(result.navidrome.min_version) || "0.61.0"}。`);
     renderLimit();
+    flushTargetSearch();
   } catch (error) {
     if (!operation.current()) return;
     statusKnown = false;
@@ -295,6 +341,7 @@ function renderLibrary() {
       nodes.artist.value = item.name;
       nodes.imageUrl.value = "";
       invalidateSource();
+      followSource({ search: true, force: true });
       nodes.artist.focus({ preventScroll: true });
     }, "portraits-artist");
     select.className = "portraits-artist";
@@ -317,6 +364,7 @@ async function fetchPortrait() {
   sourceLoading = true;
   message(nodes.fetchStatus, imageUrl ? `正在缓存「${artist}」的手动图片链接…` : `正在查询「${artist}」的 Last.fm 公开页面…`);
   updateControls();
+  queueTargetSearch();
   try {
     const result = await api.artistPortraitFetch({ artist, ...(imageUrl ? { image_url: imageUrl } : {}) }, { signal: operation.signal });
     if (!operation.current() || revision !== sourceRevision) return;
@@ -407,9 +455,12 @@ async function testConnection() {
 
 async function searchRemote(page = 1) {
   if (!active || !statusKnown || !status?.navidrome?.configured || remote.loading || pendingSync() || !nodes.targetQ.value.trim()) return;
+  pendingTargetQuery = null;
   invalidateTarget();
   const operation = startRequest("remote");
   const q = nodes.targetQ.value.trim();
+  remote.q = q;
+  remote.attempted = true;
   remote.loading = true;
   remote.items = [];
   remote.searched = false;
