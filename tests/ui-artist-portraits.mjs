@@ -28,6 +28,7 @@ const serviceStatus = model => ({ lastfm: { busy: false, cooldown: false, retry_
 const uuid = value => createHash('md5').update(String(value)).digest('hex').replace(/^(........)(....)(....)(....)(............)$/, '$1-$2-$3-$4-$5');
 const portraitFor = artist => ({ id: uuid(artist), artist, source_page: `https://www.last.fm/music/${encodeURIComponent(artist)}`, source_image: 'https://lastfm.freetls.fastly.net/i/u/512x512/0123456789abcdef0123456789abcdef.jpg', width: 512, height: 512, created_at: Math.floor(Date.now() / 1000), preview_url: `/api/artist-portraits/${uuid(artist)}/preview`, preview_format: 'avif', upload_format: 'jpeg' });
 const image = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" fill="#e8ded3"/><circle cx="256" cy="185" r="87" fill="#76645c"/><path d="M95 512v-80a161 161 0 0 1 322 0v80" fill="#596e69"/></svg>';
+const historyItem = (index, state = 'uploaded', extra = {}) => ({ token: uuid(`history-${index}`), portrait_id: uuid(`歌手 ${index}`), artist: `歌手 ${index}`, target: { id: `target-${index}`, name: `目标 ${index}` }, state, message: state === 'uploaded' ? '头像已同步' : state === 'failed' ? '连接失败' : state === 'uncertain' ? '请在 Navidrome 核对' : '正在上传', created_at: 1700000000 + index, updated_at: 1700001000 + index, ...extra });
 async function check(name, action) {
   if (process.env.METATIDY_PORTRAITS_TEST_FILTER && !name.includes(process.env.METATIDY_PORTRAITS_TEST_FILTER)) return;
   try { await action(); passed++; console.log(`PASS ${name}`); }
@@ -50,7 +51,7 @@ async function withPage(action, options = {}) {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const model = { handlers: {}, calls: [], configured: true, lastfm: {}, portraits: new Map(), syncState: 'uploaded', token: 0 };
+  const model = { handlers: {}, calls: [], configured: true, lastfm: {}, portraits: new Map(), syncState: 'uploaded', token: 0, history: [] };
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -63,6 +64,13 @@ async function withPage(action, options = {}) {
     if (handler) return handler({ route, url, body, call });
     if (url.pathname === '/api/artists') return route.fulfill({ json: pageResult(artists) });
     if (url.pathname === '/api/artist-portraits/status') return route.fulfill({ json: serviceStatus(model) });
+    if (url.pathname === '/api/artist-portraits/library' || url.pathname === '/api/artist-portraits/history') {
+      const isHistory = url.pathname.endsWith('/history');
+      const q = (url.searchParams.get('q') || '').toLowerCase(), state = url.searchParams.get('state') || '';
+      const items = (isHistory ? model.history : [...model.portraits.values()]).filter(item => `${item.artist} ${item.target?.name || ''}`.toLowerCase().includes(q) && (!isHistory || !state || state === 'all' || item.state === state));
+      const size = Number(url.searchParams.get('page_size')) || (isHistory ? 10 : 12), pages = Math.ceil(items.length / size), page = Math.max(1, Math.min(Number(url.searchParams.get('page')) || 1, pages || 1));
+      return route.fulfill({ json: pageResult(items.slice((page - 1) * size, page * size), { total: items.length, page, page_size: size, pages }) });
+    }
     if (url.pathname === '/api/artist-portraits/fetch') {
       const portrait = portraitFor(body.artist);
       model.portraits.set(portrait.id, portrait);
@@ -76,7 +84,15 @@ async function withPage(action, options = {}) {
     }
     if (url.pathname === '/api/artist-portraits/sync') return route.fulfill({ json: { state: 'uploading', token: body.token, message: '正在上传' } });
     if (url.pathname.endsWith('/preview') || url.pathname.endsWith('/target-image')) return route.fulfill({ contentType: 'image/svg+xml', headers: { 'Cache-Control': 'no-store' }, body: image });
-    if (url.pathname.startsWith('/api/artist-portraits/sync/')) return route.fulfill({ json: { state: model.syncState, message: model.syncState === 'uploaded' ? '头像已同步' : '等待结果' } });
+    if (url.pathname.startsWith('/api/artist-portraits/sync/')) {
+      const record = model.history.find(item => url.pathname.endsWith(`/${item.token}`));
+      return route.fulfill({ json: record || { state: model.syncState, message: model.syncState === 'uploaded' ? '头像已同步' : '等待结果' } });
+    }
+    const detailId = url.pathname.match(/^\/api\/artist-portraits\/([0-9a-f-]{36})$/)?.[1];
+    if (detailId) {
+      const portrait = model.portraits.get(detailId);
+      return portrait ? route.fulfill({ json: { portrait } }) : route.fulfill({ status: 404, json: { detail: '本地头像文件不存在或损坏' } });
+    }
     return route.fulfill({ status: 404, json: { detail: 'Fixture not found' } });
   });
   try { await action({ page, context, model }); assert.deepEqual(errors, [], 'Portrait workflow must not throw browser exceptions'); }
@@ -104,6 +120,14 @@ async function confirmation(page) { await page.locator('#portraits-sync-preview'
 const uploads = model => model.calls.filter(call => call.url.pathname === '/api/artist-portraits/sync');
 const fetches = model => model.calls.filter(call => call.url.pathname === '/api/artist-portraits/fetch');
 const targetReads = model => model.calls.filter(call => call.method === 'GET' && call.url.pathname === '/api/navidrome/artists');
+const archiveReads = (model, kind) => model.calls.filter(call => call.url.pathname === `/api/artist-portraits/${kind}`);
+async function openArchive(page, kind, expected) {
+  await page.locator(`#portraits-tab-${kind}`).click();
+  await page.waitForFunction(({ kind, expected }) => {
+    const list = document.querySelector(`#portraits-${kind}-list`);
+    return list?.getAttribute('aria-busy') === 'false' && list.children.length === expected;
+  }, { kind, expected });
+}
 const localArtist = (page, name) => page.locator('.portraits-artist').filter({ has: page.locator('strong', { hasText: name }) });
 async function settledTargets(page, expected = 2) {
   await page.waitForFunction(expected => document.querySelectorAll('.portraits-target').length === expected && document.querySelector('#portraits-target-list')?.getAttribute('aria-busy') === 'false', expected);
@@ -124,6 +148,260 @@ try {
   base = await startFixture(port);
   const authBase = await startFixture(port + 1, ['--auth']);
   browser = await playwright.chromium.launch({ headless: true, channel: process.env.PLAYWRIGHT_CHANNEL || (process.platform === 'win32' ? 'msedge' : undefined) });
+
+  await check('Portrait archives load only on opening, paginate locally, and reuse validated files with fresh target selection', () => withPage(async ({ page, model }) => {
+    for (let index = 0; index < 15; index++) { const item = portraitFor(`收藏歌手 ${index}`); model.portraits.set(item.id, item); }
+    await ready(page);
+    assert.equal(archiveReads(model, 'library').length, 0);
+    assert.equal(archiveReads(model, 'history').length, 0);
+    await openArchive(page, 'collection', 12);
+    assert.equal(archiveReads(model, 'library')[0].url.searchParams.get('page_size'), '12');
+    assert.equal(targetReads(model).length, 0);
+    assert.equal(fetches(model).length, 0);
+    await page.locator('#portraits-collection-next').click();
+    await page.waitForFunction(() => document.querySelectorAll('.portraits-collection-card').length === 3 && document.querySelector('#portraits-collection-list')?.getAttribute('aria-busy') === 'false');
+    assert.match(await page.locator('#portraits-collection-page').innerText(), /2 \/ 2/);
+    const chosen = model.portraits.get(uuid('收藏歌手 12'));
+    await page.locator(`.portraits-reuse[data-portrait-id="${chosen.id}"]`).click();
+    await page.waitForFunction(() => document.querySelector('#portraits-tab-work')?.getAttribute('aria-selected') === 'true' && document.querySelector('#portraits-preview img')?.naturalWidth > 0);
+    await settledTargets(page);
+    assert.equal(await page.locator('#portraits-artist').inputValue(), chosen.artist);
+    assert.equal(await page.locator('#portraits-target-q').inputValue(), chosen.artist);
+    assert.equal(await page.locator('.portraits-target[aria-pressed="true"]').count(), 0);
+    assert.equal(await page.locator('#portraits-sync-preview').isDisabled(), true);
+    assert.equal(model.calls.filter(call => call.url.pathname === `/api/artist-portraits/${chosen.id}`).length, 1);
+    assert.equal(fetches(model).length, 0);
+    assert.equal(uploads(model).length, 0);
+    await page.locator('[data-artist-id="nd-2"]').click();
+    await confirmation(page);
+    assert.equal(model.calls.filter(call => call.url.pathname === '/api/artist-portraits/sync-preview').length, 1);
+    assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Cached portrait search and detail responses cannot apply after edits or view switches', () => withPage(async ({ page, model }) => {
+    const oldEntered = deferred(), oldRelease = deferred(), detailEntered = deferred(), detailRelease = deferred();
+    const original = portraitFor('原缓存'), newest = portraitFor('新缓存');
+    model.portraits.set(original.id, original); model.portraits.set(newest.id, newest);
+    model.handlers['/api/artist-portraits/library'] = async ({ route, url }) => {
+      if (url.searchParams.get('q') === 'old') { oldEntered.resolve(); await oldRelease.promise; return route.fulfill({ json: pageResult([original]) }).catch(() => {}); }
+      return route.fulfill({ json: pageResult([newest]) });
+    };
+    model.handlers[`/api/artist-portraits/${newest.id}`] = async ({ route }) => { detailEntered.resolve(); await detailRelease.promise; return route.fulfill({ json: { portrait: newest } }).catch(() => {}); };
+    try {
+      await ready(page); await openArchive(page, 'collection', 1);
+      await page.locator('#portraits-collection-q').fill('old'); await page.locator('#portraits-collection-search').click();
+      await waitDeferred(oldEntered, 'old collection query');
+      await page.locator('#portraits-collection-q').fill('new'); await page.locator('#portraits-collection-search').click();
+      await page.locator('.portraits-collection-card h3', { hasText: '新缓存' }).waitFor();
+      oldRelease.resolve();
+      await page.locator('.portraits-reuse').click(); await waitDeferred(detailEntered, 'portrait detail');
+      await page.locator('#portraits-tab-history').click(); detailRelease.resolve();
+      await page.waitForFunction(() => document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false');
+      assert.equal(await page.locator('#portraits-tab-history').getAttribute('aria-selected'), 'true');
+      assert.equal(await page.locator('#portraits-artist').inputValue(), '');
+      assert.equal(fetches(model).length, 0);
+      assert.equal(targetReads(model).length, 0);
+    } finally { oldRelease.resolve(); detailRelease.resolve(); }
+  }));
+
+  await check('Damaged cached files report a local error without fetching and pending sync disables reuse', () => withPage(async ({ page, model }) => {
+    const cached = portraitFor('损坏缓存'); model.portraits.set(cached.id, cached);
+    model.handlers[`/api/artist-portraits/${cached.id}`] = ({ route }) => route.fulfill({ status: 409, json: { detail: 'AVIF 文件校验失败' } });
+    await ready(page); await openArchive(page, 'collection', 1);
+    await page.locator('.portraits-reuse').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-collection-status')?.textContent.includes('AVIF 文件校验失败'));
+    assert.equal(await page.locator('#portraits-tab-collection').getAttribute('aria-selected'), 'true');
+    assert.equal(fetches(model).length, 0); assert.equal(targetReads(model).length, 0);
+    await page.locator('#portraits-tab-work').click();
+    await selected(page); await confirmation(page);
+    model.syncState = 'uncertain';
+    await page.getByRole('button', { name: '确认替换此歌手头像' }).click();
+    await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uncertain');
+    await openArchive(page, 'collection', 2);
+    assert.equal(await page.locator('.portraits-reuse').first().isDisabled(), true);
+    const detailsBefore = model.calls.filter(call => call.url.pathname === `/api/artist-portraits/${cached.id}`).length;
+    await page.locator(`.portraits-reuse[data-portrait-id="${cached.id}"]`).evaluate(node => node.click());
+    assert.equal(model.calls.filter(call => call.url.pathname === `/api/artist-portraits/${cached.id}`).length, detailsBefore);
+    assert.equal(uploads(model).length, 1);
+  }));
+
+  await check('Archive page changes cancel pending cache reuse and history checks from the previous page', () => withPage(async ({ page, model }) => {
+    const detailEntered = deferred(), detailRelease = deferred(), historyEntered = deferred(), historyRelease = deferred();
+    for (let index = 0; index < 13; index++) { const item = portraitFor(`缓存 ${index}`); model.portraits.set(item.id, item); }
+    model.history = Array.from({ length: 11 }, (_, index) => historyItem(index, 'uploaded'));
+    model.handlers[`/api/artist-portraits/${uuid('缓存 0')}`] = async ({ route }) => { detailEntered.resolve(); await detailRelease.promise; return route.fulfill({ json: { portrait: model.portraits.get(uuid('缓存 0')) } }).catch(() => {}); };
+    model.handlers[`/api/artist-portraits/sync/${model.history[0].token}`] = async ({ route }) => { historyEntered.resolve(); await historyRelease.promise; return route.fulfill({ json: { ...model.history[0], state: 'uncertain' } }).catch(() => {}); };
+    try {
+      await ready(page); await openArchive(page, 'collection', 12);
+      await page.locator('.portraits-reuse').first().click(); await waitDeferred(detailEntered, 'old collection page detail');
+      await page.locator('#portraits-collection-next').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-collection-page')?.textContent === '2 / 2');
+      detailRelease.resolve();
+      assert.equal(await page.locator('#portraits-tab-collection').getAttribute('aria-selected'), 'true');
+      assert.equal(await page.locator('#portraits-artist').inputValue(), '');
+      await openArchive(page, 'history', 10);
+      await page.locator('.portraits-history-check').first().click(); await waitDeferred(historyEntered, 'old history page check');
+      await page.locator('#portraits-history-next').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-history-page')?.textContent === '2 / 2');
+      historyRelease.resolve();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await page.locator('#portraits-sync-result').isVisible(), false);
+      assert.equal(await page.locator('.portraits-history-row').getAttribute('data-state'), 'uploaded');
+      assert.equal(fetches(model).length, 0); assert.equal(uploads(model).length, 0);
+    } finally { detailRelease.resolve(); historyRelease.resolve(); }
+  }));
+
+  await check('History is paginated and filtered for the current server and never reposts an old token', () => withPage(async ({ page, model }) => {
+    model.history = Array.from({ length: 13 }, (_, index) => historyItem(index, ['uploaded', 'failed', 'uncertain', 'uploading'][index % 4]));
+    await ready(page); await openArchive(page, 'history', 10);
+    assert.equal(archiveReads(model, 'history')[0].url.searchParams.get('page_size'), '10');
+    assert.match(await page.locator('#portraits-view-history').innerText(), /当前 Navidrome 服务器/);
+    for (const label of ['已同步', '同步失败', '待核对', '进行中']) assert.ok((await page.locator('.portraits-state').allTextContents()).includes(label));
+    assert.equal(await page.locator('#portraits-view-history img').count(), 0);
+    await page.locator('#portraits-history-next').click();
+    await page.waitForFunction(() => document.querySelectorAll('.portraits-history-row').length === 3 && document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false');
+    await page.locator('#portraits-history-filter').selectOption('failed');
+    await page.waitForFunction(() => document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('.portraits-history-row')].every(row => row.dataset.state === 'failed'));
+    assert.equal(archiveReads(model, 'history').at(-1).url.searchParams.get('state'), 'failed');
+    await page.locator('#portraits-history-q').fill('目标 1'); await page.locator('#portraits-history-search').click();
+    await page.waitForFunction(() => document.querySelectorAll('.portraits-history-row').length === 1 && document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false');
+    await page.locator('.portraits-history-check').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-history-status')?.textContent.includes('仅更新了状态'));
+    assert.equal(uploads(model).length, 0); assert.equal(fetches(model).length, 0);
+    assert.equal(await page.getByRole('button', { name: /重传|重新上传/ }).count(), 0);
+  }));
+
+  await check('History state checks restore the exact pending artist and cannot replace another pending sync', () => withPage(async ({ page, model }) => {
+    model.history = [historyItem(1, 'uncertain'), historyItem(2, 'uploading')];
+    await ready(page); await openArchive(page, 'history', 2);
+    await page.locator(`.portraits-history-check[data-token="${model.history[0].token}"]`).click();
+    await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uncertain');
+    assert.match(await page.locator('#portraits-sync-message').innerText(), /目标 1.*target-1/);
+    const record = await page.evaluate(() => JSON.parse(sessionStorage.getItem('metatidy-portrait-pending-sync')));
+    assert.equal(record.artist, '歌手 1'); assert.equal(record.targetId, 'target-1');
+    await page.locator(`.portraits-history-check[data-token="${model.history[1].token}"]`).click();
+    await page.waitForFunction(() => document.querySelector('#portraits-history-status')?.textContent.includes('已有另一笔同步'));
+    assert.equal((await page.evaluate(() => JSON.parse(sessionStorage.getItem('metatidy-portrait-pending-sync')))).token, model.history[0].token);
+    assert.equal(await page.locator('.portraits-reuse').first().isDisabled(), true);
+    await page.locator('#portraits-tab-work').click();
+    assert.equal(await page.locator('#portraits-artist').isDisabled(), true);
+    assert.equal(uploads(model).length, 0); assert.equal(fetches(model).length, 0);
+  }));
+
+  await check('Mismatched or late history status cannot restore a lock and state changes refresh active filters', () => withPage(async ({ page, model }) => {
+    const entered = deferred(), release = deferred();
+    const item = historyItem(1, 'uploaded'); model.history = [item];
+    const endpoint = `/api/artist-portraits/sync/${item.token}`;
+    model.handlers[endpoint] = ({ route }) => route.fulfill({ json: { ...item, token: uuid('wrong'), state: 'uncertain' } });
+    await ready(page); await openArchive(page, 'history', 1);
+    await page.locator('.portraits-history-check').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-history-status')?.textContent.includes('不一致'));
+    assert.equal(await page.locator('#portraits-sync-result').isVisible(), false);
+    model.handlers[endpoint] = async ({ route }) => { entered.resolve(); await release.promise; return route.fulfill({ json: { ...item, state: 'uncertain' } }).catch(() => {}); };
+    try {
+      await page.locator('.portraits-history-check').click(); await waitDeferred(entered, 'history status');
+      await page.locator('#portraits-tab-work').click(); release.resolve();
+      assert.equal(await page.locator('#portraits-artist').isDisabled(), false);
+      assert.equal(await page.locator('#portraits-sync-result').isVisible(), false);
+      delete model.handlers[endpoint];
+      await openArchive(page, 'history', 1);
+      await page.locator('#portraits-history-filter').selectOption('uploaded');
+      await page.waitForFunction(() => document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false');
+      item.state = 'failed';
+      await page.locator('.portraits-history-check').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-history-list')?.children.length === 0 && document.querySelector('#portraits-history-list')?.getAttribute('aria-busy') === 'false');
+      assert.equal(uploads(model).length, 0);
+    } finally { release.resolve(); }
+  }));
+
+  await check('A late history status cannot roll a completed sync back into a pending lock', () => withPage(async ({ page, model }) => {
+    const entered = deferred(), release = deferred();
+    const item = historyItem(1, 'uncertain'); model.history = [item];
+    const endpoint = `/api/artist-portraits/sync/${item.token}`;
+    await ready(page); await openArchive(page, 'history', 1);
+    await page.locator('.portraits-history-check').click();
+    await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uncertain');
+    let reads = 0;
+    model.handlers[endpoint] = async ({ route }) => {
+      if (++reads === 1) { entered.resolve(); await release.promise; return route.fulfill({ json: { ...item, state: 'uploading' } }).catch(() => {}); }
+      return route.fulfill({ json: { ...item, state: 'uploaded', message: '头像已同步' } });
+    };
+    try {
+      await page.locator('.portraits-history-check').click(); await waitDeferred(entered, 'late history pending result');
+      await page.locator('#portraits-sync-check').click();
+      await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uploaded');
+      release.resolve();
+      await page.waitForFunction(() => document.querySelector('.portraits-history-check')?.textContent === '查看状态' && !document.querySelector('.portraits-history-check')?.disabled);
+      assert.equal(await page.locator('#portraits-sync-result').getAttribute('data-state'), 'uploaded');
+      assert.equal(await page.locator('.portraits-history-row').getAttribute('data-state'), 'uploaded');
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('metatidy-portrait-pending-sync')), null);
+      assert.equal(uploads(model).length, 0);
+    } finally { release.resolve(); }
+  }));
+
+  await check('A delayed upload response cannot undo a GET-confirmed result or permit overlapping uploads', async () => {
+    for (const outcome of ['error', 'acknowledged']) await withPage(async ({ page, model }) => {
+      const entered = deferred(), release = deferred();
+      model.handlers['POST /api/artist-portraits/sync'] = async ({ route, body }) => {
+        entered.resolve(); await release.promise;
+        return outcome === 'error' ? route.abort('failed').catch(() => {}) : route.fulfill({ json: { token: body.token, state: 'uploading', message: '迟到的提交确认' } }).catch(() => {});
+      };
+      try {
+        await ready(page); await selected(page); await confirmation(page);
+        await page.getByRole('button', { name: '确认替换此歌手头像' }).click();
+        await waitDeferred(entered, 'held upload response');
+        const token = uuid('token-1');
+        model.history = [historyItem(1, 'uploaded', { token, portrait_id: uuid('周杰伦'), artist: '周杰伦', target: { id: 'nd-2', name: '周杰伦' }, message: '头像已同步' })];
+        await openArchive(page, 'history', 1);
+        await page.locator('.portraits-history-check').click();
+        await page.waitForFunction(() => document.querySelector('#portraits-sync-result')?.dataset.state === 'uploaded');
+        assert.equal(await page.evaluate(() => sessionStorage.getItem('metatidy-portrait-pending-sync')), null, 'Terminal state is not stored as a pending sync');
+        assert.equal(await page.locator('.portraits-reuse').isDisabled(), true);
+        await page.locator('#portraits-tab-work').click();
+        assert.equal(await page.locator('#portraits-artist').isDisabled(), true);
+        assert.equal(await page.locator('#portraits-sync-preview').isDisabled(), true);
+        release.resolve();
+        await page.waitForFunction(() => !document.querySelector('#portraits-artist')?.disabled);
+        assert.equal(await page.locator('#portraits-sync-result').getAttribute('data-state'), 'uploaded');
+        assert.equal(uploads(model).length, 1);
+      } finally { release.resolve(); }
+    });
+  });
+
+  await check('401 during local cache reuse cancels the detail and locks all archive controls', () => withPage(async ({ page, model }) => {
+    const item = portraitFor('会话到期'); model.portraits.set(item.id, item);
+    model.handlers[`/api/artist-portraits/${item.id}`] = ({ route }) => route.fulfill({ status: 401, json: { detail: '登录已过期' } });
+    await ready(page); await openArchive(page, 'collection', 1);
+    await page.locator('.portraits-reuse').click();
+    await page.locator('#auth-password').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('.app-content').evaluate(node => node.inert), true);
+    assert.equal(await page.locator('.portraits-reuse').isDisabled(), true);
+    assert.equal(targetReads(model).length, 0); assert.equal(fetches(model).length, 0); assert.equal(uploads(model).length, 0);
+  }));
+
+  await check('Archive layouts fit phone and desktop themes with finite motion and reduced-motion support', async () => {
+    for (const [width, height, colorScheme, reducedMotion] of [[1440, 1000, 'light', 'no-preference'], [1440, 1000, 'dark', 'reduce'], [320, 568, 'dark', 'reduce']]) {
+      await withPage(async ({ page, model }) => {
+        for (let index = 0; index < 6; index++) { const item = portraitFor(`音乐收藏 ${index}`); model.portraits.set(item.id, item); }
+        model.history = ['uploaded', 'failed', 'uncertain', 'uploading'].map((state, index) => historyItem(index, state));
+        await ready(page);
+        if (width === 1440) assert.equal(await page.locator('.portraits-pair').evaluate(node => getComputedStyle(node).gridTemplateColumns.split(' ').length), 2);
+        await openArchive(page, 'collection', 6);
+        await noOverflow(page);
+        assert.equal(await page.locator('.portraits-collection-card').first().evaluate(node => getComputedStyle(node).animationName === 'none'), reducedMotion === 'reduce');
+        assert.equal(await page.locator('#artist-portraits-root').evaluate(node => node.getAnimations({ subtree: true }).some(animation => animation.effect?.getTiming().iterations === Infinity)), false);
+        await page.locator('#artist-portraits-root').evaluate(node => Promise.all(node.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {}))));
+        await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' }));
+        await page.screenshot({ path: path.join(outputDir, `artist-portraits-collection-${width}-${colorScheme}.png`), fullPage: true });
+        await openArchive(page, 'history', 4);
+        await noOverflow(page);
+        await page.locator('#artist-portraits-root').evaluate(node => Promise.all(node.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {}))));
+        await page.screenshot({ path: path.join(outputDir, `artist-portraits-history-${width}-${colorScheme}.png`), fullPage: true });
+        await page.locator('#portraits-tab-history').focus(); await page.keyboard.press('Home');
+        assert.equal(await page.locator('#portraits-tab-work').getAttribute('aria-selected'), 'true');
+      }, { viewport: { width, height }, colorScheme, reducedMotion });
+    }
+  });
 
   await check('Entering and filtering the local singer list never fetch portraits or Navidrome data', () => withPage(async ({ page, model }) => {
     await ready(page);

@@ -103,6 +103,9 @@ export const api = {
 
   artists: (params, options = {}) => request(`${API}/artists?${qs(params)}`, options),
   artistPortraitStatus: (options = {}) => request(`${API}/artist-portraits/status`, options),
+  artistPortraitLibrary: (params, options = {}) => request(`${API}/artist-portraits/library?${qs(params)}`, options),
+  artistPortraitDetail: (id, options = {}) => request(`${API}/artist-portraits/${encodeURIComponent(id)}`, options),
+  artistPortraitHistory: (params, options = {}) => request(`${API}/artist-portraits/history?${qs(params)}`, options),
   artistPortraitFetch: (payload, options = {}) => request(`${API}/artist-portraits/fetch`, { ...options, method: "POST", body: payload, timeout: 90000 }),
   navidromeTest: (options = {}) => request(`${API}/navidrome/test`, { ...options, method: "POST", timeout: 45000 }),
   navidromeArtists: (params, options = {}) => request(`${API}/navidrome/artists?${qs(params)}`, options),

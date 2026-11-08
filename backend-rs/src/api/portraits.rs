@@ -72,6 +72,161 @@ fn provider_error(error: ProviderError, cached: bool) -> Response {
     response
 }
 
+struct ArchiveQuery {
+    pattern: String,
+    page: i64,
+    page_size: i64,
+}
+
+fn archive_query(
+    query: &RawQuery,
+    default_size: i64,
+    max_size: i64,
+) -> Result<ArchiveQuery, ApiError> {
+    let q = query.str("q", "").trim().to_owned();
+    if q.chars().count() > 200 || q.contains('\0') {
+        return Err(ApiError::bad_request("搜索词最多 200 字，不能包含空字符"));
+    }
+    let page_size = query.i64("page_size", default_size)?;
+    if !(1..=max_size).contains(&page_size) {
+        return Err(ApiError::bad_request(format!(
+            "每页记录数须为 1–{max_size}"
+        )));
+    }
+    Ok(ArchiveQuery {
+        pattern: format!(
+            "%{}%",
+            q.replace('!', "!!").replace('%', "!%").replace('_', "!_")
+        ),
+        page: query.i64("page", 1)?,
+        page_size,
+    })
+}
+
+fn history_state(query: &RawQuery) -> Result<String, ApiError> {
+    match query.str("state", "all").trim() {
+        "" | "all" => Ok(String::new()),
+        value @ ("uploading" | "uploaded" | "failed" | "uncertain") => Ok(value.to_owned()),
+        _ => Err(ApiError::bad_request(
+            "同步状态须为 all、uploading、uploaded、failed 或 uncertain",
+        )),
+    }
+}
+
+fn archive_page(total: i64, query: &ArchiveQuery) -> (i64, i64, i64) {
+    let pages = if total == 0 {
+        0
+    } else {
+        (total - 1) / query.page_size + 1
+    };
+    let page = query.page.clamp(1, pages.max(1));
+    (page, pages, (page - 1) * query.page_size)
+}
+
+/// Metadata only: opening the archive never reads artifacts or contacts either
+/// provider. A later explicit detail request verifies the selected artifact.
+pub async fn library(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let query = archive_query(&RawQuery(params), 12, 48)?;
+    let mut tx = state.db.begin().await.map_err(db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM artist_portraits WHERE artist ILIKE $1 ESCAPE '!'",
+    )
+    .bind(&query.pattern)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(db)?;
+    let (page, pages, offset) = archive_page(total, &query);
+    let rows: Vec<PortraitRow> = sqlx::query_as(
+        "SELECT id,artist,source_page,source_image,width,height,\
+                extract(epoch from created_at)::double precision \
+         FROM artist_portraits WHERE artist ILIKE $1 ESCAPE '!' \
+         ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3",
+    )
+    .bind(&query.pattern)
+    .bind(query.page_size)
+    .bind(offset)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+    tx.commit().await.map_err(db)?;
+    let items: Vec<Portrait> = rows.into_iter().map(portrait_from_row).collect();
+    Ok(Json(json!({
+        "items": items, "total": total, "page": page,
+        "page_size": query.page_size, "pages": pages,
+    })))
+}
+
+type HistoryRow = (Uuid, Uuid, String, String, String, String, String, f64, f64);
+
+/// The current destination's submitted sync records, without upstream reads or
+/// configuration/credential fields. Preview-only tokens are not history.
+pub async fn history(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult {
+    let params = RawQuery(params);
+    let query = archive_query(&params, 10, 50)?;
+    let sync_state = history_state(&params)?;
+    let destination = state.portraits.destination();
+    let filter = "FROM artist_portrait_syncs s \
+                  JOIN artist_portraits p ON p.id=s.portrait_id \
+                  WHERE s.destination=$1 AND s.submitted_at IS NOT NULL AND s.state<>'ready' \
+                  AND ($2='' OR s.state=$2) \
+                  AND (p.artist ILIKE $3 ESCAPE '!' OR s.target->>'name' ILIKE $3 ESCAPE '!')";
+    let mut tx = state.db.begin().await.map_err(db)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) {filter}"))
+        .bind(&destination)
+        .bind(&sync_state)
+        .bind(&query.pattern)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db)?;
+    let (page, pages, offset) = archive_page(total, &query);
+    let rows: Vec<HistoryRow> = sqlx::query_as(&format!(
+        "SELECT s.token,s.portrait_id,p.artist,\
+                COALESCE(s.target->>'id',''),COALESCE(s.target->>'name',''),\
+                s.state,s.message,extract(epoch from s.created_at)::double precision,\
+                extract(epoch from s.updated_at)::double precision \
+         {filter} ORDER BY s.updated_at DESC,s.token DESC LIMIT $4 OFFSET $5"
+    ))
+    .bind(&destination)
+    .bind(&sync_state)
+    .bind(&query.pattern)
+    .bind(query.page_size)
+    .bind(offset)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(db)?;
+    tx.commit().await.map_err(db)?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(token, portrait_id, artist, id, name, state, message, created_at, updated_at)| {
+                json!({
+                    "token": token, "portrait_id": portrait_id, "artist": artist,
+                    "target": {"id": id, "name": name}, "state": state,
+                    "message": message, "created_at": created_at, "updated_at": updated_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({
+        "items": items, "total": total, "page": page,
+        "page_size": query.page_size, "pages": pages,
+    })))
+}
+
 pub async fn artists(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -137,9 +292,13 @@ type PortraitRow = (Uuid, String, String, String, i32, i32, f64);
 async fn portrait(state: &AppState, id: Uuid) -> Result<Portrait, ApiError> {
     let row: Option<PortraitRow> = sqlx::query_as("SELECT id,artist,source_page,source_image,width,height,extract(epoch from created_at)::double precision FROM artist_portraits WHERE id=$1")
         .bind(id).fetch_optional(&state.db).await.map_err(db)?;
-    let (id, artist, source_page, source_image, width, height, created_at) =
-        row.ok_or_else(|| ApiError::not_found("头像缓存记录不存在，请重新获取"))?;
-    Ok(Portrait {
+    row.map(portrait_from_row)
+        .ok_or_else(|| ApiError::not_found("头像缓存记录不存在，请重新获取"))
+}
+
+fn portrait_from_row(row: PortraitRow) -> Portrait {
+    let (id, artist, source_page, source_image, width, height, created_at) = row;
+    Portrait {
         id,
         artist,
         source_page,
@@ -150,7 +309,7 @@ async fn portrait(state: &AppState, id: Uuid) -> Result<Portrait, ApiError> {
         preview_url: format!("/api/artist-portraits/{id}/preview"),
         preview_format: "avif".into(),
         upload_format: "jpeg".into(),
-    })
+    }
 }
 
 async fn read_bytes(state: &AppState, id: Uuid, preview: bool) -> Result<Vec<u8>, ApiError> {
@@ -173,6 +332,16 @@ async fn read_bytes(state: &AppState, id: Uuid, preview: bool) -> Result<Vec<u8>
     .await
     .map_err(|_| ApiError::bad_request("头像缓存读取未完成"))?
     .map_err(bad)
+}
+
+/// Reuse verified local bytes without a fetch; expired source lookup caches do
+/// not invalidate immutable portraits the user has already obtained.
+pub async fn detail(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let id = uuid(&id)?;
+    let portrait = portrait(&state, id).await?;
+    read_bytes(&state, id, false).await?;
+    read_bytes(&state, id, true).await?;
+    Ok(Json(json!({"portrait": portrait})))
 }
 
 async fn cached_fetch(state: &AppState, key: &str) -> Result<Option<Response>, ApiError> {
@@ -445,7 +614,7 @@ pub async fn sync(State(state): State<AppState>, body: Bytes) -> ApiResult {
     // Serialize claims for the same destination+artist, even with two distinct
     // preview tokens. Never blindly retry an uncertain remote write.
     lock_target(&mut tx, &destination, &target.id).await?;
-    let claimed:Option<Uuid>=sqlx::query_scalar("UPDATE artist_portrait_syncs SET state='uploading',message='正在核对目标并上传',updated_at=now() WHERE token=$1 AND state='ready' AND expires_at>now() RETURNING portrait_id")
+    let claimed:Option<Uuid>=sqlx::query_scalar("UPDATE artist_portrait_syncs SET state='uploading',submitted_at=now(),message='正在核对目标并上传',updated_at=now() WHERE token=$1 AND state='ready' AND expires_at>now() RETURNING portrait_id")
         .bind(token).fetch_optional(&mut *tx).await.map_err(db)?;
     let portrait_id = claimed.ok_or_else(|| ApiError::conflict("同步已提交或过期，请查看结果"))?;
     // An old second token must not become an implicit retry of an uncertain
@@ -512,6 +681,64 @@ async fn run_sync(state: AppState, token: Uuid, id: Uuid, target: Artist) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query(values: &[(&str, &str)]) -> RawQuery {
+        RawQuery(
+            values
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn archive_search_preserves_literal_symbols_and_unicode_limits() {
+        let parsed = archive_query(&query(&[("q", "  100%_!中文\\  ")]), 12, 48).unwrap();
+        assert_eq!(parsed.pattern, "%100!%!_!!中文\\%");
+        assert_eq!((parsed.page, parsed.page_size), (1, 12));
+        assert!(archive_query(&query(&[("q", &"字".repeat(200))]), 12, 48).is_ok());
+        assert!(archive_query(&query(&[("q", &"字".repeat(201))]), 12, 48).is_err());
+        assert!(archive_query(&query(&[("q", "a\0b")]), 12, 48).is_err());
+        for invalid in ["0", "49", "-1", "1.5", "bad"] {
+            assert!(archive_query(&query(&[("page_size", invalid)]), 12, 48).is_err());
+        }
+        assert!(archive_query(&query(&[("page_size", "48")]), 12, 48).is_ok());
+        assert!(archive_query(&query(&[("page_size", "50")]), 10, 50).is_ok());
+        assert!(archive_query(&query(&[("page_size", "51")]), 10, 50).is_err());
+        assert!(archive_query(&query(&[("page", "NaN")]), 12, 48).is_err());
+    }
+
+    #[test]
+    fn archive_pagination_handles_empty_out_of_range_and_large_totals() {
+        let mut parsed = archive_query(&query(&[]), 12, 48).unwrap();
+        assert_eq!(archive_page(0, &parsed), (1, 0, 0));
+        parsed.page = -1;
+        assert_eq!(archive_page(25, &parsed), (1, 3, 0));
+        parsed.page = i64::MAX;
+        assert_eq!(archive_page(25, &parsed), (3, 3, 24));
+        let (page, pages, offset) = archive_page(i64::MAX, &parsed);
+        assert_eq!(page, pages);
+        assert!(offset <= i64::MAX - 1);
+        assert_eq!(offset, i64::MAX - (i64::MAX % parsed.page_size));
+    }
+
+    #[test]
+    fn sync_history_filter_excludes_preview_and_unknown_states() {
+        for accepted in ["uploading", "uploaded", "failed", "uncertain"] {
+            assert_eq!(
+                history_state(&query(&[("state", accepted)])).unwrap(),
+                accepted
+            );
+        }
+        for all in ["", "all", " all "] {
+            assert_eq!(history_state(&query(&[("state", all)])).unwrap(), "");
+        }
+        assert_eq!(history_state(&query(&[])).unwrap(), "");
+        for rejected in ["ready", "pending", "UPLOADED", "uploaded OR true"] {
+            assert!(history_state(&query(&[("state", rejected)])).is_err());
+        }
+    }
+
     #[test]
     fn target_identity_and_artwork_changes_invalidate_preview() {
         let artist: Artist =

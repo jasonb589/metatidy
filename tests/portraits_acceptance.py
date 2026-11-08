@@ -44,6 +44,56 @@ def _cache_key(artist: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _check_portrait_upgrade(repo: Path, check) -> None:
+    """Run actual upgrade SQL against legacy rows inside a rolled-back schema."""
+    schema = "portrait_upgrade_" + uuid.uuid4().hex
+    portrait_id = str(uuid.uuid4())
+    old_sql = (repo / "backend-rs/migrations/0006_artist_portraits.sql").read_text(encoding="utf-8")
+    upgrade_sql = (repo / "backend-rs/migrations/0007_artist_portrait_library_history_indexes.sql").read_text(encoding="utf-8")
+    legacy = [
+        {"message": "uploading", "state": "uploading", "result": None},
+        {"message": "uploaded", "state": "uploaded", "result": None},
+        {"message": "uncertain", "state": "uncertain", "result": None},
+        {"message": "failed-submitted", "state": "failed", "result": {"uploaded": False}},
+        {"message": "failed-preview", "state": "failed", "result": None},
+        {"message": "ready-preview", "state": "ready", "result": None},
+    ]
+    for item in legacy:
+        item["token"] = str(uuid.uuid4())
+    document = _literal(json.dumps(legacy))
+    output = _postgres(f"""BEGIN;
+        CREATE SCHEMA "{schema}";
+        SET LOCAL search_path TO "{schema}";
+        {old_sql}
+        INSERT INTO artist_portraits(id,artist,source_page,source_image,jpeg_digest,preview_digest,width,height)
+            VALUES('{portrait_id}'::uuid,'Upgrade fixture','fixture-page','fixture-image','jpeg','avif',1,1);
+        INSERT INTO artist_portrait_syncs(token,portrait_id,target,destination,state,message,result,created_at,updated_at,expires_at)
+            SELECT token,'{portrait_id}'::uuid,'{{"id":"upgrade-artist","name":"Upgrade fixture"}}'::jsonb,
+                'upgrade-fixture',state,message,result,'2025-01-02T03:04:05Z'::timestamptz,
+                '2025-01-03T03:04:05Z'::timestamptz,'2025-01-04T03:04:05Z'::timestamptz
+            FROM jsonb_to_recordset({document}::jsonb) AS item(token uuid,state text,message text,result jsonb);
+        {upgrade_sql}
+        SELECT jsonb_build_object(
+            'submitted', (SELECT jsonb_object_agg(message,submitted_at IS NOT NULL) FROM artist_portrait_syncs),
+            'timestamps_match', (SELECT bool_and(submitted_at IS NULL OR submitted_at=created_at) FROM artist_portrait_syncs),
+            'indexes', (SELECT jsonb_object_agg(indexname,indexdef) FROM pg_indexes
+                WHERE schemaname={_literal(schema)} AND indexname IN
+                ('idx_artist_portraits_created','idx_artist_portrait_syncs_history','idx_artist_portrait_syncs_portrait')));
+        ROLLBACK;
+        SELECT jsonb_build_object('schema_removed',NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname={_literal(schema)}));""")
+    upgraded, cleanup = [json.loads(line) for line in output.splitlines() if line.strip()]
+    indexes = upgraded["indexes"]
+    check("真实旧版头像迁移仅回填已提交记录并创建索引，独立 schema 完整回滚",
+          upgraded["submitted"] == {"uploading": True, "uploaded": True, "uncertain": True, "failed-submitted": True,
+                                    "failed-preview": False, "ready-preview": False}
+          and upgraded["timestamps_match"] is True
+          and "(created_at DESC, id DESC)" in indexes.get("idx_artist_portraits_created", "")
+          and "(destination, updated_at DESC, token DESC)" in indexes.get("idx_artist_portrait_syncs_history", "")
+          and "submitted_at IS NOT NULL" in indexes.get("idx_artist_portrait_syncs_history", "")
+          and "(portrait_id)" in indexes.get("idx_artist_portrait_syncs_portrait", "")
+          and cleanup["schema_removed"] is True)
+
+
 class _Navidrome:
     """A real listening server, including a base path and duplicate names."""
 
@@ -281,8 +331,10 @@ def check_portraits(
     """
     if env.get("DATABASE_URL") != os.environ.get("DATABASE_URL") or not os.environ.get("DATABASE_URL"):
         raise RuntimeError("Portrait fixtures require the caller and psql to use the same DATABASE_URL")
+    _check_portrait_upgrade(repo, check)
     nonce = uuid.uuid4().hex
     portrait_id, damaged_id = str(uuid.uuid4()), str(uuid.uuid4())
+    portrait_ids = [portrait_id, damaged_id, *(str(uuid.uuid4()) for _ in range(13))]
     artist = f"PortraitFixture-{nonce}"
     missing_artist = f"PortraitMissing-{nonce}"
     positive_key, negative_key = _cache_key(artist), _cache_key(missing_artist)
@@ -320,7 +372,7 @@ def check_portraits(
     server = None
     logfile = (work / f"portraits-{nonce}.log").open("wb")
     public_results: list[str] = []
-    ids_sql = ",".join(f"'{identifier}'::uuid" for identifier in (portrait_id, damaged_id))
+    ids_sql = ",".join(f"'{identifier}'::uuid" for identifier in portrait_ids)
     keys_sql = ",".join(_literal(key) for key in (positive_key, negative_key))
 
     def launch():
@@ -357,6 +409,11 @@ def check_portraits(
     def preview(identifier=portrait_id, target="artist-b"):
         response = request("POST", "/api/artist-portraits/sync-preview",
                            json={"portrait_id": identifier, "artist_id": target})
+        response.raise_for_status()
+        return response.json()
+
+    def archive(route, **params):
+        response = request("GET", f"/api/artist-portraits/{route}", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -409,15 +466,22 @@ def check_portraits(
 
         # Fixture metadata exercises the additional Last.fm image CDN; no CDN request is made.
         source_image = "https://lastfm-img.freetls.fastly.net/i/u/300x300/11111111111111111111111111111111.jpg"
-        rows = [{"id": identifier, "artist": artist, "source_page": "https://www.last.fm/music/Fixture",
+        anchor = int(time.time()) - 30 * 86400
+        literal_artist = f"{artist} Literal 100%_Mix!'"
+        rows = [{"id": identifier, "artist": artist if index < 2 else f"{artist} Gallery{index:02}",
+                 "source_page": "https://www.last.fm/music/Fixture",
                  "source_image": source_image,
                  "jpeg_digest": hashlib.sha256(jpeg).hexdigest(), "preview_digest": hashlib.sha256(avif).hexdigest(),
-                 "width": 32, "height": 24} for identifier in (portrait_id, damaged_id)]
+                 "width": 32, "height": 24, "created_at": anchor + index}
+                for index, identifier in enumerate(portrait_ids)]
+        rows[3]["artist"] = literal_artist
+        rows[4]["artist"] = literal_artist.replace("%", "X").replace("_", "Y")
+        rows[-1]["created_at"] = rows[-2]["created_at"]  # Tie ordering must use the UUID.
         document = _literal(json.dumps(rows, ensure_ascii=False))
-        _postgres(f"""INSERT INTO artist_portraits(id,artist,source_page,source_image,jpeg_digest,preview_digest,width,height)
-            SELECT id,artist,source_page,source_image,jpeg_digest,preview_digest,width,height
+        _postgres(f"""INSERT INTO artist_portraits(id,artist,source_page,source_image,jpeg_digest,preview_digest,width,height,created_at)
+            SELECT id,artist,source_page,source_image,jpeg_digest,preview_digest,width,height,to_timestamp(created_at)
             FROM jsonb_to_recordset({document}::jsonb) AS item(id uuid,artist text,source_page text,source_image text,
-                jpeg_digest text,preview_digest text,width integer,height integer);
+                jpeg_digest text,preview_digest text,width integer,height integer,created_at double precision);
             INSERT INTO artist_portrait_fetches(cache_key,portrait_id,expires_at)
                 VALUES({_literal(positive_key)},'{portrait_id}'::uuid,now()+interval '1 day');
             INSERT INTO artist_portrait_fetches(cache_key,failure,expires_at)
@@ -449,6 +513,46 @@ def check_portraits(
               and decoded.format == "AVIF" and decoded.size == (32, 24)
               and "no-store" in image.headers.get("cache-control", ""))
 
+        gallery_pages = [archive("library", q=artist, page=page, page_size=4) for page in range(1, 5)]
+        gallery_items = [item for page in gallery_pages for item in page["items"]]
+        expected_gallery = sorted(rows, key=lambda row: (row["created_at"], row["id"]), reverse=True)
+        gallery_default = archive("library", q=artist)
+        check("本地头像库按获取时间和 UUID 稳定分页，缺失图片文件不妨碍浏览元数据",
+              [item["id"] for item in gallery_items] == [row["id"] for row in expected_gallery]
+              and all(page["total"] == 15 and page["pages"] == 4 for page in gallery_pages)
+              and gallery_default["page_size"] == 12 and len(gallery_default["items"]) == 12
+              and all(isinstance(item["created_at"], (int, float)) and item["preview_format"] == "avif"
+                      and item["preview_url"] == f"/api/artist-portraits/{item['id']}/preview" for item in gallery_items)
+              and upstream.login_count == upstream.read_count == upstream.external_attempts == 0)
+        first_gallery = archive("library", q=artist, page=-9, page_size=4)
+        last_gallery = archive("library", q=artist, page=9223372036854775807, page_size=4)
+        empty_gallery = archive("library", q=f"{artist}-absent", page=99)
+        literal_gallery = archive("library", q=literal_artist.lower())
+        gallery_bad = [request("GET", "/api/artist-portraits/library", params=params).status_code
+                       for params in ({"page_size": 0}, {"page_size": 49}, {"q": "字" * 201})]
+        check("头像库支持字面搜索、页码边界和明确参数错误",
+              first_gallery["page"] == 1 and last_gallery["page"] == 4 and len(last_gallery["items"]) == 3
+              and empty_gallery["page"] == 1 and empty_gallery["pages"] == empty_gallery["total"] == 0
+              and literal_gallery["total"] == 1 and literal_gallery["items"][0]["id"] == rows[3]["id"]
+              and archive("library", q=literal_artist.replace("%", "X"))["total"] == 0
+              and gallery_bad == [400, 400, 400])
+        _postgres(f"UPDATE artist_portrait_fetches SET expires_at=now()-interval '1 second' WHERE cache_key={_literal(positive_key)};")
+        reused = archive(portrait_id)
+        check("选择旧头像重新校验本地图片，来源查询缓存过期也无需重新获取或连接目标",
+              reused["portrait"]["id"] == portrait_id and reused["portrait"]["source_image"] == source_image
+              and reused["portrait"]["created_at"] == anchor
+              and upstream.login_count == upstream.read_count == upstream.count() == upstream.external_attempts == 0)
+        detail_codes = [request("GET", f"/api/artist-portraits/{uuid.uuid4()}").status_code,
+                        request("GET", f"/api/artist-portraits/{rows[2]['id']}").status_code]
+        for suffix, original in (("jpg", jpeg), ("avif", avif)):
+            artifact = artifact_dir / f"{damaged_id}.{suffix}"
+            artifact.write_bytes(original + b"detail-tampered")
+            detail_codes.append(request("GET", f"/api/artist-portraits/{damaged_id}").status_code)
+            artifact.write_bytes(original)
+        check("头像详情拒绝不存在、文件丢失以及任一格式内容被篡改",
+              detail_codes == [404, 400, 400, 400] and upstream.external_attempts == upstream.count() == 0,
+              str(detail_codes))
+
         connection = request("POST", "/api/navidrome/test", json={})
         listing = request("GET", "/api/navidrome/artists", params={"q": "同名", "page": 2, "page_size": 1})
         targets = listing.json()
@@ -458,10 +562,11 @@ def check_portraits(
               and targets["items"][0]["mbid"].endswith("000000000002") and upstream.login_count == 1
               and upstream.queries[-1].get("_start") == ["1"] and upstream.queries[-1].get("_end") == ["2"])
         prepared = preview()
+        preview_history = archive("history", q=artist)
         check("同步预览只读取所选目标，不按同名自动覆盖",
               prepared["target"]["id"] == "artist-b" and prepared["portrait"]["id"] == portrait_id
               and prepared["portrait"]["source_image"] == source_image
-              and prepared["sync_state"] == "ready" and upstream.count() == 0)
+              and prepared["sync_state"] == "ready" and upstream.count() == 0 and preview_history["total"] == 0)
         current = request("GET", prepared["target_image_url"])
         current_image = Image.open(io.BytesIO(current.content))
         current_image.load()
@@ -509,6 +614,13 @@ def check_portraits(
               entered and first_response.status_code == 200 and other_response.status_code == 409
               and during_upload.status_code == 409 and "token" not in during_upload.json()
               and distinct_result["state"] == "uploaded" and upstream.count() == before + 1)
+        submitted_history = archive("history", q=artist, page_size=50)
+        superseded = request("GET", f"/api/artist-portraits/sync/{second['token']}").json()
+        check("同步历史记录真实提交结果，被替代的未提交预览即使失败也不出现",
+              superseded["state"] == "failed" and superseded["result"] is None
+              and first["token"] in {row["token"] for row in submitted_history["items"]}
+              and second["token"] not in {row["token"] for row in submitted_history["items"]}
+              and all(row["state"] == "uploaded" for row in submitted_history["items"]))
 
         prepared = preview(target="artist-a")
         before = upstream.count()
@@ -550,8 +662,70 @@ def check_portraits(
         check("非法目标 ID 不能改变上游请求路径",
               bad_target.status_code == 400 and upstream.count() == before and not upstream.errors)
 
+        # Synthetic records isolate filtering/order from real uploads above. Their
+        # metadata-only portrait has no files, so history must not decode images.
+        history_prefix = f"HistoryFixture-{nonce}"
+        history_artist = rows[2]["artist"]
+        destination = _postgres(f"SELECT destination FROM artist_portrait_syncs WHERE token='{first['token']}'::uuid;")
+        literal_target = f"{history_prefix} Literal 100%_Mix!'"
+        history_rows = [{"token": str(uuid.uuid4()), "portrait_id": rows[2]["id"],
+                         "target": {"id": f"history-{index}", "name": f"{history_prefix} Target{index:02}",
+                                    "uploaded_image": "fixture-private-filename.jpg", "mbid": "fixture-private-mbid"},
+                         "destination": destination, "state": ("uploading", "uploaded", "failed", "uncertain")[index % 4],
+                         "message": f"History fixture {index}", "submitted_at": anchor + index,
+                         "created_at": anchor + index, "updated_at": anchor + 100 + (index * 7) % 13}
+                        for index in range(13)]
+        history_rows[3]["target"]["name"] = literal_target
+        history_rows[4]["target"]["name"] = literal_target.replace("%", "X").replace("_", "Y")
+        history_rows[-1]["updated_at"] = history_rows[-2]["updated_at"]
+        omitted = []
+        for state, submitted_at, scope in (("ready", None, destination), ("failed", None, destination),
+                                           ("uploaded", anchor, f"other-destination-{nonce}")):
+            omitted.append({**history_rows[0], "token": str(uuid.uuid4()), "state": state,
+                            "submitted_at": submitted_at, "destination": scope})
+        document = _literal(json.dumps(history_rows + omitted, ensure_ascii=False))
+        _postgres(f"""INSERT INTO artist_portrait_syncs(token,portrait_id,target,destination,state,message,submitted_at,created_at,updated_at,expires_at)
+            SELECT token,portrait_id,target,destination,state,message,to_timestamp(submitted_at),to_timestamp(created_at),to_timestamp(updated_at),now()+interval '1 day'
+            FROM jsonb_to_recordset({document}::jsonb) AS item(token uuid,portrait_id uuid,target jsonb,destination text,state text,
+                message text,submitted_at double precision,created_at double precision,updated_at double precision);""")
+        before_reads, before_uploads = upstream.read_count, upstream.count()
+        history_pages = [archive("history", q=history_prefix, page=page, page_size=4) for page in range(1, 5)]
+        history_items = [item for page in history_pages for item in page["items"]]
+        expected_history = sorted(history_rows, key=lambda row: (row["updated_at"], row["token"]), reverse=True)
+        history_default = archive("history", q=history_prefix)
+        fields = {"token", "portrait_id", "artist", "target", "state", "message", "created_at", "updated_at"}
+        check("同步历史按更新时间和令牌稳定分页，只呈现当前目标已提交记录的公开摘要",
+              [item["token"] for item in history_items] == [row["token"] for row in expected_history]
+              and all(page["total"] == 13 and page["pages"] == 4 for page in history_pages)
+              and history_default["page_size"] == 10 and len(history_default["items"]) == 10
+              and all(set(item) == fields and set(item["target"]) == {"id", "name"}
+                      and item["artist"] == history_artist
+                      and isinstance(item["created_at"], (int, float)) and isinstance(item["updated_at"], (int, float))
+                      for item in history_items)
+              and upstream.read_count == before_reads and upstream.count() == before_uploads and upstream.external_attempts == 0)
+        filter_checks = []
+        for state in ("uploading", "uploaded", "failed", "uncertain", "all", ""):
+            filtered = archive("history", q=history_artist, state=state, page_size=50)
+            expected_tokens = {row["token"] for row in history_rows if state in ("all", "") or row["state"] == state}
+            filter_checks.append({item["token"] for item in filtered["items"]} == expected_tokens
+                                 and filtered["total"] == len(expected_tokens))
+        literal_history = archive("history", q=literal_target.lower())
+        check("同步历史按来源歌手、目标字面名称和实际状态筛选",
+              all(filter_checks) and literal_history["total"] == 1
+              and literal_history["items"][0]["token"] == history_rows[3]["token"]
+              and archive("history", q=literal_target.replace("%", "X"))["total"] == 0)
+        first_history = archive("history", q=history_prefix, page=-5, page_size=4)
+        last_history = archive("history", q=history_prefix, page=9223372036854775807, page_size=4)
+        empty_history = archive("history", q=f"{history_prefix}-absent", page=99)
+        history_bad = [request("GET", "/api/artist-portraits/history", params=params).status_code
+                       for params in ({"page_size": 0}, {"page_size": 51}, {"q": "字" * 201}, {"state": "ready"}, {"state": "bogus"})]
+        check("同步历史边界页安全且不接受未提交状态或越界参数",
+              first_history["page"] == 1 and last_history["page"] == 4 and len(last_history["items"]) == 1
+              and empty_history["page"] == 1 and empty_history["pages"] == empty_history["total"] == 0
+              and history_bad == [400] * 5)
+
         interrupted = preview(target="artist-a")
-        _postgres(f"UPDATE artist_portrait_syncs SET state='uploading' WHERE token='{interrupted['token']}'::uuid;")
+        _postgres(f"UPDATE artist_portrait_syncs SET state='uploading',submitted_at=now() WHERE token='{interrupted['token']}'::uuid;")
         before = upstream.count()
         stop(server)
         server = None
@@ -560,10 +734,11 @@ def check_portraits(
         anon_codes = [request("GET", route).status_code for route in (
             "/api/artist-portraits/status", f"/api/artist-portraits/{portrait_id}/preview",
             f"/api/artist-portraits/sync/{interrupted['token']}/target-image", "/api/navidrome/artists",
-            "/api/artists", f"/api/artist-portraits/sync/{interrupted['token']}")]
+            "/api/artists", f"/api/artist-portraits/sync/{interrupted['token']}",
+            "/api/artist-portraits/library", f"/api/artist-portraits/{portrait_id}", "/api/artist-portraits/history")]
         anon_codes.extend(request("POST", route, json={}).status_code for route in (
             "/api/artist-portraits/fetch", "/api/artist-portraits/sync-preview", "/api/artist-portraits/sync", "/api/navidrome/test"))
-        check("设置口令后头像读取、预览和同步全受认证保护", anon_codes == [401] * 10, str(anon_codes))
+        check("设置口令后头像读取、预览、收藏、历史和同步全受认证保护", anon_codes == [401] * 13, str(anon_codes))
         request("POST", "/api/login", json={"password": private_password}).raise_for_status()
         recovered = request("GET", f"/api/artist-portraits/sync/{interrupted['token']}").json()
         replay = submit(interrupted["token"])

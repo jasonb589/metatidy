@@ -30,12 +30,19 @@ let syncTimer = 0;
 let syncPolls = 0;
 let targetFollowsSource = true;
 let pendingTargetQuery = null;
+let currentView = "work";
+let detailLoading = false;
+let historyChecking = "";
 const library = { q: "", page: 1, pages: 1, total: 0, loading: false, loaded: false, items: [] };
 const remote = { q: "", page: 1, pages: 1, total: 0, loading: false, items: [], searched: false, attempted: false };
+const collection = { q: "", page: 1, pages: 1, total: 0, loading: false, loaded: false, dirty: true, items: [] };
+const history = { q: "", state: "", page: 1, pages: 1, total: 0, loading: false, loaded: false, dirty: true, items: [] };
+const STATE_LABELS = { uploaded: "已同步", failed: "同步失败", uncertain: "待核对", uploading: "进行中" };
 
 const text = (value) => typeof value === "string" ? value : "";
 const count = (value) => Math.max(0, Math.trunc(Number(value) || 0));
 const pendingSync = () => Boolean(sync && !["uploaded", "failed"].includes(sync.state));
+const writeLocked = () => pendingSync() || uploadInFlight;
 const button = (id, label, action, cls = "") => ui.el("button", { id, type: "button", class: `btn ${cls}`.trim(), text: label, onClick: action });
 const message = (node, value, tone = "") => { node.textContent = value; node.dataset.tone = tone; };
 const field = (title, input) => ui.el("label", { class: "field" }, [ui.el("span", { class: "lbl", text: title }), input]);
@@ -97,7 +104,7 @@ function invalidateTarget({ clearResults = false } = {}) {
 }
 
 function followSource({ search = false, force = false } = {}) {
-  if (pendingSync()) return;
+  if (writeLocked()) return;
   if (force) targetFollowsSource = true;
   if (targetFollowsSource) {
     nodes.targetQ.value = nodes.artist.value.trim();
@@ -113,15 +120,15 @@ function followSource({ search = false, force = false } = {}) {
 
 function queueTargetSearch() {
   const q = nodes.targetQ.value.trim();
-  if (!targetFollowsSource || pendingSync() || !q || (remote.attempted && remote.q === q)) return;
+  if (!targetFollowsSource || writeLocked() || !q || (remote.attempted && remote.q === q)) return;
   pendingTargetQuery = q;
   flushTargetSearch();
 }
 
 function flushTargetSearch() {
-  if (!active || pendingTargetQuery === null || !statusKnown) return;
+  if (!active || currentView !== "work" || pendingTargetQuery === null || !statusKnown) return;
   const q = pendingTargetQuery;
-  if (pendingSync() || !targetFollowsSource || q !== nodes.targetQ.value.trim() || !status?.navidrome?.configured) {
+  if (writeLocked() || !targetFollowsSource || q !== nodes.targetQ.value.trim() || !status?.navidrome?.configured) {
     pendingTargetQuery = null;
     return;
   }
@@ -158,6 +165,7 @@ export function init() {
   const limitStatus = ui.el("p", { id: "portraits-limit-status" });
   const statusRefresh = button("portraits-status-refresh", "更新服务状态", () => void refreshStatus(), "btn-sm btn-ghost");
   const preview = ui.el("div", { id: "portraits-preview", class: "portraits-preview", hidden: true });
+  const sourceEmpty = ui.el("div", { id: "portraits-source-empty", class: "portraits-source-empty" }, [ui.icon("artist", { size: 48 }), ui.el("strong", { text: "从一位歌手开始" }), ui.el("p", { text: "选择曲库歌手或输入姓名，手动获取头像后核对人物。" }), button("portraits-open-collection", "使用已获取的头像", () => void changeView("collection"), "btn-sm btn-ghost")]);
   const connection = ui.el("p", { id: "portraits-connection", class: "portraits-status", role: "status", text: "正在读取 Navidrome 配置状态…" });
   const test = button("portraits-test", "测试连接", () => void testConnection(), "btn-sm");
   const targetQ = ui.el("input", { id: "portraits-target-q", type: "search", autocomplete: "off", placeholder: "跟随所选歌手，也可修改名称" });
@@ -176,28 +184,48 @@ export function init() {
   const syncCheck = button("portraits-sync-check", "查询同步结果", () => { syncPolls = 0; void checkSync(); }, "btn-sm");
   const syncAcknowledge = button("portraits-sync-acknowledge", "已在 Navidrome 核对，结束本次", () => void acknowledgeSync(), "btn-sm btn-ghost");
   syncResult.append(syncMessage, syncCheck, syncAcknowledge);
-  nodes = { host, libraryQ, librarySearch, libraryStatus, libraryList, libraryPager, libraryPrev, libraryPage, libraryNext, artist, imageUrl, fetchButton, fetchStatus, limitStatus, statusRefresh, preview, connection, test, targetQ, targetSearch, targetStatus, targetList, targetPager, targetPrev, targetPage, targetNext, selection, preflight, syncResult, syncMessage, syncCheck, syncAcknowledge };
-  host.append(
-    ui.el("div", { class: "portraits-intro" }, [ui.icon("artist", { size: 34 }), ui.el("div", {}, [ui.el("h2", { text: "从一张肖像，认识熟悉的声音。" }), ui.el("p", { text: "逐位获取 Last.fm 图片，核对来源与歌手，再同步到 Navidrome。浏览列表只读取本地索引。" })])]),
+  const summary = ui.el("span", { id: "portraits-workflow-status", class: "portraits-service-chip", role: "status", text: "请选择歌手" });
+  const service = ui.el("span", { id: "portraits-service-status", class: "portraits-service-chip", text: "正在读取服务状态" });
+  const viewTabs = ui.el("div", { class: "portraits-view-tabs", role: "tablist", "aria-label": "头像工作区" });
+  const sourceCard = card("来源头像", "01", [
+    field("歌手名（Last.fm 查询）", artist),
+    ui.el("details", { class: "portraits-manual" }, [ui.el("summary", { text: "手动使用 Last.fm 图片链接" }), field("Last.fm CDN 图片 URL（可选）", imageUrl), ui.el("p", { class: "hint", text: "粘贴 Last.fm 原图链接后点击获取，仍遵守服务冷却限制。" })]),
+    ui.el("div", { class: "portraits-form" }, [fetchButton]), fetchStatus, preview, sourceEmpty,
+    ui.el("div", { class: "portraits-policy" }, [limitStatus, ui.el("details", {}, [ui.el("summary", { text: "获取频率与缓存" }), ui.el("p", { text: "请求至少间隔 5 秒；成功缓存 7 天，未找到结果缓存 24 小时。遇到 403 / 429 时暂停访问。只有点击获取才会访问 Last.fm。" })])]),
+  ]);
+  sourceCard.classList.add("portraits-source-card");
+  const targetCard = card("Navidrome 目标", "02", [
+    ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void searchRemote(1); } }, [field("查找目标歌手", targetQ), targetSearch]),
+    targetStatus, targetList, targetPager,
+    ui.el("div", { class: "portraits-connection-block" }, [connection, test, ui.el("details", { id: "portraits-config", class: "portraits-config" }, [ui.el("summary", { text: "配置说明" }), ui.el("p", { text: "需要 Navidrome 0.61.0 或更新版本，以及有头像上传权限的账户；Navidrome 的 EnableArtworkUpload=false 时需管理员。在服务端设置以下环境变量并重启 metatidy：" }), ...["METATIDY_NAVIDROME_URL", "METATIDY_NAVIDROME_USERNAME", "METATIDY_NAVIDROME_PASSWORD"].map(value => ui.el("code", { text: value }))])]),
+  ]);
+  targetCard.classList.add("portraits-target-card");
+  const workView = ui.el("div", { id: "portraits-view-work", class: "portraits-view", role: "tabpanel", "aria-labelledby": "portraits-tab-work" }, [
     ui.el("div", { class: "portraits-layout" }, [
-      card("曲库歌手", "", [ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void loadLibrary(1); } }, [field("筛选本地歌手", libraryQ), librarySearch]), libraryStatus, libraryList, libraryPager, ui.el("p", { class: "hint", text: "选中后自动填入歌手名并查找 Navidrome 候选；Last.fm 头像仍需点击获取。" })]),
-      ui.el("div", { class: "portraits-editor" }, [
-        card("获取与核对来源", "1", [
-          field("歌手名（Last.fm 查询）", artist),
-          ui.el("details", { class: "portraits-manual" }, [ui.el("summary", { text: "手动使用 Last.fm 图片链接" }), field("Last.fm CDN 图片 URL（可选）", imageUrl), ui.el("p", { class: "hint", text: "自动查找没有合适结果时，可粘贴 Last.fm 的原图链接后点击获取。仍遵守服务冷却限制，不会绕过访问限制。" })]),
-          ui.el("div", { class: "portraits-form" }, [fetchButton]), fetchStatus,
-          ui.el("div", { class: "portraits-policy" }, [ui.el("p", { text: "仅在点击获取时请求。请求至少间隔 5 秒；成功缓存 7 天，未找到结果缓存 24 小时。遇到 403 / 429 时暂停访问。" }), limitStatus, statusRefresh]), preview,
-        ]),
-        card("选择 Navidrome 目标", "2", [
-          connection, ui.el("div", { class: "portraits-form" }, [test]),
-          ui.el("details", { id: "portraits-config", class: "portraits-config" }, [ui.el("summary", { text: "配置说明" }), ui.el("p", { text: "需要 Navidrome 0.61.0 或更新版本，以及有头像上传权限的账户；Navidrome 的 EnableArtworkUpload=false 时需管理员。在服务端设置以下环境变量并重启 metatidy：" }), ...["METATIDY_NAVIDROME_URL", "METATIDY_NAVIDROME_USERNAME", "METATIDY_NAVIDROME_PASSWORD"].map(value => ui.el("code", { text: value }))]),
-          ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void searchRemote(1); } }, [field("查找目标歌手", targetQ), targetSearch]),
-          targetStatus, targetList, targetPager,
-          ui.el("div", { class: "portraits-sync-action" }, [selection, preflight]), syncResult,
-        ]),
-      ]),
+      card("曲库歌手", "", [ui.el("form", { class: "portraits-form", onSubmit: (event) => { event.preventDefault(); void loadLibrary(1); } }, [field("筛选本地歌手", libraryQ), librarySearch]), libraryStatus, libraryList, libraryPager, ui.el("p", { class: "hint", text: "选择后自动查找目标候选，头像仍需手动获取。" })]),
+      ui.el("div", { class: "portraits-editor" }, [ui.el("div", { class: "portraits-pair" }, [sourceCard, targetCard]), ui.el("div", { class: "portraits-sync-action" }, [ui.el("div", {}, [ui.el("span", { class: "portraits-step-caption", text: "03 · 核对后同步" }), selection]), preflight])]),
     ]),
-  );
+  ]);
+  nodes = { host, libraryQ, librarySearch, libraryStatus, libraryList, libraryPager, libraryPrev, libraryPage, libraryNext, artist, imageUrl, fetchButton, fetchStatus, limitStatus, statusRefresh, preview, sourceEmpty, connection, test, targetQ, targetSearch, targetStatus, targetList, targetPager, targetPrev, targetPage, targetNext, selection, preflight, syncResult, syncMessage, syncCheck, syncAcknowledge, summary, service, viewTabs, workView, views: { work: workView }, tabs: {} };
+  for (const [name, label] of [["work", "获取与同步"], ["collection", "已获取头像"], ["history", "同步记录"]]) {
+    const tab = ui.el("button", { id: `portraits-tab-${name}`, type: "button", role: "tab", class: "portraits-view-tab", "aria-controls": `portraits-view-${name}`, "aria-selected": String(name === "work"), tabindex: name === "work" ? 0 : -1, text: label, onClick: () => void changeView(name) });
+    nodes.tabs[name] = tab;
+    viewTabs.append(tab);
+    tab.addEventListener("keydown", event => {
+      const names = Object.keys(nodes.tabs);
+      let next = -1;
+      if (event.key === "ArrowRight") next = (names.indexOf(name) + 1) % names.length;
+      else if (event.key === "ArrowLeft") next = (names.indexOf(name) + names.length - 1) % names.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = names.length - 1;
+      if (next < 0) return;
+      event.preventDefault();
+      void changeView(names[next], { focus: true });
+    });
+  }
+  nodes.views.collection = buildArchiveView("collection");
+  nodes.views.history = buildArchiveView("history");
+  host.append(ui.el("div", { class: "portraits-workspace-head" }, [viewTabs, ui.el("div", { class: "portraits-service-row" }, [service, summary, statusRefresh])]), syncResult, workView, nodes.views.collection, nodes.views.history);
   artist.addEventListener("input", () => { invalidateSource(); followSource(); });
   imageUrl.addEventListener("input", invalidateSource);
   targetQ.addEventListener("input", () => {
@@ -222,13 +250,202 @@ export function init() {
   updateControls();
 }
 
+function buildArchiveView(kind) {
+  const isHistory = kind === "history";
+  const model = isHistory ? history : collection;
+  const q = ui.el("input", { id: `portraits-${kind}-q`, type: "search", autocomplete: "off", maxlength: 200, placeholder: isHistory ? "搜索来源或目标歌手…" : "搜索已获取的歌手头像…" });
+  const search = button(`portraits-${kind}-search`, "搜索", () => void loadArchive(kind, 1), "btn-sm");
+  const refresh = button(`portraits-${kind}-refresh`, "刷新", () => void loadArchive(kind, model.page), "btn-sm btn-ghost");
+  const filter = isHistory ? ui.el("select", { id: "portraits-history-filter", "aria-label": "同步状态" }, [ui.el("option", { value: "", text: "全部状态" }), ...Object.entries(STATE_LABELS).map(([value, label]) => ui.el("option", { value, text: label }))]) : null;
+  const statusNode = ui.el("p", { id: `portraits-${kind}-status`, class: "portraits-status", role: "status" });
+  const items = ui.el("div", { id: `portraits-${kind}-list`, class: isHistory ? "portraits-history-list" : "portraits-collection-grid", "aria-busy": "false" });
+  const prev = button(`portraits-${kind}-prev`, "上一页", () => void loadArchive(kind, model.page - 1), "btn-sm");
+  const next = button(`portraits-${kind}-next`, "下一页", () => void loadArchive(kind, model.page + 1), "btn-sm");
+  const page = ui.el("span", { id: `portraits-${kind}-page`, class: "portraits-page", text: "1 / 1" });
+  nodes[kind] = { q, search, refresh, filter, status: statusNode, items, prev, next, page };
+  const invalidate = () => {
+    cancel(kind); cancel("reuse"); cancel("history-check");
+    detailLoading = false; historyChecking = "";
+    model.loading = false; model.dirty = true; model.loaded = false; model.items = [];
+    items.replaceChildren();
+    message(statusNode, "筛选已修改，请点击搜索。");
+    updateControls();
+  };
+  q.addEventListener("input", invalidate);
+  filter?.addEventListener("change", () => { invalidate(); void loadArchive(kind, 1); });
+  return ui.el("section", { id: `portraits-view-${kind}`, class: "portraits-view portraits-archive card", role: "tabpanel", "aria-labelledby": `portraits-tab-${kind}`, hidden: true }, [
+    ui.el("div", { class: "portraits-archive-head" }, [ui.el("div", {}, [ui.el("h2", { text: isHistory ? "每次同步，都有记录。" : "已找到的头像，留在这里。" }), ui.el("p", { text: isHistory ? "仅展示当前 Navidrome 服务器的同步记录。查看状态不会重新上传。" : "从本地收藏中挑选头像，核对后再次使用，无需重新访问 Last.fm。" })]), refresh]),
+    ui.el("form", { class: "portraits-archive-toolbar portraits-form", onSubmit: event => { event.preventDefault(); void loadArchive(kind, 1); } }, [field(isHistory ? "搜索同步记录" : "搜索本地头像", q), filter, search]),
+    statusNode, items,
+    ui.el("nav", { class: "portraits-pager", "aria-label": isHistory ? "同步记录分页" : "已获取头像分页" }, [prev, page, next]),
+  ]);
+}
+
+async function changeView(name, { focus = false, load = true } = {}) {
+  if (!active || !nodes.views[name]) return;
+  if (currentView !== name) {
+    closePreview();
+    for (const kind of ["collection", "history", "reuse", "history-check"]) cancel(kind);
+    if (collection.loading) collection.dirty = true;
+    if (history.loading) history.dirty = true;
+    collection.loading = history.loading = detailLoading = false;
+    historyChecking = "";
+    if (currentView === "work") {
+      pendingTargetQuery = null;
+      cancel("library"); cancel("remote"); cancel("fetch"); cancel("test");
+      if (library.loading) library.loaded = false;
+      if (remote.loading) remote.attempted = false;
+      library.loading = remote.loading = sourceLoading = testLoading = false;
+    }
+    currentView = name;
+    for (const [key, panel] of Object.entries(nodes.views)) panel.hidden = key !== name;
+    for (const [key, tab] of Object.entries(nodes.tabs)) { tab.setAttribute("aria-selected", String(key === name)); tab.tabIndex = key === name ? 0 : -1; }
+    nodes.host.dataset.view = name;
+  }
+  if (focus) nodes.tabs[name].focus({ preventScroll: true });
+  updateControls();
+  if (!load) return;
+  if (name === "work") { if (!library.loaded) await loadLibrary(library.page); }
+  else {
+    const model = name === "history" ? history : collection;
+    if (!model.loaded || model.dirty) await loadArchive(name, model.page);
+  }
+}
+
+async function loadArchive(kind, page = 1) {
+  const model = kind === "history" ? history : collection;
+  const controls = nodes[kind];
+  if (!active || currentView !== kind || model.loading) return;
+  cancel("reuse"); cancel("history-check");
+  detailLoading = false; historyChecking = "";
+  const operation = startRequest(kind);
+  const q = controls.q.value.trim();
+  const state = controls.filter?.value || "";
+  model.loading = true;
+  message(controls.status, kind === "history" ? "正在读取本地同步记录…" : "正在读取已获取头像…");
+  updateControls();
+  try {
+    const params = { q, page, page_size: kind === "history" ? 10 : 12, ...(state ? { state } : {}) };
+    const result = await (kind === "history" ? api.artistPortraitHistory(params, { signal: operation.signal }) : api.artistPortraitLibrary(params, { signal: operation.signal }));
+    if (!operation.current() || currentView !== kind) return;
+    if (!Array.isArray(result.items)) throw new Error("返回的数据不完整");
+    Object.assign(model, { q, state, page: count(result.page) || 1, pages: Math.max(1, count(result.pages)), total: count(result.total), items: result.items, loaded: true, dirty: false });
+    renderArchive(kind);
+    message(controls.status, model.items.length ? `共 ${ui.fmtNum(model.total)} ${kind === "history" ? "条记录" : "张头像"} · 第 ${model.page} / ${model.pages} 页` : kind === "history" ? "没有符合条件的同步记录。完成一次同步后可在这里查看。" : q ? "没有符合条件的头像，试试其他歌手名。" : "还没有已获取的头像。到「获取与同步」选择一位歌手开始。");
+  } catch (error) {
+    if (!operation.current() || currentView !== kind) return;
+    model.dirty = true;
+    message(controls.status, `${error.message}。可点击刷新重试。`, "error");
+  } finally { if (operation.current()) { model.loading = false; updateControls(); } }
+}
+
+function dateLabel(value) {
+  const date = new Date(Number(value) * 1000);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "时间未提供";
+}
+
+function renderArchive(kind) {
+  const model = kind === "history" ? history : collection;
+  const controls = nodes[kind];
+  controls.items.replaceChildren(...model.items.map((item, index) => {
+    if (kind === "collection") {
+      const use = button("", "使用这张头像", () => void reusePortrait(item.id), "btn-sm portraits-reuse");
+      use.removeAttribute("id"); use.dataset.portraitId = item.id;
+      const image = imageFrame(portraitUrl(item), `${text(item.artist)} 的已获取头像`, "缓存预览不可用");
+      image.classList.add("portraits-collection-image");
+      const img = image.querySelector("img");
+      if (img) img.loading = "lazy";
+      return ui.el("article", { class: "portraits-collection-card", dataset: { portraitId: item.id }, style: { "--portrait-delay": `${Math.min(index, 5) * 35}ms` } }, [
+        image, ui.el("div", { class: "portraits-collection-copy" }, [ui.el("h3", { text: text(item.artist) || "未命名歌手" }), ui.el("p", { text: `${count(item.width)} × ${count(item.height)} · 上传尺寸` }), ui.el("time", { text: dateLabel(item.created_at) }), use]),
+      ]);
+    }
+    const state = STATE_LABELS[item.state] ? item.state : "uncertain";
+    const check = button("", "查看状态", () => void inspectHistory(item), "btn-sm portraits-history-check");
+    check.removeAttribute("id"); check.dataset.token = item.token;
+    const reuse = button("", "复用来源头像", () => void reusePortrait(item.portrait_id), "btn-sm btn-ghost portraits-reuse");
+    reuse.removeAttribute("id"); reuse.dataset.portraitId = item.portrait_id;
+    return ui.el("article", { class: "portraits-history-row", dataset: { token: item.token, state }, style: { "--portrait-delay": `${Math.min(index, 5) * 30}ms` } }, [
+      ui.el("span", { class: "portraits-history-symbol", "aria-hidden": "true" }, [ui.icon(state === "uploaded" ? "check" : state === "failed" ? "close" : state === "uploading" ? "jobs" : "warn", { size: 18 })]),
+      ui.el("div", { class: "portraits-history-copy" }, [ui.el("div", { class: "portraits-history-title" }, [ui.el("h3", { text: text(item.target?.name) || "目标歌手" }), ui.el("span", { class: "portraits-state", dataset: { state }, text: STATE_LABELS[state] })]), ui.el("p", { text: `来源：${text(item.artist) || "未提供"} · 目标 ID：${text(item.target?.id) || "未提供"}` }), ui.el("p", { class: "portraits-history-message", text: text(item.message) }), ui.el("time", { text: `更新于 ${dateLabel(item.updated_at || item.created_at)}` })]),
+      ui.el("div", { class: "portraits-history-actions" }, [check, reuse]),
+    ]);
+  }));
+  controls.page.textContent = `${model.page} / ${model.pages}`;
+}
+
+async function reusePortrait(id) {
+  if (!active || currentView === "work" || writeLocked() || detailLoading || !UUID.test(text(id))) return;
+  const view = currentView;
+  const controls = nodes[view];
+  const operation = startRequest("reuse");
+  detailLoading = true;
+  message(controls.status, "正在校验本地头像文件…");
+  updateControls();
+  try {
+    const result = await api.artistPortraitDetail(id, { signal: operation.signal });
+    if (!operation.current() || currentView !== view || writeLocked()) return;
+    if (result.portrait?.id !== id || !text(result.portrait.artist) || !portraitUrl(result.portrait)) throw new Error("本地头像资料不完整");
+    const revision = lifecycle;
+    await changeView("work", { load: false });
+    if (!active || lifecycle !== revision || currentView !== "work" || writeLocked()) return;
+    nodes.artist.value = result.portrait.artist;
+    nodes.imageUrl.value = "";
+    invalidateSource();
+    followSource({ search: true, force: true });
+    portrait = result.portrait;
+    portraitLoaded = false;
+    renderPortrait();
+    message(nodes.fetchStatus, "已使用本地头像。请核对来源，并重新选择准确的 Navidrome 目标。", "success");
+    updateSelection(); updateControls();
+    nodes.artist.focus({ preventScroll: true });
+  } catch (error) {
+    if (operation.current() && currentView === view) message(controls.status, `无法使用这张本地头像：${error.message}。未重新访问 Last.fm。`, "error");
+  } finally { if (operation.current()) { detailLoading = false; updateControls(); } }
+}
+
+async function inspectHistory(item) {
+  if (!active || currentView !== "history" || historyChecking || !UUID.test(text(item.token))) return;
+  const operation = startRequest("history-check");
+  historyChecking = item.token;
+  message(nodes.history.status, "正在查询这次同步的最新状态…");
+  updateControls();
+  try {
+    let result = await api.artistPortraitSyncStatus(item.token, { signal: operation.signal });
+    if (!operation.current() || currentView !== "history") return;
+    if (result.token !== item.token || result.portrait_id !== item.portrait_id || result.target?.id !== item.target?.id) throw new Error("返回的同步记录与当前项目不一致，请刷新后核对");
+    if (!STATE_LABELS[result.state]) throw new Error("记录状态无效，请刷新同步记录");
+    if (sync?.token === item.token && ["uploaded", "failed"].includes(sync.state) && !["uploaded", "failed"].includes(result.state)) result = { ...result, state: sync.state, message: sync.message };
+    Object.assign(item, { state: result.state, message: text(result.message) || item.message, updated_at: result.updated_at || item.updated_at });
+    const row = nodes.history.items.querySelector(`[data-token="${item.token}"]`);
+    if (row) {
+      row.dataset.state = item.state;
+      const badge = row.querySelector(".portraits-state"); badge.dataset.state = item.state; badge.textContent = STATE_LABELS[item.state];
+      row.querySelector(".portraits-history-message").textContent = text(item.message);
+    }
+    if (sync?.token === item.token) acceptSyncState(result);
+    else if (["uploading", "uncertain"].includes(item.state) && !writeLocked()) {
+      closePreview(); cancel("reuse"); detailLoading = false;
+      sync = { token: item.token, portraitId: item.portrait_id, artist: text(item.artist), target: text(item.target?.name), targetId: text(item.target?.id), state: item.state, message: text(item.message) };
+      saveSync(); renderSync(); updateControls();
+    }
+    message(nodes.history.status, `${STATE_LABELS[item.state]} · ${text(item.target?.name)}。${pendingSync() && sync?.token !== item.token ? "已有另一笔同步待确认，本次只更新记录，保留当前锁定。" : ["uploading", "uncertain"].includes(item.state) ? "已保留这次同步，核对完成前暂停新的上传。" : "仅更新了状态，未重新上传。"}`);
+    if (history.state && history.state !== item.state) {
+      history.dirty = true;
+      message(nodes.history.status, "记录状态已变化，正在更新当前筛选…");
+      await loadArchive("history", history.page);
+    }
+  } catch (error) { if (operation.current()) message(nodes.history.status, `查询失败：${error.message}`, "error"); }
+  finally { if (operation.current()) { historyChecking = ""; updateControls(); } }
+}
+
 export async function activate() {
   init();
   if (!nodes) return;
   active = true;
   if (!statusTimer) statusTimer = window.setInterval(() => { renderLimit(); updateControls(); }, 1000);
   const work = [refreshStatus()];
-  if (!library.loaded) work.push(loadLibrary(library.page));
+  if (currentView === "work" && !library.loaded) work.push(loadLibrary(library.page));
+  if (currentView !== "work") work.push(loadArchive(currentView, (currentView === "history" ? history : collection).page));
   if (pendingSync()) work.push(checkSync());
   await Promise.allSettled(work);
 }
@@ -242,6 +459,10 @@ export function leave() {
   if (library.loading) library.loaded = false;
   if (remote.loading) remote.attempted = false;
   library.loading = remote.loading = sourceLoading = testLoading = syncChecking = false;
+  if (collection.loading) collection.dirty = true;
+  if (history.loading) history.dirty = true;
+  collection.loading = history.loading = detailLoading = false;
+  historyChecking = "";
   clearInterval(statusTimer);
   statusTimer = 0;
   clearTimeout(syncTimer);
@@ -252,10 +473,10 @@ export function leave() {
 
 function updateControls() {
   if (!nodes) return;
-  const locked = pendingSync();
+  const locked = writeLocked();
   const configured = Boolean(statusKnown && status?.navidrome?.configured);
   nodes.artist.disabled = nodes.imageUrl.disabled = locked;
-  nodes.fetchButton.disabled = locked || sourceLoading || !active || !nodes.artist.value.trim() || !statusKnown || Boolean(status?.lastfm?.busy) || cooldownUntil > Date.now() || Boolean(status?.lastfm?.cooldown && !cooldownUntil);
+  nodes.fetchButton.disabled = locked || sourceLoading || currentView !== "work" || !active || !nodes.artist.value.trim() || !statusKnown || Boolean(status?.lastfm?.busy) || cooldownUntil > Date.now() || Boolean(status?.lastfm?.cooldown && !cooldownUntil);
   nodes.fetchButton.textContent = sourceLoading ? "正在获取与缓存…" : "获取 Last.fm 头像";
   nodes.fetchButton.setAttribute("aria-busy", String(sourceLoading));
   nodes.test.disabled = !active || !configured || testLoading || locked;
@@ -277,6 +498,21 @@ function updateControls() {
   nodes.syncAcknowledge.disabled = !active || syncChecking || uploadInFlight;
   nodes.libraryList.querySelectorAll("button").forEach(item => { item.disabled = locked; });
   nodes.targetList.querySelectorAll("button").forEach(item => { item.disabled = locked; });
+  for (const kind of ["collection", "history"]) {
+    const controls = nodes[kind];
+    if (!controls) continue;
+    const model = kind === "history" ? history : collection;
+    controls.search.disabled = controls.refresh.disabled = !active || model.loading;
+    controls.prev.disabled = model.loading || !model.loaded || model.page <= 1;
+    controls.next.disabled = model.loading || !model.loaded || model.page >= model.pages;
+    controls.items.setAttribute("aria-busy", String(model.loading));
+  }
+  nodes.host.querySelectorAll(".portraits-reuse").forEach(node => { node.disabled = !active || locked || detailLoading || historyChecking !== ""; });
+  nodes.host.querySelectorAll(".portraits-history-check").forEach(node => { node.disabled = !active || historyChecking !== "" || detailLoading; node.textContent = historyChecking === node.dataset.token ? "正在查询…" : "查看状态"; });
+  nodes.summary.textContent = locked ? "有同步待确认" : portrait && target && portraitLoaded ? "已就绪 · 等待核对" : portrait ? "已获取 · 请选择目标" : "选择歌手 → 获取头像 → 核对同步";
+  nodes.summary.dataset.tone = locked ? "warn" : portrait && target ? "ready" : "";
+  nodes.service.textContent = !statusKnown ? "服务状态待确认" : status?.navidrome?.configured ? connected ? "Navidrome 已连接" : "Navidrome 已配置" : "Navidrome 未配置";
+  nodes.service.dataset.tone = statusKnown && status?.navidrome?.configured ? "ready" : "warn";
 }
 
 async function refreshStatus() {
@@ -316,7 +552,7 @@ function renderLimit() {
 }
 
 async function loadLibrary(page = 1) {
-  if (!active || library.loading) return;
+  if (!active || currentView !== "work" || library.loading) return;
   const operation = startRequest("library");
   const q = nodes.libraryQ.value.trim();
   library.loading = true;
@@ -337,7 +573,7 @@ async function loadLibrary(page = 1) {
 function renderLibrary() {
   nodes.libraryList.replaceChildren(...library.items.map(item => {
     const select = button("", "", () => {
-      if (pendingSync()) return;
+      if (writeLocked()) return;
       nodes.artist.value = item.name;
       nodes.imageUrl.value = "";
       invalidateSource();
@@ -371,6 +607,7 @@ async function fetchPortrait() {
     if (!result.portrait?.id || !portraitUrl(result.portrait)) throw new Error("头像预览数据不完整，请更新状态后重试");
     if (text(result.portrait.artist).trim() !== artist) throw new Error("返回的来源歌手与本次查询不一致，请重新获取后核对");
     portrait = result.portrait;
+    collection.dirty = true;
     renderPortrait();
     message(nodes.fetchStatus, `${result.cached ? "使用本地缓存" : "已缓存头像"}。请对照来源确认人物，同名匹配不保证准确。`, "success");
     updateSelection();
@@ -420,6 +657,7 @@ function imageFrame(url, alt, empty = "暂无头像", onState = () => {}) {
 
 function renderPortrait() {
   nodes.preview.hidden = !portrait;
+  nodes.sourceEmpty.hidden = Boolean(portrait);
   nodes.preview.replaceChildren();
   if (!portrait) return;
   const id = portrait.id;
@@ -454,7 +692,7 @@ async function testConnection() {
 }
 
 async function searchRemote(page = 1) {
-  if (!active || !statusKnown || !status?.navidrome?.configured || remote.loading || pendingSync() || !nodes.targetQ.value.trim()) return;
+  if (!active || currentView !== "work" || !statusKnown || !status?.navidrome?.configured || remote.loading || writeLocked() || !nodes.targetQ.value.trim()) return;
   pendingTargetQuery = null;
   invalidateTarget();
   const operation = startRequest("remote");
@@ -481,7 +719,7 @@ async function searchRemote(page = 1) {
 function renderRemote() {
   nodes.targetList.replaceChildren(...remote.items.map(item => {
     const choose = ui.el("button", { type: "button", class: "portraits-target", dataset: { artistId: item.id }, "aria-pressed": "false", onClick: () => {
-      if (pendingSync()) return;
+      if (writeLocked()) return;
       invalidateTarget();
       target = item;
       updateSelection();
@@ -551,7 +789,8 @@ async function previewSync() {
     dialog = null;
     if (answer !== "confirm" || !valid() || !confirmationImageLoaded) return;
     if (Number(result.expires_at) * 1000 <= Date.now()) throw new Error("同步预览已过期，请重新预览后确认");
-    sync = { token: result.token, artist: previewPortrait.artist, target: previewTarget.name, targetId: previewTarget.id, state: "uploading", message: "正在同步头像，请等待服务器结果…" };
+    sync = { token: result.token, portraitId: portraitId, artist: previewPortrait.artist, target: previewTarget.name, targetId: previewTarget.id, state: "uploading", message: "正在同步头像，请等待服务器结果…" };
+    history.dirty = true;
     syncPolls = 0;
     confirmed = true;
     saveSync();
@@ -583,6 +822,7 @@ async function executeSync(record) {
   } catch (error) {
     if (sync !== record) return;
     uploadInFlight = false;
+    if (!pendingSync()) return;
     sync.state = "uncertain";
     sync.message = `尚不能确认上传结果：${error.message}。已锁定重复提交，正在查询服务器记录。`;
     saveSync();
@@ -594,7 +834,9 @@ async function executeSync(record) {
 
 function acceptSyncState(result) {
   const state = ["uploaded", "failed", "uncertain", "uploading", "ready"].includes(result?.state) ? result.state : "uncertain";
+  if (["uploaded", "failed"].includes(sync.state) && !["uploaded", "failed"].includes(state)) return;
   sync.state = state;
+  history.dirty = true;
   const fallback = state === "uploaded" ? "头像已同步。" : state === "failed" ? "同步失败，未完成上传。请重新预览并确认。" : "上传结果尚未确认。请查询状态，不要重复提交。";
   sync.message = text(result?.message) || fallback;
   saveSync();
@@ -621,6 +863,7 @@ async function checkSync() {
     }
   } catch (error) {
     if (!operation.current() || sync !== record) return;
+    if (!pendingSync()) return;
     sync.state = "uncertain";
     sync.message = `查询结果失败：${error.message}。同步仍未确认，已阻止重复上传。`;
     saveSync();

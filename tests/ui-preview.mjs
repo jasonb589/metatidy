@@ -404,6 +404,15 @@ async function handleApi(req, res, url) {
     return json(res, { items: items.slice((page - 1) * size, page * size), total: items.length, page, page_size: size, pages });
   }
   if (route === '/api/artist-portraits/status') return json(res, { lastfm: { busy: false, cooldown: false, retry_at: null, retry_after_seconds: null, reason: null, min_interval_seconds: 5 }, navidrome: { configured: true, url: 'http://navidrome.example.test', min_version: '0.61.0' }, cache_days: 7 });
+  if (route === '/api/artist-portraits/library' || route === '/api/artist-portraits/history') {
+    const history = route.endsWith('/history');
+    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    const state = url.searchParams.get('state') || '';
+    const all = history ? [...portraitSyncs.values()].filter(item => item.submitted_at).map(item => ({ token: item.token, portrait_id: item.portrait.id, artist: item.portrait.artist, target: { id: item.target.id, name: item.target.name }, state: item.state, message: item.message || '', created_at: item.created_at, updated_at: item.updated_at })) : [...portraitCache.values()];
+    const items = all.filter(item => `${item.artist} ${item.target?.name || ''}`.toLowerCase().includes(q) && (!history || !state || state === 'all' || item.state === state)).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+    const size = Math.max(1, Math.min(history ? 50 : 48, Number(url.searchParams.get('page_size')) || (history ? 10 : 12))), pages = Math.ceil(items.length / size), page = Math.max(1, Math.min(pages || 1, Number(url.searchParams.get('page')) || 1));
+    return json(res, { items: items.slice((page - 1) * size, page * size), total: items.length, page, page_size: size, pages });
+  }
   if (route === '/api/artist-portraits/fetch') {
     const artist = String(payload.artist || '').trim(); if (!artist || [...artist].length > 200) throw fixtureError('请填写歌手名', 400);
     const key = JSON.stringify([artist, payload.image_url || null]), cached = portraitCache.has(key);
@@ -422,18 +431,24 @@ async function handleApi(req, res, url) {
     const portrait = [...portraitCache.values()].find(item => item.id === payload.portrait_id);
     if (!portrait || payload.artist_id !== portraitTarget.id) throw fixtureError('来源或目标不存在', 404);
     const token = `00000000-0000-4000-9000-${String(portraitSyncs.size + 1).padStart(12, '0')}`;
-    const record = { token, portrait, target: { ...portraitTarget }, sync_state: 'ready', state: 'ready', expires_at: Date.now() / 1000 + 600, target_image_url: `/api/artist-portraits/sync/${token}/target-image` };
+    const record = { token, portrait, portrait_id: portrait.id, artist: portrait.artist, target: { ...portraitTarget }, sync_state: 'ready', state: 'ready', created_at: Date.now() / 1000, updated_at: Date.now() / 1000, expires_at: Date.now() / 1000 + 600, target_image_url: `/api/artist-portraits/sync/${token}/target-image` };
     portraitSyncs.set(token, record); return json(res, record);
   }
   if (route === '/api/artist-portraits/sync') {
     const record = portraitSyncs.get(payload.token); if (!record) throw fixtureError('同步记录不存在', 404);
     if (record.state !== 'ready') throw fixtureError('同步已提交', 409);
-    record.state = 'uploaded'; record.message = '仅更新内存示例；未同步真实服务'; return json(res, record);
+    record.state = 'uploaded'; record.submitted_at = record.updated_at = Date.now() / 1000; record.message = '仅更新内存示例；未同步真实服务'; return json(res, record);
   }
   const portraitStatus = route.match(/^\/api\/artist-portraits\/sync\/([^/]+)$/);
   if (portraitStatus) { const record = portraitSyncs.get(portraitStatus[1]); if (!record) throw fixtureError('同步记录不存在', 404); return json(res, record); }
   if (/^\/api\/artist-portraits\/(?:[^/]+\/preview|sync\/[^/]+\/target-image)$/.test(route)) {
     res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-store' }); return res.end(coverSvg(route.endsWith('target-image') ? 3 : 1));
+  }
+  const portraitDetail = route.match(/^\/api\/artist-portraits\/([0-9a-f-]{36})$/);
+  if (portraitDetail) {
+    const portrait = [...portraitCache.values()].find(item => item.id === portraitDetail[1]);
+    if (!portrait) throw fixtureError('本地头像缓存不存在', 404);
+    return json(res, { portrait });
   }
   if (route === '/api/status') return json(res, {
     version: '0.4.1-ui-fixture', engine: 'fixture', postgres: true, redis: true, music_dir_exists: true,
