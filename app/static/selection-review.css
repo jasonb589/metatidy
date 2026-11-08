@@ -39,6 +39,8 @@
 .sr-handoffs .sr-sequence-action:hover:not(:disabled) { color: var(--accent-2); background: var(--accent-soft); border-color: var(--accent); }
 .sr-footer > .sr-edit-note { margin-top: 8px; }
 .sr-edit-note strong { color: var(--fg-2); font-weight: 500; }
+.sr-save-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: 10px; }
+.sr-save-row .btn { min-width: 0; height: auto; min-height: 30px; padding: 6px 9px; font-size: 10px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
 .selection-review > :not(.sr-list) { flex-shrink: 0; }
 @media (max-width: 700px) {
   .selection-review { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); border-radius: 13px; }
@@ -75,6 +77,8 @@
   .sr-footer { padding: 9px 14px; }
   .sr-footer > p { font-size: 9px; }
   .sr-footer > .sr-edit-note { margin-top: 5px; }
+  .sr-save-row { margin-top: 6px; padding-top: 6px; gap: 5px; font-size: 9px; }
+  .sr-save-row .btn { font-size: 9px; min-height: 26px; padding-block: 5px; }
   .sr-handoffs { margin-top: 7px; }
   .sr-handoffs .btn { min-height: 30px; font-size: 9px; }
   .sr-pager { padding: 8px 14px; gap: 6px; }

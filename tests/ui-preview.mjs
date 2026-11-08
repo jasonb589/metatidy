@@ -10,6 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { jpeg as portraitJpeg, avif as portraitAvif } from './portrait-image-fixtures.mjs';
+import { createCollectionsFixture } from './collections-fixture.mjs';
 
 const staticRoot = fileURLToPath(new URL('../app/static/', import.meta.url));
 const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.split('=')[1] || 8765);
@@ -74,6 +75,7 @@ const tracks = empty ? [] : fixtureRows.map((row, index) => {
 if (!empty && process.argv.includes('--duplicates')) {
   tracks.push(...tracks.slice(0, 6).map((row, index) => ({ ...row, id: 1001 + index, ext: 'mp3', size: 9500000 + index * 80000, album: `${row.album} · 精选`, path: `/fixture-music/精选/${row.artist}/${row.title}.mp3`, filename: `${row.title}.mp3`, duration: row.duration + index * 2, has_cover: 0 })));
 }
+const collections = createCollectionsFixture(tracks, { seed: !empty });
 let values = {
   dir_template: '{language?}/{artist}/{album}', filename_template: '{track:02} - {title}',
   conflict_policy: 'rename', unknown_artist: '未知艺术家', unknown_album: '未知专辑', unknown_other: '未知',
@@ -416,7 +418,7 @@ function jobReport(job) {
 async function handleApi(req, res, url) {
   const route = url.pathname;
   const method = req.method || 'GET';
-  const payload = ['POST', 'PUT'].includes(method) ? await bodyOf(req) : {};
+  const payload = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) ? await bodyOf(req) : {};
   const authenticated = !authRequired || (req.headers.cookie || '').includes('fixture-session=1');
   if (route === '/api/session') return json(res, { required: authRequired, authenticated, session_days: 30, warning: '本地 UI 测试服务：仅包含示例数据' });
   if (route === '/api/login') {
@@ -430,6 +432,7 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
+  if (route === '/api/collections' || route.startsWith('/api/collections/')) return json(res, collections.handle(route, method, url.searchParams, payload));
   if (route === '/api/duplicates' || route === '/api/duplicates/detail' || route === '/api/duplicates/selection') {
     const groups = new Map();
     for (const row of tracks) {

@@ -44,6 +44,7 @@ from tests.portraits_acceptance import check_portraits  # noqa: E402
 from tests.duplicates_acceptance import check_duplicates  # noqa: E402
 from tests.folders_acceptance import check_empty_folders, check_folders  # noqa: E402
 from tests.audio_acceptance import check_audio  # noqa: E402
+from tests.collections_acceptance import check_collections, check_collections_auth  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -448,6 +449,7 @@ def main() -> int:
                   all(requests.request(method, f"{auth_base}/api/tracks/{identifier}/audio",
                                        headers={"Range": "bytes=0-1"}, timeout=20).status_code == 401
                       for method in ("GET", "HEAD") for identifier in (1, "invalid")))
+            check_collections_auth(auth_base, check)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -525,6 +527,32 @@ def main() -> int:
         check_folders(BASE, music, check)
         print("\n=== 19. 索引音频试听、分段读取与路径边界 ===")
         check_audio(BASE, music, check)
+        print("\n=== 20. 持久曲目清单、成员快照与并发版本保护 ===")
+
+        def restart_for_collections():
+            nonlocal proc
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+            if proc.stderr:
+                proc.stderr.close()
+            proc = subprocess.Popen(argv, cwd=str(REPO), env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            for _ in range(40):
+                if proc.poll() is not None:
+                    raise RuntimeError("清单持久验收重启服务失败")
+                try:
+                    if requests.get(f"{BASE}/api/health", timeout=5).status_code == 200:
+                        return
+                except requests.RequestException:
+                    pass
+                time.sleep(0.5)
+            raise RuntimeError("清单持久验收重启后健康检查超时")
+
+        check_collections(BASE, music, check, restart=restart_for_collections)
     finally:
         proc.terminate()
         try:

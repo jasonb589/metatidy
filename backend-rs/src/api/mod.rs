@@ -31,6 +31,7 @@ use crate::AppState;
 
 mod albums;
 mod audio;
+mod collections;
 mod duplicates;
 mod folders;
 mod moves;
@@ -824,6 +825,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/albums", get(albums::list_albums))
         .route("/api/albums/detail", get(albums::detail))
         .route("/api/albums/selection", post(albums::selection))
+        .route("/api/collections", get(collections::list).post(collections::create))
+        .route(
+            "/api/collections/:id",
+            get(collections::detail).patch(collections::rename).delete(collections::delete),
+        )
+        .route("/api/collections/:id/members", post(collections::members))
+        .route("/api/collections/:id/selection", post(collections::selection))
         .route("/api/duplicates", get(duplicates::list))
         .route("/api/duplicates/detail", get(duplicates::detail))
         .route("/api/duplicates/selection", post(duplicates::selection))

@@ -51,6 +51,11 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
     const scope = { rows: rows.map((row) => ({ ...row })), revision: selectionRevision() };
     close({ restoreFocus: false }); onAction(action, scope);
   } }));
+  const saveCollection = ui.el("button", { id: "selection-review-save-collection", type: "button", class: "btn btn-sm sr-save-collection", onClick: () => {
+    if (!rows.length || checking) return;
+    const scope = { rows: rows.map(row => ({ ...row })), revision: selectionRevision() };
+    close({ restoreFocus: false }); onAction("save-collection", scope);
+  } });
   dialog.append(
     ui.el("header", { class: "sr-head" }, [ui.el("div", {}, [ui.el("p", { class: "eyebrow", text: "YOUR SELECTED TRACKS" }), ui.el("h2", { id: "selection-review-title", text: "已选曲目审阅" }), total]), closeButton]),
     ui.el("div", { class: "sr-controls" }, [
@@ -62,6 +67,7 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
       ui.el("p", { text: "操作针对全部已选，不受搜索或分页影响；进入后仍需预览或确认。" }),
       ui.el("div", { class: "sr-handoffs" }, actions),
       ui.el("p", { id: "selection-review-edit-note", class: "sr-edit-note" }, [ui.el("strong", { text: "编辑" }), "统一修改；", ui.el("strong", { text: "逐首编辑" }), "分别修改。"]),
+      ui.el("div", { class: "sr-save-row" }, [ui.el("span", { text: "留到下次，换设备也能继续" }), saveCollection]),
     ]),
   );
 
@@ -130,6 +136,8 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
     const missing = checked ? [...checked.values()].filter((item) => item.status === "missing").length : 0;
     removeMissing.hidden = !missing; removeMissing.textContent = `移除全部索引缺失 ${ui.fmtNum(missing)} 首`;
     for (const button of actions) { button.textContent = `${button.dataset.label}全部已选 ${ui.fmtNum(rows.length)} 首`; button.disabled = !rows.length || checking; }
+    saveCollection.textContent = `保存全部已选 ${ui.fmtNum(rows.length)} 首为清单`;
+    saveCollection.disabled = !rows.length || checking;
     previous.disabled = page <= 1; next.disabled = page >= pages;
     pageLabel.textContent = `${page} / ${Math.max(1, pages)}`;
     range.textContent = filtered.length ? `${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, filtered.length)} / ${ui.fmtNum(filtered.length)} 首` : "没有匹配曲目";

@@ -196,6 +196,13 @@ export const api = {
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs({ ...params, ...(params?.folder ? { folder_recursive: params.folder_recursive === false ? "false" : "true" } : {}) })}`),
+  collections: (params, options = {}) => request(`${API}/collections?${qs(params)}`, options),
+  collection: (id, params = {}, options = {}) => request(`${API}/collections/${encodeURIComponent(id)}?${qs(params)}`, options),
+  createCollection: (payload) => request(`${API}/collections`, { method: "POST", body: payload }),
+  renameCollection: (id, payload) => request(`${API}/collections/${encodeURIComponent(id)}`, { method: "PATCH", body: payload }),
+  deleteCollection: (id, payload) => request(`${API}/collections/${encodeURIComponent(id)}`, { method: "DELETE", body: payload }),
+  collectionMembers: (id, payload) => request(`${API}/collections/${encodeURIComponent(id)}/members`, { method: "POST", body: payload }),
+  collectionSelection: (id, payload, options = {}) => request(`${API}/collections/${encodeURIComponent(id)}/selection`, { ...options, method: "POST", body: payload }),
   folders: (params, options = {}) => request(`${API}/folders?${qs(params)}`, options),
   duplicateGroups: (params, options = {}) => request(`${API}/duplicates?${qs(params)}`, options),
   duplicateDetail: (params, options = {}) => request(`${API}/duplicates/detail?${qs(params)}`, options),
