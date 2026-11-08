@@ -35,6 +35,7 @@ jobs:
           node tests/ui-smoke.mjs
           node tests/ui-library-tools.mjs
           node tests/ui-metadata-editor.mjs
+          node tests/ui-edit-sequence.mjs
           node tests/ui-audio-player.mjs
           node tests/ui-albums.mjs
           node tests/ui-scrape-scope.mjs

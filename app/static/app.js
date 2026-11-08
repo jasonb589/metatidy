@@ -160,12 +160,13 @@ function boot() {
 async function handoffSelection(action, scope) {
   if (!canUseWorkspace() || !scope.rows.length || scope.revision !== selectionRevision()) return;
   try {
-    const tab = action === "edit" ? "tracks" : action === "scrape" ? "scrape" : "move";
+    const tab = action === "edit" || action === "edit-sequence" ? "tracks" : action === "scrape" ? "scrape" : "move";
     await activateTab(tab, { focus: false });
     if (!canUseWorkspace() || state.tab !== tab || scope.revision !== selectionRevision()) {
       ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后继续。"); return;
     }
     if (action === "edit") tracks.editSelection(scope.rows);
+    else if (action === "edit-sequence") tracks.editSelectionSequence(scope.rows);
     else if (action === "scrape") {
       const button = ui.byId("btn-batch-run"); button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
       document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });

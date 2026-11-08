@@ -45,8 +45,8 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
   const pageLabel = ui.el("span", { id: "selection-review-page" });
   const range = ui.el("span", { id: "selection-review-range" });
   const actions = [
-    ["edit", "编辑"], ["scrape", "批量刮削"], ["move", "整理"],
-  ].map(([action, text]) => ui.el("button", { id: `selection-review-${action}`, type: "button", class: `btn btn-sm${action === "edit" ? " btn-primary" : ""}`, dataset: { action, label: text }, onClick: () => {
+    ["edit", "编辑"], ["edit-sequence", "逐首编辑"], ["scrape", "批量刮削"], ["move", "整理"],
+  ].map(([action, text]) => ui.el("button", { id: `selection-review-${action}`, type: "button", class: `btn btn-sm${action === "edit" ? " btn-primary" : action === "edit-sequence" ? " sr-sequence-action" : ""}`, "aria-describedby": action.startsWith("edit") ? "selection-review-edit-note" : null, dataset: { action, label: text }, onClick: () => {
     if (!rows.length || checking) return;
     const scope = { rows: rows.map((row) => ({ ...row })), revision: selectionRevision() };
     close({ restoreFocus: false }); onAction(action, scope);
@@ -58,7 +58,11 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
       q, ui.el("div", { class: "sr-tools" }, [checkButton, cancelCheck, removeMissing, removeMatching]), checkStatus, notice, removal,
     ]), list,
     ui.el("nav", { class: "sr-pager", "aria-label": "已选曲目分页" }, [range, ui.el("div", { class: "spacer" }), previous, pageLabel, next]),
-    ui.el("footer", { class: "sr-footer" }, [ui.el("p", { text: "下列操作交接全部已选曲目，不受上方搜索或分页影响；进入后仍需预览或确认。" }), ui.el("div", { class: "sr-handoffs" }, actions)]),
+    ui.el("footer", { class: "sr-footer" }, [
+      ui.el("p", { text: "操作针对全部已选，不受搜索或分页影响；进入后仍需预览或确认。" }),
+      ui.el("div", { class: "sr-handoffs" }, actions),
+      ui.el("p", { id: "selection-review-edit-note", class: "sr-edit-note" }, [ui.el("strong", { text: "编辑" }), "统一修改；", ui.el("strong", { text: "逐首编辑" }), "分别修改。"]),
+    ]),
   );
 
   const unsubscribe = on("selection:changed", () => {

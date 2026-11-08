@@ -374,11 +374,11 @@ let dialogSeq = 0;
  * 通用弹层。actions: [{id, label, variant, autofocus}]
  * resolve 点击的动作 id；按 Esc / 取消 返回 ""。
  */
-export function openDialog({ title, subtitle = "", body, actions = [], size = "" }) {
+export function openDialog({ id, title, subtitle = "", body, actions = [], size = "" }) {
   return new Promise((resolve) => {
     dialogSeq += 1;
     const titleId = `dlg-title-${dialogSeq}`;
-    const dialog = el("dialog", { class: `modal ${size}`.trim(), "aria-labelledby": titleId });
+    const dialog = el("dialog", { id, class: `modal ${size}`.trim(), "aria-labelledby": titleId });
     let settled = false;
 
     const finish = (value) => {

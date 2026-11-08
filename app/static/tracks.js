@@ -14,6 +14,7 @@ import { initSavedFilters } from "./saved-filters.js";
 import { showKeyboardHelp } from "./keyboard-help.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
 import { playTrack } from "./audio-player.js";
+import { createEditSequence } from "./edit-sequence.js";
 import {
   state,
   emit,
@@ -67,6 +68,10 @@ let lyricsTouched = false;
 let savedFilters = null;
 let cancelPendingSearch = () => {};
 let audioState = { id: null, status: "stopped" };
+let editSequence = null;
+let editSequenceView = null;
+let editLeavePrompt = null;
+let editAccessBlocked = false;
 
 export function init() {
   nodes = {
@@ -122,6 +127,9 @@ export function init() {
     dlLanguages: ui.byId("dl-languages"),
     dlAlbumtypes: ui.byId("dl-albumtypes"),
   };
+  editSequenceView = createEditSequence({
+    host: ui.byId("edit-sequence"), onNavigate: navigateEditSequence, onSkip: skipEditSequence,
+  });
   initLibraryViews();
   window.addEventListener("metatidy:audio-state", event => {
     audioState = event.detail || { id: null, status: "stopped" };
@@ -318,7 +326,7 @@ export function init() {
     }
   });
 
-  nodes.drawerClose.addEventListener("click", closeEdit);
+  nodes.drawerClose.addEventListener("click", () => closeEdit());
   nodes.drawerClear.addEventListener("click", resetEditDraft);
   nodes.editLoadRetry.addEventListener("click", () => void loadEditMetadata());
   for (const key of EDIT_FIELDS) {
@@ -329,7 +337,10 @@ export function init() {
     input.addEventListener("input", () => { editTouched.add(key); syncEditDraft(); });
   }
   nodes.editLyrics?.addEventListener("input", () => { lyricsTouched = true; syncEditDraft(); });
-  window.addEventListener("metatidy:unauthorized", () => closeEdit({ restoreFocus: false }));
+  const lockEdit = () => { editAccessBlocked = true; closeEdit({ restoreFocus: false, force: true }); };
+  window.addEventListener("metatidy:unauthorized", lockEdit);
+  window.addEventListener("metatidy:logout", lockEdit);
+  window.addEventListener("metatidy:authenticated", () => { editAccessBlocked = false; });
   nodes.drawerPreview.addEventListener("click", runPreview);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !state.edit.open || event.defaultPrevented || hasOverlayAboveEditor()) return;
@@ -1413,6 +1424,10 @@ function syncEditDraft() {
   nodes.drawerPreview.disabled = state.edit.busy || editUnavailable;
   nodes.drawerClear.disabled = state.edit.busy;
   nodes.editLoadRetry.disabled = state.edit.busy;
+  nodes.drawerClose.disabled = Boolean(editSequence && state.edit.busy);
+  if (editSequence) editSequenceView.render({
+    ...editSequence, busy: state.edit.busy || Boolean(editLeavePrompt), dirty: count > 0, unavailable: editUnavailable,
+  });
 }
 
 function resetEditDraft() {
@@ -1438,8 +1453,13 @@ async function loadEditMetadata() {
     const detail = await api.track(id, { signal: request.signal });
     if (!isCurrentEdit(revision) || request !== editDetailRequest || request.signal.aborted) return;
     if (!detail || Array.isArray(detail) || Number(detail.id) !== id) throw new Error("返回的曲目与当前编辑对象不一致");
-    state.edit.rows[0] = { ...state.edit.rows[0], ...detail };
+    state.edit.rows[0] = { ...state.edit.rows[0], ...detail, id };
     for (const key of EDIT_FIELDS) if (!Object.hasOwn(detail, key)) delete state.edit.rows[0][key];
+    if (editSequence) {
+      editSequence.rows[editSequence.index] = { ...state.edit.rows[0] };
+      nodes.drawerScope.textContent = state.edit.rows[0].title || state.edit.rows[0].filename || `曲目 #${id}`;
+      nodes.drawerScope.title = [nodes.drawerScope.textContent, state.edit.rows[0].path].filter(Boolean).join("\n");
+    }
     populateEditBaseline(state.edit.rows, { preserveDraft: true });
     editUnavailable = detail.file_exists === false;
     const partial = [...editBaseline.values()].some(field => field.kind === "unknown");
@@ -1493,15 +1513,88 @@ async function loadLyrics(trackId) {
   }
 }
 
+function canEditWorkspace() {
+  const session = window.__MT_AUTH?.state;
+  return !editAccessBlocked && Boolean(session && (!session.required || session.authenticated));
+}
+
+/** All replacements of a sequence use the same leave check, including older edit entry points. */
+function requestEditChange(action, { protect = Boolean(editSequence) } = {}) {
+  if (!canEditWorkspace()) return;
+  if (editLeavePrompt) { editLeavePrompt.keep.focus(); return; }
+  if (state.edit.open && protect) {
+    if (state.edit.busy) { ui.toast("info", "当前操作尚未结束", "请等待预览或写入完成后，再切换曲目或结束本轮。"); return; }
+    const fields = Object.keys(collectFields());
+    if (fields.length) {
+      const revision = editRevision;
+      void confirmEditLeave(fields).then(discard => {
+        if (discard && isCurrentEdit(revision) && !state.edit.busy && canEditWorkspace()) action();
+      });
+      return;
+    }
+  }
+  action();
+}
+
+function confirmEditLeave(fields) {
+  const revision = editRevision, trigger = document.activeElement;
+  return new Promise(resolve => {
+    const dialog = ui.el("dialog", { id: "edit-sequence-leave-dialog", class: "modal narrow", "aria-labelledby": "edit-sequence-leave-title" });
+    let settled = false;
+    const finish = discard => {
+      if (settled) return;
+      settled = true;
+      if (editLeavePrompt?.dialog === dialog) editLeavePrompt = null;
+      if (dialog.open) dialog.close();
+      dialog.remove();
+      syncEditDraft();
+      if (!discard && isCurrentEdit(revision) && canEditWorkspace()) {
+        const target = trigger instanceof HTMLElement && trigger.isConnected && trigger.getClientRects().length && !trigger.matches(":disabled") ? trigger : ui.byId("edit-title");
+        target.focus({ preventScroll: true });
+      }
+      resolve(discard);
+    };
+    const keep = ui.el("button", { id: "edit-sequence-keep", type: "button", class: "btn btn-primary", autofocus: true, text: "返回编辑", onClick: () => finish(false) });
+    const discard = ui.el("button", { id: "edit-sequence-discard", type: "button", class: "btn", text: "放弃本首修改", onClick: () => finish(true) });
+    dialog.append(
+      ui.el("div", { class: "modal-head" }, [ui.el("h2", { id: "edit-sequence-leave-title", text: "这首曲目还有未提交的修改" })]),
+      ui.el("div", { class: "modal-body" }, [
+        ui.el("p", { text: `${fields.length} 个字段尚未提交：${fields.map(ui.fieldLabel).join("、")}。` }),
+        ui.el("p", { class: "hint", text: "返回编辑可继续预览并确认。放弃只会丢弃当前草稿，之前已写入的标签会保留。" }),
+      ]),
+      ui.el("div", { class: "modal-foot" }, [keep, discard]),
+    );
+    dialog.addEventListener("cancel", event => { event.preventDefault(); finish(false); });
+    dialog.addEventListener("close", () => finish(false));
+    editLeavePrompt = { dialog, keep, cancel: () => finish(false) };
+    document.body.append(dialog); dialog.showModal(); keep.focus(); syncEditDraft();
+  });
+}
+
 function openEdit(rows) {
+  if (!Array.isArray(rows) || !rows.length) return;
+  const snapshot = rows.map(row => ({ ...row }));
+  requestEditChange(() => openEditNow(snapshot));
+}
+
+function openEditNow(rows, { sequence = null, preserveTrigger = false } = {}) {
   if (!rows || !rows.length) return;
+  const switching = state.edit.open && sequence && editSequence === sequence;
+  editSequence = sequence;
+  if (!editSequence) editSequenceView.hide();
+  nodes.drawer.dataset.editMode = sequence ? "sequence" : "standard";
+  ui.byId("edit-drawer-title").textContent = sequence ? "逐首编辑" : "编辑元数据";
+  nodes.drawerClose.textContent = sequence ? "结束本轮" : "关闭";
+  nodes.drawerClose.setAttribute("aria-label", sequence ? "结束逐首编辑" : "关闭编辑面板");
+  nodes.drawerClose.disabled = false;
   editDetailRequest?.abort();
   editLyricsRequest?.abort();
   editDetailRequest = editLyricsRequest = null;
   const revision = ++editRevision;
   const trigger = document.activeElement;
-  if (!state.edit.open || !nodes.drawer.contains(trigger)) {
+  if (!preserveTrigger && (!state.edit.open || !nodes.drawer.contains(trigger))) {
     editTrigger = trigger instanceof HTMLElement ? trigger : null;
+    if (sequence && (!editTrigger || editTrigger === document.body || !editTrigger.getClientRects().length)) editTrigger = ui.byId("selection-review") || nodes.q;
   }
   state.edit.rows = rows.map((row) => ({ ...row }));
   state.edit.open = true;
@@ -1522,7 +1615,7 @@ function openEdit(rows) {
       : "批量编辑不载入各首歌词；填写后会统一替换所选曲目的歌词，留空保持各自原值。";
   }
   populateEditBaseline(state.edit.rows);
-  nodes.editDescription.textContent = rows.length === 1
+  nodes.editDescription.textContent = sequence ? "逐首修改，预览并确认后才写入。切换前会检查草稿；本轮顺序保持不变。" : rows.length === 1
     ? "已有资料直接显示，只提交实际修改的字段。留空保持原值；预览并确认后才写入。"
     : "相同字段显示共同值，不同内容会明确标记。只提交你修改的字段，留空保持各自原值。";
   nodes.editLoadRetry.hidden = true;
@@ -1530,8 +1623,8 @@ function openEdit(rows) {
   nodes.editLoadStatus.textContent = "已显示所选曲目的已知资料；未载入字段不会被当作空值写入。";
   if (rows.length === 1) { void loadEditMetadata(); void loadLyrics(rows[0].id); }
   const first = state.edit.rows[0];
-  ui.setText(nodes.drawerScope, rows.length === 1 ? `1 首：${first.title || first.filename}` : `${rows.length} 首`);
-  nodes.drawerScope.title = rows.length === 1 ? first.path || "" : rows.map((row) => row.title || row.filename).join("\n");
+  ui.setText(nodes.drawerScope, sequence ? first.title || first.filename || `曲目 #${first.id}` : rows.length === 1 ? `1 首：${first.title || first.filename}` : `${rows.length} 首`);
+  nodes.drawerScope.title = sequence ? [nodes.drawerScope.textContent, first.path].filter(Boolean).join("\n") : rows.length === 1 ? first.path || "" : rows.map((row) => row.title || row.filename).join("\n");
   nodes.drawer.dataset.open = "true";
   // 抽屉头也用这张封面做色晕（.drawer-head::before 读 --art）
   nodes.drawer.style.setProperty(
@@ -1540,6 +1633,11 @@ function openEdit(rows) {
   );
   nodes.drawer.setAttribute("aria-hidden", "false");
   nodes.drawer.inert = false;
+  if (sequence) {
+    nodes.drawer.querySelector(".drawer-body").scrollTop = 0;
+    syncEditDraft();
+    if (switching) editSequenceView.animate();
+  }
   // 等一帧：抽屉用 visibility 过渡，切换当帧直接 focus 有概率落空
   const focusTarget = ui.byId("edit-title");
   if (focusTarget) requestAnimationFrame(() => { if (isCurrentEdit(revision)) focusTarget.focus(); });
@@ -1548,14 +1646,62 @@ function openEdit(rows) {
 /** Review handoff carries the complete, immutable selection scope. */
 export function editSelection(rows) { openEdit(rows); }
 
-function closeEdit({ restoreFocus = true } = {}) {
+/** The session owns a separate order: successful writes may remove global selection members. */
+export function editSelectionSequence(rows) {
+  if (!Array.isArray(rows)) return;
+  const seen = new Set();
+  const snapshot = rows.filter(row => Number.isSafeInteger(Number(row?.id)) && Number(row.id) > 0 && !seen.has(Number(row.id)) && seen.add(Number(row.id))).map(row => ({ ...row, id: Number(row.id) }));
+  if (!snapshot.length) return;
+  requestEditChange(() => {
+    const sequence = { rows: snapshot, index: 0, states: new Map() };
+    openEditNow([snapshot[0]], { sequence });
+  }, { protect: true });
+}
+
+function navigateEditSequence(index) {
+  const sequence = editSequence;
+  if (!sequence || !Number.isInteger(index) || index < 0 || index >= sequence.rows.length || index === sequence.index) return;
+  requestEditChange(() => {
+    if (editSequence !== sequence) return;
+    sequence.index = index;
+    openEditNow([sequence.rows[index]], { sequence, preserveTrigger: true });
+  });
+}
+
+function skipEditSequence() {
+  const sequence = editSequence;
+  if (!sequence) return;
+  requestEditChange(() => {
+    if (editSequence !== sequence) return;
+    const id = sequence.rows[sequence.index].id;
+    if (!["saved", "unchanged"].includes(sequence.states.get(id)?.status)) sequence.states.set(id, { status: "skipped" });
+    resetEditDraft(); syncEditDraft();
+  });
+}
+
+function recordEditSequence(status, revision) {
+  if (!editSequence || !isCurrentEdit(revision)) return;
+  editSequence.states.set(editSequence.rows[editSequence.index].id, { status });
+  syncEditDraft();
+}
+
+function closeEdit({ restoreFocus = true, force = false } = {}) {
+  if (force) { closeEditNow({ restoreFocus }); return; }
+  requestEditChange(() => closeEditNow({ restoreFocus }));
+}
+
+function closeEditNow({ restoreFocus = true } = {}) {
   if (!state.edit.open) return;
   editRevision += 1;
+  editLeavePrompt?.cancel();
+  ui.byId("edit-preview-dialog")?.close();
   editDetailRequest?.abort();
   editLyricsRequest?.abort();
   editDetailRequest = editLyricsRequest = null;
   state.edit.open = false;
   state.edit.busy = false;
+  editSequence = null;
+  editSequenceView.hide();
   nodes.drawer.dataset.open = "false";
   // 先把焦点移出即将隐藏的抽屉；列表刷新后原触发按钮可能已经不在文档中。
   if (restoreFocus) {
@@ -1584,7 +1730,7 @@ function collectFields() {
 }
 
 async function runPreview() {
-  if (state.edit.busy || !state.edit.open || editUnavailable) return;
+  if (state.edit.busy || !state.edit.open || editUnavailable || editLeavePrompt || !canEditWorkspace()) return;
   const revision = editRevision;
   const ids = state.edit.rows.map((row) => Number(row.id)).filter(Boolean);
   if (!ids.length) return;
@@ -1606,11 +1752,12 @@ async function runPreview() {
     if (!isCurrentEdit(revision)) return;
     ui.clear(nodes.drawerResult);
     if (Number(preview.index_missing_total) > 0) {
+      recordEditSequence("error", revision);
       const sameSelection = ids.length === state.selection.size && ids.every((id) => state.selection.has(id));
       nodes.drawerResult.append(ui.notice("warn", `本次编辑范围有 ${ui.fmtNum(preview.index_missing_total)} 首不在曲库索引。这不表示磁盘文件已删除。${sameSelection ? "请先核对已选范围，再预览变更。" : "请刷新曲库，重新打开对应曲目后再编辑。"}`));
       if (sameSelection) nodes.drawerResult.append(ui.el("button", { id: "edit-review-selection", type: "button", class: "btn btn-sm", text: "审阅已选并核对索引", onClick: () => {
         if (ids.length !== state.selection.size || !ids.every((id) => state.selection.has(id))) { ui.toast("warn", "选择范围已变化", "请刷新曲库，重新打开对应曲目后再编辑。"); return; }
-        closeEdit(); emit("library:review-selection");
+        requestEditChange(() => { closeEditNow(); emit("library:review-selection"); });
       } }));
       return;
     }
@@ -1642,6 +1789,7 @@ async function runPreview() {
       ]),
     );
     const answer = await ui.openDialog({
+      id: "edit-preview-dialog",
       title: `变更预览（${ids.length} 首）`,
       subtitle: "旧值红色、新值绿色；确认后才会写入音频标签",
       body,
@@ -1651,7 +1799,7 @@ async function runPreview() {
       ],
     });
     if (!isCurrentEdit(revision)) return;
-    if (noChanges) return;
+    if (noChanges) { recordEditSequence("unchanged", revision); return; }
     if (answer !== "apply") {
       nodes.drawerResult.append(ui.notice("info", "已取消，未写入任何文件。"));
       return;
@@ -1659,6 +1807,7 @@ async function runPreview() {
     await applyChanges(ids, fields, normalize, overwrite, revision);
   } catch (err) {
     if (!isCurrentEdit(revision)) return;
+    recordEditSequence("error", revision);
     ui.clear(nodes.drawerResult);
     nodes.drawerResult.append(ui.notice("err", `预览失败：${err.message}`));
     ui.toast("err", "预览失败", err.message);
@@ -1676,8 +1825,23 @@ async function applyChanges(ids, fields, normalize, overwrite, revision) {
   nodes.drawerResult.append(ui.loadingLine("正在写入标签…"));
   try {
     const result = await api.applyTracks({ ids, fields, normalize_artist: normalize, overwrite });
+    // A queue completion marker needs a matching per-track outcome, not merely
+    // an HTTP success or an aggregate count. An unknown result remains reviewable.
+    if (editSequence && isCurrentEdit(revision)) {
+      const outcomes = Array.isArray(result?.items) ? result.items : null;
+      const failures = Array.isArray(result?.failed) ? result.failed : null;
+      if (!outcomes || !failures || outcomes.length + failures.length !== 1 ||
+          [...outcomes, ...failures].some(item => Number(item?.track_id) !== ids[0]) ||
+          outcomes.some(item => typeof item.file_changed !== "boolean" || !Array.isArray(item.written))) {
+        throw new Error("写入结果无法核对。请先重新载入资料并核对文件，再决定是否重试；本次未标记为已写入。");
+      }
+    }
     const failed = result.failed || [];
     const unchanged = Number(result.skipped) || 0;
+    if (editSequence && isCurrentEdit(revision)) {
+      const outcome = Array.isArray(result.items) ? result.items.find(item => Number(item.track_id) === ids[0]) : null;
+      recordEditSequence(failed.length || typeof outcome?.file_changed !== "boolean" ? "error" : outcome.file_changed ? "saved" : "unchanged", revision);
+    }
     if (isCurrentEdit(revision)) {
       ui.clear(nodes.drawerResult);
       nodes.drawerResult.append(
@@ -1738,6 +1902,7 @@ async function applyChanges(ids, fields, normalize, overwrite, revision) {
     await refresh();
   } catch (err) {
     if (isCurrentEdit(revision)) {
+      recordEditSequence("error", revision);
       ui.clear(nodes.drawerResult);
       nodes.drawerResult.append(ui.notice("err", `写入失败：${err.message}`));
     }
