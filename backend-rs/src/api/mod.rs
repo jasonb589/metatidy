@@ -30,6 +30,7 @@ use crate::repo;
 use crate::AppState;
 
 mod albums;
+mod audio;
 mod duplicates;
 mod folders;
 mod moves;
@@ -830,6 +831,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tracks/apply", post(tracks::apply))
         .route("/api/tracks/:track_id", get(tracks::detail))
         .route("/api/tracks/:track_id/cover", get(tracks::cover))
+        .route("/api/tracks/:track_id/audio", get(audio::serve).head(audio::serve))
         // 读文件里现有的歌词：编辑元数据面板打开时载入用
         .route("/api/tracks/:track_id/lyrics", get(tracks::lyrics))
         .route("/api/search", post(scrape::search))

@@ -21,6 +21,7 @@ import { initKeyboardHelp } from "./keyboard-help.js";
 import { openSelectionReview } from "./selection-review.js";
 import { openDuplicateReview, invalidateDuplicateReview } from "./duplicate-review.js";
 import { openFolderBrowser } from "./folder-browser.js";
+import { initAudioPlayer } from "./audio-player.js";
 
 const TABS = ["tracks", "albums", "artist-portraits", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -62,6 +63,7 @@ function boot() {
   settings.init();
   theme.init();
   auth.init();
+  initAudioPlayer();
   // 命令面板（Ctrl/⌘+K）：纯新增组件，别的模块通过 palette:* 事件响应
   palette.initPalette();
   initKeyboardHelp();

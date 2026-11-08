@@ -50,6 +50,8 @@ export function append(node, children) {
  * 视觉重量和 12.5px 的按钮文字相当，不会喧宾夺主。
  */
 const ICON_PATHS = {
+  play: "M5 2.8v10.4l8-5.2z",
+  pause: "M5 3v10M11 3v10",
   folder: "M2.5 4.5h4l1.5 1.5h5.5v6.5h-11zM2.5 4.5V3h4l1.5 1.5h5.5V6",
   scan: "M3 7V4.5A1.5 1.5 0 0 1 4.5 3H7M9 3h2.5A1.5 1.5 0 0 1 13 4.5V7M13 9v2.5a1.5 1.5 0 0 1-1.5 1.5H9M7 13H4.5A1.5 1.5 0 0 1 3 11.5V9",
   refresh: "M13 3v3.5H9.5M3 13V9.5h3.5M13 6.5A5 5 0 0 0 4.2 5.4M3 9.5a5 5 0 0 0 8.8 1.1",

@@ -82,6 +82,7 @@ export function init() {
   if (btn) {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
+      window.dispatchEvent(new CustomEvent("metatidy:logout"));
       try {
         await api.logout();
       } catch {

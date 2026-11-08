@@ -4,6 +4,7 @@
  */
 import { api, coverUrl } from "./api.js";
 import * as ui from "./ui.js";
+import { playTrack } from "./audio-player.js";
 
 const TAG_FIELDS = ["artist", "album", "albumartist", "genre", "year", "track", "disc", "language", "albumtype"];
 const EXTRA_FIELDS = ["composer", "lyricist", "copyright", "comment", "mb_artist_id", "release_group_id"];
@@ -77,7 +78,15 @@ export function openTrackDetails(row, { rows = [], onEdit = () => {}, onScrape =
   const album = ui.el("p", { class: "ti-album" });
   const facts = ui.el("div", { class: "ti-facts" });
   const badges = ui.el("div", { class: "ti-statuses" });
-  const intro = ui.el("div", { class: "ti-intro" }, [title, artist, album, facts, badges]);
+  const playButton = ui.el("button", {
+    id: "track-inspector-play", type: "button", class: "btn ti-audio-action", text: "试听这首歌",
+    onClick: () => {
+      if (closed || !current) return;
+      const selected = { ...current }, rows = collection.map(item => Number(item.id) === Number(current.id) ? selected : { ...item });
+      close(); playTrack(selected, { rows });
+    },
+  });
+  const intro = ui.el("div", { class: "ti-intro" }, [title, artist, album, facts, badges, playButton]);
 
   const loadStatus = ui.el("p", { id: "track-inspector-status", class: "ti-load-status hint", role: "status" });
   const retryButton = ui.el("button", {

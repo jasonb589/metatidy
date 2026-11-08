@@ -43,6 +43,7 @@ from tests.album_detail_acceptance import check_album_detail  # noqa: E402
 from tests.portraits_acceptance import check_portraits  # noqa: E402
 from tests.duplicates_acceptance import check_duplicates  # noqa: E402
 from tests.folders_acceptance import check_empty_folders, check_folders  # noqa: E402
+from tests.audio_acceptance import check_audio  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -443,6 +444,10 @@ def main() -> int:
                   requests.get(f"{auth_base}/api/folders", timeout=20).status_code == 401
                   and requests.get(f"{auth_base}/api/folders", params={"folder": "../outside"}, timeout=20).status_code == 401
                   and requests.get(f"{auth_base}/api/tracks", params={"folder": str(music)}, timeout=20).status_code == 401)
+            check("试听GET与HEAD均受登录保护，非法ID和Range也先返回401",
+                  all(requests.request(method, f"{auth_base}/api/tracks/{identifier}/audio",
+                                       headers={"Range": "bytes=0-1"}, timeout=20).status_code == 401
+                      for method in ("GET", "HEAD") for identifier in (1, "invalid")))
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -518,6 +523,8 @@ def main() -> int:
         check_duplicates(BASE, music, check)
         print("\n=== 18. 目录浏览、面包屑与精确曲目范围 ===")
         check_folders(BASE, music, check)
+        print("\n=== 19. 索引音频试听、分段读取与路径边界 ===")
+        check_audio(BASE, music, check)
     finally:
         proc.terminate()
         try:

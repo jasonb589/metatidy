@@ -15,6 +15,16 @@ const staticRoot = fileURLToPath(new URL('../app/static/', import.meta.url));
 const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.split('=')[1] || 8765);
 const empty = process.argv.includes('--empty');
 const authRequired = process.argv.includes('--auth');
+// A quiet, generated PCM WAV keeps media acceptance independent of real music/codecs.
+const audioFixture = (() => {
+  const rate = 8000, frames = rate * 12, bytes = Buffer.alloc(44 + frames * 2);
+  bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
+  bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(rate, 24); bytes.writeUInt32LE(rate * 2, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34);
+  bytes.write('data', 36); bytes.writeUInt32LE(frames * 2, 40);
+  for (let index = 0; index < frames; index++) bytes.writeInt16LE(Math.round(200 * Math.sin(index * 2 * Math.PI * 220 / rate)), 44 + index * 2);
+  return bytes;
+})();
 const now = Math.floor(Date.now() / 1000);
 const sourceLabels = [
   ['musicbrainz', 'MusicBrainz'], ['netease', '网易云音乐'], ['qq', 'QQ音乐'],
@@ -556,6 +566,22 @@ async function handleApi(req, res, url) {
     const page = Math.min(pages, Math.max(1, Number(url.searchParams.get('page')) || 1));
     return json(res, { total: filtered.length, page, page_size: pageSize, pages, items: filtered.slice((page - 1) * pageSize, page * pageSize) });
   }
+  const audioMatch = route.match(/^\/api\/tracks\/(\d+)\/audio$/);
+  if (audioMatch) {
+    if (!tracks.some(track => track.id === Number(audioMatch[1]))) return json(res, { detail: '没有这条测试曲目' }, 404);
+    const headers = { 'Content-Type': 'audio/wav', 'Accept-Ranges': 'bytes', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' };
+    if (method === 'HEAD') { res.writeHead(200, { ...headers, 'Content-Length': audioFixture.length }); return res.end(); }
+    let start = 0, end = audioFixture.length - 1, code = 200;
+    if (req.headers.range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);
+      if (!match || (!match[1] && !match[2])) { res.writeHead(416, { ...headers, 'Content-Range': `bytes */${audioFixture.length}` }); return res.end(); }
+      if (!match[1]) start = Math.max(0, audioFixture.length - Number(match[2]));
+      else { start = Number(match[1]); if (match[2]) end = Math.min(end, Number(match[2])); }
+      if (start > end || start >= audioFixture.length || (!match[1] && Number(match[2]) <= 0)) { res.writeHead(416, { ...headers, 'Content-Range': `bytes */${audioFixture.length}` }); return res.end(); }
+      code = 206; headers['Content-Range'] = `bytes ${start}-${end}/${audioFixture.length}`;
+    }
+    res.writeHead(code, { ...headers, 'Content-Length': end - start + 1 }); return res.end(audioFixture.subarray(start, end + 1));
+  }
   const trackMatch = route.match(/^\/api\/tracks\/(\d+)(?:\/(cover|lyrics))?$/);
   if (trackMatch) {
     const track = tracks.find(t => t.id === Number(trackMatch[1]));
@@ -731,5 +757,5 @@ const server = createServer(async (req, res) => {
 });
 server.listen(port, '127.0.0.1', () => {
   console.log(`Metatidy UI FIXTURE: http://127.0.0.1:${port}/ (${tracks.length} example tracks${authRequired ? '; test password: fixture' : ''})`);
-  console.log('Development only. No real audio, database, external requests or filesystem mutations.');
+  console.log('Development only. Generated WAV only; no real music, database, external requests or filesystem mutations.');
 });

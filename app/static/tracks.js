@@ -13,6 +13,7 @@ import { openTrackDetails } from "./track-inspector.js";
 import { initSavedFilters } from "./saved-filters.js";
 import { showKeyboardHelp } from "./keyboard-help.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
+import { playTrack } from "./audio-player.js";
 import {
   state,
   emit,
@@ -65,6 +66,7 @@ let editUnavailable = false;
 let lyricsTouched = false;
 let savedFilters = null;
 let cancelPendingSearch = () => {};
+let audioState = { id: null, status: "stopped" };
 
 export function init() {
   nodes = {
@@ -121,6 +123,10 @@ export function init() {
     dlAlbumtypes: ui.byId("dl-albumtypes"),
   };
   initLibraryViews();
+  window.addEventListener("metatidy:audio-state", event => {
+    audioState = event.detail || { id: null, status: "stopped" };
+    syncAudioControls();
+  });
 
   const debouncedSearch = ui.debounce(() => {
     state.tracks.q = nodes.q.value.trim();
@@ -298,6 +304,8 @@ export function init() {
   });
 
   nodes.tbody.addEventListener("click", (event) => {
+    const listen = event.target.closest("button[data-play-id]");
+    if (listen) { listenToTrack(listen.dataset.playId); return; }
     const detail = event.target.closest("button[data-detail-id]");
     if (detail) {
       inspectTrack(detail.dataset.detailId, detail);
@@ -417,6 +425,8 @@ function initLibraryViews() {
   nodes.grid = ui.el("ul", { id: "tracks-grid", class: "tracks-grid", "aria-label": "曲目封面卡片", hidden: true });
   nodes.tableWrap.after(nodes.gridControls, nodes.grid);
   nodes.grid.addEventListener("click", (event) => {
+    const listen = event.target.closest("button[data-play-id]");
+    if (listen) { listenToTrack(listen.dataset.playId); return; }
     const button = event.target.closest("button[data-edit-id], button[data-scrape-id], button[data-detail-id]");
     if (!button) return;
     if (button.dataset.detailId) {
@@ -432,6 +442,43 @@ function initLibraryViews() {
       location.hash = "#scrape";
     }
   });
+}
+
+function listenToTrack(id) {
+  const row = state.tracks.items.find(item => String(item.id) === String(id));
+  if (row) playTrack(row, { rows: [...state.tracks.items] });
+}
+
+function playButton(row, { cover = false, reveal = true } = {}) {
+  const title = row.title || row.filename || "未命名曲目";
+  return ui.el("button", {
+    type: "button", class: cover ? "track-listen-cover" : "track-card-play",
+    dataset: { playId: String(row.id), trackTitle: title }, title: `播放 ${title}`,
+    "aria-label": `播放 ${title}`, "aria-pressed": "false",
+  }, [
+    cover ? ui.coverThumb(row, { size: 48, reveal }) : null,
+    ui.el("span", { class: "track-play-glyph", "aria-hidden": "true" }, [ui.icon("play", { size: cover ? 13 : 18 })]),
+  ]);
+}
+
+function syncAudioControls() {
+  for (const host of [nodes.tbody, nodes.grid]) {
+    for (const button of host.querySelectorAll("button[data-play-id]")) {
+      const current = Number(button.dataset.playId) === audioState.id;
+      const active = current && ["playing", "loading"].includes(audioState.status);
+      const action = active ? "暂停" : current && audioState.status === "error" ? "重试播放" : "播放";
+      button.setAttribute("aria-pressed", String(active));
+      button.setAttribute("aria-label", `${action} ${button.dataset.trackTitle}`);
+      button.title = `${action} ${button.dataset.trackTitle}`;
+      button.dataset.audioState = current ? audioState.status : "stopped";
+      const glyph = active ? "pause" : "play";
+      if (button.dataset.glyph !== glyph) {
+        button.dataset.glyph = glyph;
+        button.querySelector(".track-play-glyph").replaceChildren(ui.icon(glyph, { size: button.classList.contains("track-listen-cover") ? 13 : 18 }));
+      }
+      button.closest("tr[data-id], .track-card[data-id]").dataset.audioState = current ? audioState.status : "stopped";
+    }
+  }
 }
 
 function inspectTrack(id, trigger) {
@@ -703,7 +750,7 @@ function wireTableKeys() {
     if (state.tab !== "tracks" || state.edit.open || event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || hasOverlayAboveEditor()) return;
     if (activeRow && (!activeRow.isConnected || !rows().includes(activeRow))) activeRow = null;
     const target = event.target;
-    if (target?.closest?.("#jobs-pop")) return;
+    if (target?.closest?.("#jobs-pop, #audio-player")) return;
     const focusedCard = target?.closest?.(".track-card[data-id]");
     if (focusedCard && target === focusedCard) activeRow = focusedCard;
     const tag = (target && target.tagName) || "";
@@ -952,7 +999,8 @@ function renderCollection({ animate = true } = {}) {
   const focused = document.activeElement;
   const oldRow = focused?.closest("tr[data-id], .track-card[data-id]");
   const action = focused?.matches('input[type="checkbox"]') ? 'input[type="checkbox"]'
-    : focused?.matches("button[data-edit-id]") ? "button[data-edit-id]"
+    : focused?.matches("button[data-play-id]") ? "button[data-play-id]"
+      : focused?.matches("button[data-edit-id]") ? "button[data-edit-id]"
       : focused?.matches("button[data-scrape-id]") ? "button[data-scrape-id]"
         : focused?.matches("button[data-detail-id]") ? "button[data-detail-id]" : null;
   if (state.tracks.view === "cards") {
@@ -963,6 +1011,7 @@ function renderCollection({ animate = true } = {}) {
     renderTable({ animate });
   }
   syncPageCheckbox();
+  syncAudioControls();
   ui.setText(nodes.total, `共 ${ui.fmtNum(state.tracks.total)} 首`);
   if (state.tracks.loadedAt) ui.setText(nodes.updated, `列表更新于 ${ui.fmtTime(state.tracks.loadedAt / 1000)}`);
   // 后台更新后仍能继续 Tab/空格操作当前曲目，不让焦点掉回页面顶部。
@@ -1020,6 +1069,7 @@ function renderCards({ animate = true } = {}) {
       ui.el("div", { class: "track-card-top" }, [
         art,
         ui.el("label", { class: "track-card-select", title: `选择 ${title}` }, [checkbox]),
+        playButton(row),
         !row.has_lyrics ? ui.el("span", { class: "card-missing-lyrics", text: "待补歌词" }) : null,
       ]),
       ui.el("div", { class: "track-card-body" }, [
@@ -1083,7 +1133,7 @@ function renderTable({ animate = true } = {}) {
 
     tr.append(
       ui.el("td", { class: "col-check" }, [checkbox]),
-      ui.el("td", {}, [ui.coverThumb(row, { size: 48, reveal: animate })]),
+      ui.el("td", {}, [playButton(row, { cover: true, reveal: animate })]),
       ui.el("td", {}, [
         ui.el("button", {
           type: "button", class: "truncate cell-title track-title-button", dataset: { detailId: String(row.id) },

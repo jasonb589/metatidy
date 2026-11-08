@@ -76,6 +76,21 @@
 .track-card-meta { display: flex; gap: 7px; align-items: center; min-height: 20px; margin-top: 7px; font-size: 9px; font-variant-numeric: tabular-nums; color: var(--fg-3); }
 .track-card-actions { display: flex; gap: 5px; justify-content: space-between; align-items: center; border-top: 1px solid var(--line); margin-top: 9px; padding-top: 9px; }
 .track-card-actions .btn { min-height: 30px; height: 30px; padding-inline: 8px; font-size: 10px; gap: 5px; }
+
+/* A visible play control on artwork keeps editing and selection independent. */
+.track-listen-cover { position: relative; display: inline-flex; vertical-align: middle; border: 0; border-radius: 7px; padding: 0; color: var(--fg); background: transparent; cursor: pointer; }
+.track-play-glyph { display: grid; place-items: center; pointer-events: none; }
+.track-listen-cover .track-play-glyph { position: absolute; right: -1px; bottom: -1px; width: 21px; height: 21px; border-radius: 50%; border: 1px solid var(--line-2); background: var(--bg-1); color: var(--accent-2); box-shadow: var(--e1); transition: background-color 160ms, color 160ms, transform 160ms; }
+.track-listen-cover:hover .track-play-glyph, .track-listen-cover[aria-pressed="true"] .track-play-glyph { background: var(--accent); color: var(--bg-1); border-color: var(--accent); }
+.track-listen-cover:focus-visible { outline-offset: 3px; }
+.track-card-play { position: absolute; z-index: 1; top: 10px; right: 10px; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--line-2); border-radius: 50%; background: var(--glass); color: var(--accent-2); box-shadow: var(--e1); cursor: pointer; transition: transform 160ms, background-color 160ms, color 160ms, box-shadow 160ms; }
+.track-card-play:hover, .track-card-play[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--bg-1); box-shadow: var(--glow); }
+.track-card-play:hover { transform: translateY(-2px); }
+.track-card-play:active { transform: scale(.94); }
+.track-card[data-audio-state="playing"], .track-card[data-audio-state="loading"] { border-color: var(--accent-line); box-shadow: var(--e2); }
+#tracks-table tr[data-audio-state="playing"] .cell-title, #tracks-table tr[data-audio-state="loading"] .cell-title { color: var(--accent-2); }
+.library-card[data-library-density="compact"] .track-listen-cover .track-play-glyph { width: 18px; height: 18px; }
+.library-card[data-library-density="compact"] .track-listen-cover .track-play-glyph svg { width: 11px; height: 11px; }
 .card-enter { animation: library-card-in 260ms var(--ease-out) both; }
 .card-skeleton { pointer-events: none; }
 .card-skeleton .track-card-art { background: var(--bg-2); }
@@ -110,6 +125,7 @@
   .track-card-actions { gap: 2px; }
   .track-card-actions .btn { padding-inline: 6px; gap: 3px; }
   .track-card-select { width: 28px; height: 28px; top: 7px; left: 7px; }
+  .track-card-play { top: 7px; right: 7px; width: 32px; height: 32px; }
   .library-card[data-library-density="compact"] #tracks-table tbody tr { grid-template-columns: 30px 35px minmax(0,1fr) 34px; padding-block: 5px; }
   .library-card[data-library-density="compact"] #tracks-table tbody td { height: auto; padding: 0; }
   .library-card[data-library-density="compact"] #tracks-table .cell-mobile-meta { margin-top: 1px; }
@@ -122,6 +138,7 @@
   .track-card-art.is-placeholder > span { font-size: 9px; letter-spacing: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .library-segment button, .track-card { transition: none; }
+  .library-segment button, .track-card, .track-card-play, .track-listen-cover .track-play-glyph { transition: none; }
+  .track-card-play:hover, .track-card-play:active { transform: none; }
   .card-enter { animation: none; }
 }
