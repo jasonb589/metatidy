@@ -1201,6 +1201,8 @@ try {
         } else {
           await page.locator('#tab-albums').focus();
           await page.keyboard.press('ArrowDown');
+          assert.equal(await page.locator('#tab-collections').getAttribute('aria-selected'), 'true');
+          await page.keyboard.press('ArrowDown');
           assert.equal(await page.locator('#tab-artist-portraits').getAttribute('aria-selected'), 'true');
           await page.keyboard.press('ArrowDown');
           assert.equal(await page.locator('#tab-scrape').getAttribute('aria-selected'), 'true');
