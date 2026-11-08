@@ -665,12 +665,13 @@ try {
 
   await check('Last.fm source links accept both exact CDN hosts and reject lookalike domains', () => withPage(async ({ page, model }) => {
     let sourceImage = '';
+    let sourcePage = '';
     const externalRequests = [];
     page.on('request', request => {
       const url = new URL(request.url());
       if (url.hostname.includes('fastly')) externalRequests.push(url.href);
     });
-    model.handlers['/api/artist-portraits/fetch'] = ({ route, body }) => route.fulfill({ json: { portrait: { ...portraitFor(body.artist), source_image: sourceImage }, cached: true } });
+    model.handlers['/api/artist-portraits/fetch'] = ({ route, body }) => route.fulfill({ json: { portrait: { ...portraitFor(body.artist), source_image: sourceImage, ...(sourcePage ? { source_page: sourcePage } : {}) }, cached: true } });
     await ready(page);
     for (const host of ['lastfm.freetls.fastly.net', 'lastfm-img.freetls.fastly.net']) {
       sourceImage = `https://${host}/i/u/770x0/0123456789abcdef0123456789abcdef.jpg`;
@@ -684,6 +685,12 @@ try {
       assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源图片' }).count(), 0);
       assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源页面' }).count(), 1);
     }
+    sourcePage = 'https://www.last.fm/music/%E5%91%A8%E6%9D%B0%E5%80%AB';
+    sourceImage = 'https://lastfm-img.freetls.fastly.net/i/u/770x0/0123456789abcdef0123456789abcdef.jpg';
+    await source(page, '周杰伦');
+    assert.equal(await page.locator('#portraits-preview h3').innerText(), '周杰伦');
+    assert.equal(await page.locator('#portraits-preview a').filter({ hasText: '来源页面' }).getAttribute('href'), sourcePage, 'Canonical Last.fm spelling can differ from the requested artist without losing the source link');
+    assert.equal(await page.locator('#portraits-preview a').count(), 2);
     assert.deepEqual(externalRequests, [], 'Displaying source links must not fetch either CDN');
     assert.match(await page.locator('#portraits-image-url').getAttribute('placeholder'), /Last.fm 图片链接/);
   }));

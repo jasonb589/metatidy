@@ -3,6 +3,8 @@
 //! Only an artist's ordinary page and the explicitly allowlisted image CDN are
 //! used. There is no API-key handling, image-gallery crawling, cookie jar,
 //! browser impersonation, automatic redirect following, or automatic retry.
+//! At most two validated, same-site artist-page alias redirects are followed
+//! manually through that same gate. Image redirects remain blocked.
 //! Every outgoing request shares one process-wide gate. Its small state file
 //! preserves pacing, consecutive failures and cooldowns across restarts.
 
@@ -17,7 +19,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use image::{ImageFormat, ImageReader, Limits};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, RETRY_AFTER};
 use reqwest::{Response, Url};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -34,6 +36,8 @@ const FAILURE_COOLDOWN: u64 = 15 * 60;
 const MAX_HTML_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_GATE_BYTES: u64 = 16 * 1024;
+const MAX_PAGE_REDIRECTS: usize = 2;
+const MAX_PAGE_URL_BYTES: usize = 4096;
 const PLACEHOLDER_HASH: &str = "2a96cbd8b46e442fc41c2b86b821562f";
 
 static IMAGE_PATH: Lazy<Regex> = Lazy::new(|| {
@@ -454,7 +458,7 @@ impl LastfmPortraitClient {
         artist: String,
         source_page: Url,
     ) -> Result<FetchedPortrait, ProviderError> {
-        let response = self.request(&source_page, false).await?;
+        let (response, source_page) = self.page_request(source_page).await?;
         if !matches!(
             content_type(&response).as_str(),
             "text/html" | "application/xhtml+xml"
@@ -476,6 +480,40 @@ impl LastfmPortraitClient {
         }
         let image = main_image(&html)?;
         self.fetch_image_inner(artist, source_page, image).await
+    }
+
+    /// Last.fm can redirect an alias (including simplified Chinese) to its
+    /// canonical artist name. Validate every Location before another request;
+    /// never delegate redirects to the HTTP client or bypass the shared gate.
+    async fn page_request(&self, mut source: Url) -> Result<(Response, Url), ProviderError> {
+        let mut visited = BTreeSet::from([source.as_str().to_owned()]);
+        for redirects in 0..=MAX_PAGE_REDIRECTS {
+            let response = self.request(&source, false).await?;
+            if !response.status().is_redirection() {
+                return Ok((response, source));
+            }
+            if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+                return Err(redirect_error("Last.fm 返回了不支持的主页跳转状态，未继续请求。"));
+            }
+            let mut locations = response.headers().get_all(LOCATION).iter();
+            let location = locations.next().and_then(|value| value.to_str().ok());
+            if location.is_none() || locations.next().is_some() {
+                return Err(redirect_error("Last.fm 主页跳转缺少唯一有效的目标地址，未继续请求。"));
+            }
+            let next = page_redirect(&source, location.unwrap())?;
+            if visited.contains(next.as_str()) {
+                return Err(redirect_error("Last.fm 主页跳转形成循环，已停止请求。"));
+            }
+            if redirects == MAX_PAGE_REDIRECTS {
+                return Err(redirect_error("Last.fm 主页跳转超过两次，已停止请求。"));
+            }
+            visited.insert(next.as_str().to_owned());
+            // Do not download a redirect response body. Each next request still
+            // reserves its own interval and checks persistent cooldown state.
+            drop(response);
+            source = next;
+        }
+        unreachable!("the bounded redirect loop returns on its last iteration")
     }
 
     async fn fetch_image_inner(
@@ -565,10 +603,13 @@ impl LastfmPortraitClient {
             return Err(error);
         }
         if status.is_redirection() {
-            return Err(ProviderError::new(
-                "redirect_blocked",
-                "Last.fm 返回重定向；为限制请求范围，未跟随跳转。可手动提供头像图片链接。",
-            ));
+            if image {
+                return Err(redirect_error(
+                    "Last.fm 图片返回重定向；为限制请求范围，未跟随跳转。可手动提供头像原图链接。",
+                ));
+            }
+            // Only page_request may follow, after validating this Location.
+            return Ok(response);
         }
         if status.as_u16() == 404 {
             return Err(ProviderError::new(
@@ -692,6 +733,94 @@ fn artist_page(input: &str) -> Result<(String, Url), ProviderError> {
     let page = Url::parse(&format!("https://www.last.fm/music/{encoded}"))
         .map_err(|_| ProviderError::new("invalid_artist", "无法构造 Last.fm 歌手主页地址。"))?;
     Ok((artist.to_owned(), page))
+}
+
+fn redirect_error(message: &str) -> ProviderError {
+    ProviderError::new("redirect_blocked", message)
+}
+
+fn page_redirect(current: &Url, location: &str) -> Result<Url, ProviderError> {
+    let invalid = || {
+        redirect_error(
+            "Last.fm 主页跳转不属于受支持的同站 HTTPS 歌手主页，未继续请求。可手动提供头像图片链接。",
+        )
+    };
+    if location.is_empty()
+        || location.len() > MAX_PAGE_URL_BYTES
+        || location.contains(['\\', '?', '#'])
+        || location
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(invalid());
+    }
+    // Check the raw path before URL parsing can normalize dot segments or
+    // backslashes into a different route. Scheme-relative and path-relative
+    // locations are deliberately outside the observed artist-alias contract.
+    let raw_path = if location.starts_with('/') {
+        location
+    } else {
+        let (scheme, rest) = location.split_once("://").ok_or_else(invalid)?;
+        if !scheme.eq_ignore_ascii_case("https") {
+            return Err(invalid());
+        }
+        let (authority, path) = rest.split_once('/').ok_or_else(invalid)?;
+        if !matches!(
+            authority.to_ascii_lowercase().as_str(),
+            "www.last.fm" | "last.fm" | "www.last.fm:443" | "last.fm:443"
+        ) {
+            return Err(invalid());
+        }
+        // Use the original slice, including '/', without reconstructing or
+        // decoding an authority that might contain escaped authentication.
+        &rest[authority.len()..authority.len() + path.len() + 1]
+    };
+    let encoded_artist = raw_path.strip_prefix("/music/").ok_or_else(invalid)?;
+    if encoded_artist.is_empty() || encoded_artist.contains('/') {
+        return Err(invalid());
+    }
+    let artist = decode_path_segment(encoded_artist).ok_or_else(invalid)?;
+    if artist.trim().is_empty()
+        || artist.chars().count() > 200
+        || matches!(artist.as_str(), "." | "..")
+        || artist.contains(['/', '\\', '%', '?', '#'])
+        || artist.chars().any(char::is_control)
+    {
+        return Err(invalid());
+    }
+    let next = current.join(location).map_err(|_| invalid())?;
+    if next.scheme() != "https"
+        || !matches!(next.host_str(), Some("www.last.fm" | "last.fm"))
+        || next.port_or_known_default() != Some(443)
+        || !next.username().is_empty()
+        || next.password().is_some()
+        || next.query().is_some()
+        || next.fragment().is_some()
+        || next.path() != raw_path
+    {
+        return Err(invalid());
+    }
+    Ok(next)
+}
+
+/// Decode exactly once. Rejecting any remaining '%' above prevents nested
+/// encodings from becoming separators or dot paths in another upstream layer.
+fn decode_path_segment(value: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == b'%' {
+            let high = (*bytes.get(offset + 1)? as char).to_digit(16)?;
+            let low = (*bytes.get(offset + 2)? as char).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+            offset += 3;
+        } else {
+            decoded.push(bytes[offset]);
+            offset += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 fn image_url(input: &str) -> Result<Url, ProviderError> {
@@ -925,6 +1054,11 @@ mod tests {
     <meta property="og:image:width"     content="1200" data-replaceable-head-tag>
     <meta property="og:image:height"    content="630" data-replaceable-head-tag>
     </head><body></body></html>"#;
+    // Observed 301 for simplified 周杰伦; Last.fm canonicalizes to 周杰倫.
+    const JAY_ALIAS_PATH: &str = "/music/%E5%91%A8%E6%9D%B0%E4%BC%A6";
+    const JAY_CANONICAL_PATH: &str = "/music/%E5%91%A8%E6%9D%B0%E5%80%AB";
+    const JAY_IMAGE: &str =
+        "https://lastfm-img.freetls.fastly.net/i/u/ar0/8bcfaa4dc297488bc8591a7356dae130.jpg";
 
     struct TestDirectory(PathBuf);
     impl TestDirectory {
@@ -966,6 +1100,12 @@ mod tests {
                 ..Self::html("")
             }
         }
+        fn redirect(status: u16, location: &str) -> Self {
+            Self {
+                headers: vec![("Location", location.to_owned())],
+                ..Self::status(status)
+            }
+        }
         fn png() -> Self {
             Self {
                 mime: "image/png",
@@ -985,15 +1125,18 @@ mod tests {
     struct MockServer {
         base: Url,
         requests: Arc<Mutex<Vec<String>>>,
+        request_times: Arc<Mutex<Vec<Instant>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
     struct MockState {
         requests: Arc<Mutex<Vec<String>>>,
+        request_times: Arc<Mutex<Vec<Instant>>>,
         replies: Mutex<VecDeque<Reply>>,
     }
 
     async fn mock_reply(State(state): State<Arc<MockState>>, request: Request) -> MockResponse {
+        state.request_times.lock().unwrap().push(Instant::now());
         let mut recorded = format!("{} {} HTTP/1.1\r\n", request.method(), request.uri());
         for (name, value) in request.headers() {
             recorded.push_str(name.as_str());
@@ -1048,8 +1191,10 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
             let requests = Arc::new(Mutex::new(Vec::new()));
+            let request_times = Arc::new(Mutex::new(Vec::new()));
             let state = Arc::new(MockState {
                 requests: requests.clone(),
+                request_times: request_times.clone(),
                 replies: Mutex::new(replies.into()),
             });
             let router = Router::new().fallback(mock_reply).with_state(state);
@@ -1059,6 +1204,7 @@ mod tests {
             Self {
                 base,
                 requests,
+                request_times,
                 task,
             }
         }
@@ -1208,6 +1354,41 @@ mod tests {
     }
 
     #[test]
+    fn alias_locations_only_accept_exact_same_site_artist_pages() {
+        let current = artist_page("周杰伦").unwrap().1;
+        for location in [
+            JAY_CANONICAL_PATH.to_owned(),
+            format!("https://www.last.fm{JAY_CANONICAL_PATH}"),
+            format!("https://last.fm{JAY_CANONICAL_PATH}"),
+            format!("https://last.fm:443{JAY_CANONICAL_PATH}"),
+            "/music/Some%20Artist".to_owned(),
+            "/music/Artist+Name".to_owned(),
+        ] {
+            assert!(page_redirect(&current, &location).is_ok(), "{location}");
+        }
+        for location in [
+            "", "Artist", "../music/Artist", "//www.last.fm/music/Artist",
+            "http://www.last.fm/music/Artist", "https://www.last.fm:444/music/Artist",
+            "https://www.last.fm.evil.test/music/Artist", "https://evil.test/music/Artist",
+            "https://user@www.last.fm/music/Artist", "https://@www.last.fm/music/Artist",
+            "https://%77ww.last.fm/music/Artist", "https://www.last.fm./music/Artist",
+            "https://www.last.fm/music/Artist?redirect=elsewhere", "/music/Artist?", "/music/Artist#",
+            "https://www.last.fm\\music/Artist", "/music/Artist\\other", "/music/Artist\r\n",
+            "/music/Artist Name", "/music/", "/music//Artist", "/music/Artist/",
+            "/music/Artist/+images", "/login", "/cdn-cgi/challenge-platform", "/music/Artist/+challenge",
+            IMAGE, JAY_IMAGE, "/music/../music/Artist", "/music/./Artist", "/music/.", "/music/..",
+            "/music/%2e", "/music/%2E%2E", "/music/%2e%2e/Artist", "/music/Artist%2F+images",
+            "/music/%2Flogin", "/music/Artist%5Cother", "/music/Artist%0D%0A", "/music/%00",
+            "/music/%252e%252e", "/music/%252Flogin", "/music/Artist%3Fq=1", "/music/Artist%23frag",
+            "/music/%", "/music/%2", "/music/%GG", "/music/%FF", "/music/%20",
+        ] {
+            assert_eq!(page_redirect(&current, location).unwrap_err().code, "redirect_blocked", "{location}");
+        }
+        assert!(page_redirect(&current, &format!("/music/{}", "a".repeat(MAX_PAGE_URL_BYTES))).is_err());
+        assert!(page_redirect(&current, &format!("/music/{}", "a".repeat(201))).is_err());
+    }
+
+    #[test]
     fn observed_artist_metadata_supports_new_cdn_and_preserves_placeholder_detection() {
         assert_eq!(main_image(ERKE_HEAD).unwrap().as_str(), ERKE_IMAGE);
         let placeholder = ERKE_IMAGE.replace("58a46edad6d325e9b4034258587509a9", PLACEHOLDER_HASH);
@@ -1299,6 +1480,145 @@ mod tests {
         assert!(
             requests[1].starts_with("GET /i/u/ar0/58a46edad6d325e9b4034258587509a9.jpg HTTP/1.1")
         );
+    }
+
+    #[tokio::test]
+    async fn observed_jay_alias_keeps_requested_artist_and_records_canonical_page() {
+        let directory = TestDirectory::new();
+        let server = MockServer::new(vec![
+            Reply::redirect(301, JAY_CANONICAL_PATH),
+            Reply::html(html(JAY_IMAGE)),
+            Reply::jpeg(),
+        ]).await;
+        let mut client = test_client(&directory, &server);
+        // One real pacing regression covers both the redirect hop and its image.
+        client.interval = MIN_INTERVAL;
+        let portrait = client.fetch_artist("周杰伦").await.unwrap();
+        assert_eq!(portrait.artist, "周杰伦");
+        assert_eq!(portrait.source_page, format!("https://www.last.fm{JAY_CANONICAL_PATH}"));
+        assert_eq!(portrait.source_image, JAY_IMAGE);
+        assert_eq!(portrait.bytes, jpeg());
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with(&format!("GET {JAY_ALIAS_PATH} HTTP/1.1")));
+        assert!(requests[1].starts_with(&format!("GET {JAY_CANONICAL_PATH} HTTP/1.1")));
+        assert!(requests[2].starts_with("GET /i/u/ar0/8bcfaa4dc297488bc8591a7356dae130.jpg HTTP/1.1"));
+        assert!(requests.iter().all(|request| request.contains(USER_AGENT)));
+        assert!(!requests.iter().any(|request| request.to_ascii_lowercase().contains("cookie:")));
+        let times = server.request_times.lock().unwrap();
+        for pair in times.windows(2) {
+            // Server receipt has a small local scheduling difference from the
+            // persisted client send gate; a bypass would be nearly immediate.
+            assert!(pair[1].duration_since(pair[0]) >= MIN_INTERVAL - Duration::from_millis(100));
+        }
+    }
+
+    #[tokio::test]
+    async fn absolute_alias_redirects_support_two_hops_and_keep_every_page_bounded() {
+        for status in [301, 302, 303, 307, 308] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(vec![
+                Reply::redirect(status, "https://last.fm:443/music/Intermediate"),
+                Reply::redirect(status, "https://www.last.fm/music/Canonical"),
+                Reply::html(html(IMAGE)),
+                Reply::png(),
+            ]).await;
+            let client = test_client(&directory, &server);
+            let portrait = client.fetch_artist("Alias").await.unwrap();
+            assert_eq!(portrait.artist, "Alias");
+            assert_eq!(portrait.source_page, "https://www.last.fm/music/Canonical");
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 4);
+            assert!(requests[1].starts_with("GET /music/Intermediate HTTP/1.1"));
+            assert!(requests[2].starts_with("GET /music/Canonical HTTP/1.1"));
+        }
+        let directory = TestDirectory::new();
+        let mut oversized = Reply::html("x".repeat(MAX_HTML_BYTES + 1));
+        oversized.chunked = true;
+        let server = MockServer::new(vec![Reply::redirect(301, "/music/Canonical"), oversized]).await;
+        let client = test_client(&directory, &server);
+        assert_eq!(client.fetch_artist("Alias").await.unwrap_err().code, "response_too_large");
+        assert_eq!(server.count(), 2);
+    }
+
+    #[tokio::test]
+    async fn unsafe_missing_looping_and_excessive_redirects_never_send_an_extra_request() {
+        for location in [
+            "http://www.last.fm/music/Artist", "https://evil.test/music/Artist",
+            "https://user@www.last.fm/music/Artist", "/music/Artist/+images", "/login",
+            "/cdn-cgi/challenge-platform", "/music/%252Flogin", "/music/%2E%2E/Artist", JAY_IMAGE,
+        ] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(vec![Reply::redirect(302, location), Reply::html(html(IMAGE))]).await;
+            let client = test_client(&directory, &server);
+            assert_eq!(client.fetch_artist("Alias").await.unwrap_err().code, "redirect_blocked", "{location}");
+            assert_eq!(server.count(), 1, "{location}");
+        }
+        for replies in [
+            vec![Reply::status(301)],
+            vec![Reply::redirect(300, "/music/Canonical")],
+            vec![Reply::redirect(304, "/music/Canonical")],
+        ] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(replies).await;
+            let client = test_client(&directory, &server);
+            assert_eq!(client.fetch_artist("Alias").await.unwrap_err().code, "redirect_blocked");
+            assert_eq!(server.count(), 1);
+        }
+        for (replies, count, expected_message) in [
+            (vec![Reply::redirect(301, "/music/Alias")], 1, "循环"),
+            (vec![Reply::redirect(301, "/music/Other"), Reply::redirect(301, "/music/Alias")], 2, "循环"),
+            (vec![Reply::redirect(301, "/music/First"), Reply::redirect(301, "/music/Second"), Reply::redirect(301, "/music/Third")], 3, "超过两次"),
+        ] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(replies).await;
+            let client = test_client(&directory, &server);
+            let error = client.fetch_artist("Alias").await.unwrap_err();
+            assert_eq!(error.code, "redirect_blocked");
+            assert!(error.message.contains(expected_message));
+            assert_eq!(server.count(), count);
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_page_forbidden_rate_limit_and_challenge_keep_persistent_cooldowns() {
+        let mut limited = Reply::status(429);
+        limited.headers.push(("Retry-After", "120".to_owned()));
+        for (reply, code, minimum_wait) in [
+            (Reply::status(403), "forbidden", 3500),
+            (limited, "rate_limited", 115),
+            (Reply::html("<html><head><title>Just a moment...</title></head><body>verify you are human</body></html>"), "challenge", 3500),
+        ] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(vec![Reply::redirect(301, "/music/Canonical"), reply, Reply::png()]).await;
+            let client = test_client(&directory, &server);
+            let error = client.fetch_artist("Alias").await.unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(error.retry_after_seconds.unwrap() >= minimum_wait);
+            assert_eq!(server.count(), 2);
+            let restarted = test_client(&directory, &server);
+            assert_eq!(restarted.fetch_artist("Alias").await.unwrap_err().code, "cooldown");
+            assert_eq!(server.count(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn image_redirects_remain_blocked_even_to_allowlisted_page_or_image_hosts() {
+        for destination in [IMAGE, JAY_IMAGE, "https://www.last.fm/music/Canonical"] {
+            let directory = TestDirectory::new();
+            let server = MockServer::new(vec![Reply::redirect(301, destination), Reply::png()]).await;
+            let client = test_client(&directory, &server);
+            assert_eq!(client.fetch_image("Alias", IMAGE).await.unwrap_err().code, "redirect_blocked");
+            assert_eq!(server.count(), 1);
+        }
+        let directory = TestDirectory::new();
+        let server = MockServer::new(vec![
+            Reply::redirect(301, "/music/Canonical"), Reply::html(html(IMAGE)),
+            Reply::redirect(301, JAY_IMAGE), Reply::jpeg(),
+        ]).await;
+        let client = test_client(&directory, &server);
+        assert_eq!(client.fetch_artist("Alias").await.unwrap_err().code, "redirect_blocked");
+        assert_eq!(server.count(), 3);
     }
 
     #[tokio::test]

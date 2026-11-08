@@ -41,6 +41,7 @@ from tests.jobs_acceptance import check_jobs  # noqa: E402
 from tests.selection_acceptance import check_selection  # noqa: E402
 from tests.album_detail_acceptance import check_album_detail  # noqa: E402
 from tests.portraits_acceptance import check_portraits  # noqa: E402
+from tests.duplicates_acceptance import check_duplicates  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -432,6 +433,10 @@ def main() -> int:
             check("未登录不能读取专辑详情或准备整张选择（401）",
                   requests.get(f"{auth_base}/api/albums/detail", timeout=20).status_code == 401
                   and requests.post(f"{auth_base}/api/albums/selection", json={}, timeout=20).status_code == 401)
+            check("未登录不能浏览疑似重复、读取比较详情或逐首确认（401）",
+                  requests.get(f"{auth_base}/api/duplicates", timeout=20).status_code == 401
+                  and requests.get(f"{auth_base}/api/duplicates/detail", timeout=20).status_code == 401
+                  and requests.post(f"{auth_base}/api/duplicates/selection", json={}, timeout=20).status_code == 401)
             anon_write = requests.post(f"{auth_base}/api/scan", json={"fast": True}, timeout=20)
             check("未登录连扫描都发不出去（401）", anon_write.status_code == 401,
                   f"HTTP {anon_write.status_code}")
@@ -503,6 +508,8 @@ def main() -> int:
         portrait_port = PORT + 3
         portrait_argv = [token.replace(str(PORT), str(portrait_port)) for token in argv]
         check_portraits(REPO, WORK, music, portrait_argv, env, portrait_port, check)
+        print("\n=== 17. 疑似重复只读比较与逐首确认 ===")
+        check_duplicates(BASE, music, check)
     finally:
         proc.terminate()
         try:

@@ -60,6 +60,9 @@ const tracks = empty ? [] : fixtureRows.map((row, index) => {
     copyright: '', comment: 'UI 测试样本；未连接真实音乐文件', mb_artist_id: '', release_group_id: '',
   };
 });
+if (!empty && process.argv.includes('--duplicates')) {
+  tracks.push(...tracks.slice(0, 6).map((row, index) => ({ ...row, id: 1001 + index, ext: 'mp3', size: 9500000 + index * 80000, album: `${row.album} · 精选`, path: `/fixture-music/精选/${row.artist}/${row.title}.mp3`, filename: `${row.title}.mp3`, duration: row.duration + index * 2, has_cover: 0 })));
+}
 let values = {
   dir_template: '{language?}/{artist}/{album}', filename_template: '{track:02} - {title}',
   conflict_policy: 'rename', unknown_artist: '未知艺术家', unknown_album: '未知专辑', unknown_other: '未知',
@@ -391,6 +394,37 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
+  if (route === '/api/duplicates' || route === '/api/duplicates/detail' || route === '/api/duplicates/selection') {
+    const groups = new Map();
+    for (const row of tracks) {
+      if (!row.tags_loaded || row.path_derived || !albumText(row.artist) || !albumText(row.title)) continue;
+      const group = [albumText(row.artist).toLowerCase(), albumText(row.title).toLowerCase()], key = JSON.stringify(group);
+      if (!groups.has(key)) groups.set(key, { group, artist: row.artist, title: row.title, rows: [] });
+      groups.get(key).rows.push(row);
+    }
+    const candidates = [...groups.values()].filter(item => item.rows.length >= 2).sort((a, b) => JSON.stringify(a.group).localeCompare(JSON.stringify(b.group)));
+    if (route === '/api/duplicates') {
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      const items = candidates.filter(item => `${item.artist} ${item.title}`.toLowerCase().includes(q)).map(({ group, artist, title, rows }) => ({ group, artist, title, track_count: rows.length }));
+      const size = Math.max(1, Math.min(50, Number(url.searchParams.get('page_size')) || 20)), pages = Math.ceil(items.length / size), page = Math.max(1, Math.min(pages || 1, Number(url.searchParams.get('page')) || 1));
+      return json(res, { items: items.slice((page - 1) * size, page * size), total: items.length, pages, page, page_size: size });
+    }
+    const key = JSON.stringify(route.endsWith('/selection') ? payload.group : JSON.parse(url.searchParams.get('group') || 'null'));
+    const found = candidates.find(item => JSON.stringify(item.group) === key);
+    const suppliedRevision = route.endsWith('/selection') ? payload.revision : url.searchParams.get('revision');
+    if (!found) throw fixtureError('分组不存在或成员已经变化', suppliedRevision ? 409 : 404);
+    const rows = [...found.rows].sort((a, b) => a.id - b.id), revision = createHash('md5').update(JSON.stringify(rows)).digest('hex');
+    if (suppliedRevision && suppliedRevision !== revision) throw fixtureError('分组资料已变化，请刷新核对', 409);
+    if (route.endsWith('/selection')) {
+      const track = rows.find(item => item.id === payload.track_id);
+      if (!suppliedRevision || !track) throw fixtureError('选择的曲目不属于当前分组版本', 409);
+      return json(res, { group: found.group, revision, total: rows.length, track, selected_at: Date.now() / 1000 });
+    }
+    const size = Math.max(1, Math.min(100, Number(url.searchParams.get('page_size')) || 50)), pages = Math.ceil(rows.length / size), wanted = Number(url.searchParams.get('page')) || 1, page = Math.max(1, Math.min(pages, wanted));
+    if (wanted > 1 && !suppliedRevision) throw fixtureError('翻页需要当前分组版本', 422);
+    const durations = rows.map(row => row.duration).filter(value => Number.isFinite(value) && value > 0);
+    return json(res, { group: found.group, revision, total: rows.length, pages, page, page_size: size, items: rows.slice((page - 1) * size, page * size), summary: { bytes: rows.reduce((sum, row) => sum + row.size, 0), duration_min: durations.length ? Math.min(...durations) : null, duration_max: durations.length ? Math.max(...durations) : null, formats: [...new Set(rows.map(row => row.ext.toLowerCase()))].sort(), missing_cover: rows.filter(row => !row.has_cover).length, missing_lyrics: rows.filter(row => !row.has_lyrics).length } });
+  }
   if (route === '/api/artists') {
     const grouped = new Map();
     for (const row of tracks) {

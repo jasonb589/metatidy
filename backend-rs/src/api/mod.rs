@@ -30,6 +30,7 @@ use crate::repo;
 use crate::AppState;
 
 mod albums;
+mod duplicates;
 mod moves;
 mod portraits;
 mod scrape;
@@ -818,6 +819,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/albums", get(albums::list_albums))
         .route("/api/albums/detail", get(albums::detail))
         .route("/api/albums/selection", post(albums::selection))
+        .route("/api/duplicates", get(duplicates::list))
+        .route("/api/duplicates/detail", get(duplicates::detail))
+        .route("/api/duplicates/selection", post(duplicates::selection))
         .route("/api/tracks/preview", post(tracks::preview))
         .route("/api/tracks/apply", post(tracks::apply))
         .route("/api/tracks/:track_id", get(tracks::detail))

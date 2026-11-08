@@ -19,6 +19,7 @@
 <link rel="stylesheet" href="./jobs-center.css">
 <link rel="stylesheet" href="./selection-review.css">
 <link rel="stylesheet" href="./album-detail.css">
+<link rel="stylesheet" href="./duplicate-review.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -165,6 +166,7 @@
         <span class="badge count-chip" id="tracks-total">—</span>
         <div class="grow">
           <span class="hint" id="tracks-updated"></span>
+          <button class="btn btn-sm" id="btn-duplicates" type="button">疑似重复</button>
           <button class="btn btn-sm btn-ghost" id="btn-tracks-reload" title="刷新列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg><span>刷新</span></button>
           <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
         </div>

@@ -70,6 +70,12 @@ const STATIC_COMMANDS = [
     run: () => emit("library:review-selection"),
   },
   {
+    title: "核对疑似重复曲目",
+    hint: "曲库工具",
+    ico: "copy",
+    run: () => emit("library:review-duplicates"),
+  },
+  {
     title: "打开任务面板",
     hint: "任务",
     ico: "jobs",

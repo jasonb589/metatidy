@@ -16,6 +16,7 @@ mod config;
 mod cover_cache;
 mod cover_images;
 mod db;
+mod duplicates;
 mod error;
 mod jobs;
 mod lastfm_portraits;

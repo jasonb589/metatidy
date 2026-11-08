@@ -19,6 +19,7 @@ import { renderJobs, parseResult } from "./jobs-panel.js";
 import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOverview } from "./jobs-history.js";
 import { initKeyboardHelp } from "./keyboard-help.js";
 import { openSelectionReview } from "./selection-review.js";
+import { openDuplicateReview, invalidateDuplicateReview } from "./duplicate-review.js";
 
 const TABS = ["tracks", "albums", "artist-portraits", "scrape", "move", "settings"];
 const PAGE_COPY = {
@@ -94,6 +95,13 @@ function boot() {
     closeJobs();
     openSelectionReview({ onAction: (action, scope) => void handoffSelection(action, scope) });
   });
+  const showDuplicates = () => {
+    if (!canUseWorkspace() || document.querySelector("dialog[open]")) return;
+    closeJobs();
+    openDuplicateReview();
+  };
+  on("library:review-duplicates", showDuplicates);
+  ui.byId("btn-duplicates")?.addEventListener("click", showDuplicates);
   on("library:batch-scrape", (scope) => {
     if (!canUseWorkspace() || !state.selection.size) return;
     activateTab("scrape", { focus: false }).then(() => {
@@ -248,6 +256,7 @@ function wireLibraryUpdates() {
 }
 
 function invalidateAlbums() {
+  invalidateDuplicateReview();
   albums.invalidate();
   pendingAlbumsRefresh = true;
   scheduleAlbumsRefresh();

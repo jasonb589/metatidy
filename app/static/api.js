@@ -120,6 +120,9 @@ export const api = {
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs(params)}`),
+  duplicateGroups: (params, options = {}) => request(`${API}/duplicates?${qs(params)}`, options),
+  duplicateDetail: (params, options = {}) => request(`${API}/duplicates/detail?${qs(params)}`, options),
+  duplicateSelection: (payload, options = {}) => request(`${API}/duplicates/selection`, { ...options, method: "POST", body: payload }),
   albumDetail: (params, options = {}) => request(`${API}/albums/detail?${qs(params)}`, options),
   albumSelection: (payload, options = {}) => request(`${API}/albums/selection`, { ...options, method: "POST", body: payload }),
   trackSelection: (payload, options = {}) => request(`${API}/tracks/selection`, { ...options, method: "POST", body: payload }),
