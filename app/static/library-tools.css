@@ -34,13 +34,22 @@
 .selection-summary { display: flex; flex-direction: column; flex: none; padding-right: 8px; }
 .selection-summary strong { font-size: 12px; font-weight: 600; color: var(--accent-2); }
 .selection-summary > span { color: var(--fg-3); font-size: 10px; }
-body:has(#selection-bar:not([hidden])) .workspace-footer { padding-bottom: 100px; }
+.selection-tracks, .selection-more-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+body:has(#selection-bar:not([hidden])) .app-content { padding-bottom: calc(var(--selection-bar-height, 65px) + 24px); }
+body:has(#selection-bar:not([hidden])) .workspace-footer { padding-bottom: 20px; }
+html:has(#selection-bar:not([hidden])), html:has(.audio-player:not([hidden])) { scroll-padding-bottom: calc(var(--audio-player-height, 0px) + var(--selection-bar-height, 0px) + 28px); }
+body:has(#selection-bar:not([hidden])) .table-wrap.scroll { scroll-padding-bottom: calc(var(--audio-player-height, 0px) + var(--selection-bar-height, 0px) + 28px); }
 @media (max-width: 1100px) { #selection-bar .selection-track { display: none; } }
-@media (max-width: 700px) {
-  #selection-bar { bottom: max(12px, env(safe-area-inset-bottom)); width: min(440px, calc(100vw - 24px)); gap: 8px; }
-  #selection-bar .selection-summary { flex: 1 1 100%; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 10px; padding: 0; }
+@media (max-width: 700px), (max-width: 1000px) and (max-height: 500px) {
+  #selection-bar { bottom: max(8px, env(safe-area-inset-bottom)); width: min(440px, calc(100vw - 16px)); max-width: calc(100vw - 16px); gap: 6px; padding: 8px 10px; border-radius: 11px; }
+  #selection-bar .selection-summary { flex: 1 1 0; gap: 0; padding: 0; min-width: 0; }
+  #selection-bar .selection-summary strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #selection-bar .selection-summary > span { display: none; }
+  #selection-bar .selection-tracks { display: none; }
   #selection-bar > .spacer { display: none; }
-  #selection-bar > .btn { flex: 1 1 auto; padding-inline: 8px; }
+  #selection-bar > .btn { flex: none; height: 34px; padding-inline: 10px; font-size: 11px; }
+  #selection-bar .selection-more-actions { flex: 1 1 100%; flex-wrap: wrap; justify-content: space-between; padding-top: 7px; margin-top: 2px; border-top: 1px solid var(--line); gap: 5px; }
+  #selection-bar .selection-more-actions .btn { flex: 1; min-width: 0; font-size: 11px; padding-inline: 6px; }
   .keyboard-shortcuts { gap: 13px 14px; }
   .keyboard-shortcuts dd { font-size: 11px; }
 }

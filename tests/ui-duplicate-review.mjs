@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealLibraryTools } from './ui-library-controls.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url)), require = createRequire(import.meta.url);
 let playwright;
 for (const value of [process.env.PLAYWRIGHT_MODULE, 'playwright', path.join(path.dirname(path.dirname(process.execPath)), 'node_modules/playwright')].filter(Boolean)) { try { playwright = require(value); break; } catch {} }
@@ -54,7 +55,7 @@ async function withPage(action, options = {}) {
     await action({ page, context, model }); assert.deepEqual(errors, []); assert.equal(writes(model.calls).length, 0, 'Duplicate review must not mutate music');
   } finally { await context.close(); }
 }
-async function open(page, expected = 2) { await page.locator('#btn-duplicates').click(); await page.waitForFunction(expected => document.querySelectorAll('.dr-group').length === expected && document.querySelector('#duplicate-review-groups')?.getAttribute('aria-busy') === 'false', expected); }
+async function open(page, expected = 2) { await revealLibraryTools(page); await page.locator('#btn-duplicates').click(); await page.waitForFunction(expected => document.querySelectorAll('.dr-group').length === expected && document.querySelector('#duplicate-review-groups')?.getAttribute('aria-busy') === 'false', expected); }
 async function choose(page, index = 0, expected = 3) { await page.locator('.dr-group').nth(index).click(); await page.waitForFunction(expected => document.querySelectorAll('.dr-file').length === expected && document.querySelector('#duplicate-review-files')?.getAttribute('aria-busy') === 'false', expected); }
 async function noOverflow(page) { assert.equal(await page.locator('#duplicate-review-dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1 && node.getBoundingClientRect().right <= innerWidth + 1 && node.getBoundingClientRect().bottom <= innerHeight + 1), true); }
 

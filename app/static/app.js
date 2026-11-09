@@ -7,6 +7,7 @@ import { api, ApiError } from "./api.js";
 import * as ui from "./ui.js";
 import { state, on, selectionRevision } from "./store.js";
 import * as tracks from "./tracks.js";
+import { init as initLibraryLayout } from "./library-layout.js";
 import * as albums from "./albums.js";
 import * as collections from "./collections.js";
 import * as artistPortraits from "./artist-portraits.js";
@@ -58,6 +59,7 @@ function boot() {
   if (booted) return;
   booted = true;
   tracks.init();
+  initLibraryLayout();
   albums.init();
   collections.init();
   artistPortraits.init();

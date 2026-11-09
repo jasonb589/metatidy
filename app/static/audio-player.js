@@ -4,6 +4,8 @@ import * as ui from "./ui.js";
 
 let nodes = null, current = null, queue = [], session = null, status = "stopped", opener = null;
 let volume = .8, muted = false, accessBlocked = false;
+const compactScreen = window.matchMedia("(max-width: 700px), (max-width: 1000px) and (max-height: 500px)");
+let expanded = false;
 const validRow = row => Number.isSafeInteger(Number(row?.id)) && Number(row.id) > 0;
 const titleOf = row => String(row?.title || row?.filename || "未命名曲目");
 const artistOf = row => String(row?.artist || "未知艺术家");
@@ -19,7 +21,7 @@ const ICONS = {
   previous: "M3 3v10M12.5 3.5L5.5 8l7 4.5z", next: "M13 3v10M3.5 3.5l7 4.5-7 4.5z",
   volume: "M2 6h3l3-3v10l-3-3H2zM10.5 5.5a4 4 0 0 1 0 5M12.5 3.5a7 7 0 0 1 0 9",
   mute: "M2 6h3l3-3v10l-3-3H2zM11 6l3 4M14 6l-3 4",
-  queue: "M3 4h10M3 8h10M3 12h6", close: "M4 4l8 8M12 4l-8 8", music: "M6 12a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM8 10V3l5 1M13 9a2 2 0 1 1-2 2M13 4v7",
+  queue: "M3 4h10M3 8h10M3 12h6", expand: "M4 10l4-4 4 4", close: "M4 4l8 8M12 4l-8 8", music: "M6 12a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM8 10V3l5 1M13 9a2 2 0 1 1-2 2M13 4v7",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -63,6 +65,8 @@ export function initAudioPlayer() {
   volumeInput.addEventListener("input", () => { volume = Math.min(1, Math.max(0, Number(volumeInput.value) / 100)); if (volume > 0) muted = false; if (session) { session.audio.volume = volume; session.audio.muted = muted; } updateVolume(); });
   const queueButton = button("audio-player-queue-toggle", "查看当前页播放列表", "queue", () => setQueueOpen(nodes.queuePanel.hidden));
   queueButton.setAttribute("aria-expanded", "false"); queueButton.setAttribute("aria-controls", "audio-player-queue");
+  const expand = button("audio-player-expand", "展开进度与音量", "expand", () => setExpanded(!expanded), "ap-expand");
+  expand.setAttribute("aria-controls", "audio-player-progress audio-player-volume-controls audio-player-previous audio-player-next");
   const close = button("audio-player-close", "关闭播放器并停止播放", "close", () => stopAudioPlayer({ restoreFocus: true }), "ap-close");
   const queueList = ui.el("ol", { id: "audio-player-queue-list", class: "ap-queue-list" });
   const queueCount = ui.el("span", { id: "audio-player-queue-count", class: "ap-queue-count" });
@@ -70,30 +74,57 @@ export function initAudioPlayer() {
     ui.el("div", { class: "ap-queue-head" }, [ui.el("div", {}, [ui.el("h2", { id: "audio-player-queue-heading", text: "当前页播放列表" }), queueCount]), button("audio-player-queue-close", "收起播放列表", "close", () => setQueueOpen(false))]),
     queueList, ui.el("p", { class: "ap-queue-note", text: "点击曲目试听；播完当前曲目后停止。" }),
   ]);
+  const progress = ui.el("div", { id: "audio-player-progress", class: "ap-progress" }, [elapsed, seek, duration]);
+  const volumeControls = ui.el("div", { id: "audio-player-volume-controls", class: "ap-volume" }, [mute, volumeInput]);
   const bar = ui.el("div", { class: "ap-bar" }, [
     ui.el("div", { class: "ap-track" }, [artwork, ui.el("div", { class: "ap-track-copy" }, [title, artist, state])]),
     ui.el("div", { class: "ap-transport" }, [previous, toggle, next]),
-    ui.el("div", { class: "ap-progress" }, [elapsed, seek, duration]),
-    ui.el("div", { class: "ap-utilities" }, [ui.el("div", { class: "ap-volume" }, [mute, volumeInput]), queueButton, close]),
+    progress,
+    ui.el("div", { class: "ap-utilities" }, [volumeControls, queueButton, expand, close]),
   ]);
   host.append(queuePanel, bar);
-  nodes = { host, bar, artwork, title, artist, status: state, toggle, previous, next, elapsed, duration, seek, mute, volume: volumeInput, queueButton, queuePanel, queueList, queueCount, close };
+  nodes = { host, bar, artwork, title, artist, status: state, toggle, previous, next, elapsed, duration, seek, mute, volume: volumeInput, progress, volumeControls, expand, queueButton, queuePanel, queueList, queueCount, close };
   document.body.append(host);
   const measure = () => {
-    if (!host.hidden) document.body.style.setProperty("--audio-player-height", `${Math.ceil(bar.getBoundingClientRect().height) + 24}px`);
+    if (!host.hidden) document.documentElement.style.setProperty("--audio-player-height", `${Math.ceil(bar.offsetHeight + parseFloat(getComputedStyle(host).bottom))}px`);
   };
+  nodes.measure = measure;
   new ResizeObserver(measure).observe(bar);
+  window.addEventListener("resize", measure);
+  compactScreen.addEventListener("change", () => { expanded = false; applyCompactLayout(); measure(); });
   const lock = () => { accessBlocked = true; stopAudioPlayer(); };
   window.addEventListener("metatidy:unauthorized", lock);
   window.addEventListener("metatidy:logout", lock);
   window.addEventListener("metatidy:authenticated", () => { accessBlocked = false; });
   window.addEventListener("pagehide", () => stopAudioPlayer());
   host.addEventListener("keydown", event => {
-    if (event.key === "Escape" && !queuePanel.hidden) { event.preventDefault(); event.stopPropagation(); setQueueOpen(false); }
+    if (event.defaultPrevented || event.key !== "Escape" || document.querySelector("dialog[open]")) return;
+    if (!queuePanel.hidden) { event.preventDefault(); event.stopPropagation(); setQueueOpen(false); }
+    else if (compactScreen.matches && expanded) { event.preventDefault(); event.stopPropagation(); setExpanded(false); }
   });
   document.addEventListener("pointerdown", event => { if (!queuePanel.hidden && !host.contains(event.target)) setQueueOpen(false, false); });
   document.addEventListener("focusin", event => { if (!queuePanel.hidden && !host.contains(event.target)) setQueueOpen(false, false); });
-  updateVolume(); updateControls();
+  applyCompactLayout(); updateVolume(); updateControls();
+}
+
+function applyCompactLayout() {
+  if (!nodes) return;
+  const compact = compactScreen.matches, hide = compact && !expanded;
+  const extras = [nodes.progress, nodes.volumeControls, nodes.previous, nodes.next];
+  if (compact) nodes.expand.hidden = false;
+  if (hide && extras.some(node => node.contains(document.activeElement))) nodes.expand.focus({ preventScroll: true });
+  if (!compact && document.activeElement === nodes.expand) nodes.toggle.focus({ preventScroll: true });
+  nodes.host.dataset.compact = String(compact); nodes.host.dataset.expanded = String(compact && expanded);
+  nodes.expand.hidden = !compact;
+  nodes.expand.setAttribute("aria-expanded", String(compact && expanded));
+  const label = expanded ? "收起进度与音量" : "展开进度与音量";
+  nodes.expand.setAttribute("aria-label", label); nodes.expand.title = label;
+  for (const node of extras) node.hidden = hide;
+  nodes.measure?.();
+}
+function setExpanded(open) {
+  expanded = Boolean(open); applyCompactLayout();
+  if (open) setQueueOpen(false, false);
 }
 
 /** A repeated click toggles the same song without losing its position. */
@@ -115,6 +146,7 @@ export function playTrack(row, { rows = [] } = {}) {
   current = { ...row, id: Number(row.id) };
   nodes.host.hidden = false; document.body.classList.add("audio-player-open");
   renderTrack(true); renderQueue();
+  nodes.measure();
   startSource();
 }
 
@@ -124,10 +156,10 @@ export function stopAudioPlayer({ restoreFocus = false } = {}) {
   const trackId = current?.id;
   clearSession(); current = null; queue = [];
   if (!nodes) return;
-  setQueueOpen(false, false); nodes.host.hidden = true;
+  setQueueOpen(false, false); expanded = false; applyCompactLayout(); nodes.host.hidden = true;
   nodes.artwork.replaceChildren(); nodes.title.textContent = nodes.artist.textContent = "";
   nodes.queueList.replaceChildren();
-  document.body.classList.remove("audio-player-open"); document.body.style.removeProperty("--audio-player-height");
+  document.body.classList.remove("audio-player-open"); document.documentElement.style.removeProperty("--audio-player-height");
   announce("stopped", ""); updateProgress();
   if (shouldRestore) {
     const candidates = [opener, ...document.querySelectorAll(`button[data-play-id="${trackId}"]`), document.querySelector('#app-sidebar [aria-selected="true"]'), document.querySelector('#main')];

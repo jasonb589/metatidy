@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealLibraryTools } from './ui-library-controls.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.join(root, '.codex/ui-preview');
@@ -230,7 +231,7 @@ try {
 
   await check('Selection opens the metadata drawer; preview never writes before confirmation', async () => {
     await page.locator('#tracks-tbody input[type="checkbox"]').first().check();
-    await page.locator('#btn-edit-selected').click();
+    await revealLibraryTools(page); await page.locator('#btn-edit-selected').click();
     assert.equal(await page.locator('#edit-drawer').getAttribute('aria-hidden'), 'false');
     await page.locator('#edit-title').fill('UI acceptance preview');
     await page.locator('#btn-edit-preview').click();
@@ -244,7 +245,7 @@ try {
   });
 
   await check('Escape dismisses the frontmost preview before the metadata drawer', async () => {
-    await page.locator('#btn-edit-selected').click();
+    await revealLibraryTools(page); await page.locator('#btn-edit-selected').click();
     await page.locator('#edit-title').fill('Escape layer verification');
     await page.locator('#btn-edit-preview').click();
     await page.locator('dialog.modal[open]').waitFor();

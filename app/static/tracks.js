@@ -72,6 +72,7 @@ let editSequence = null;
 let editSequenceView = null;
 let editLeavePrompt = null;
 let editAccessBlocked = false;
+let selectionControls = null;
 
 export function init() {
   nodes = {
@@ -1219,46 +1220,73 @@ function syncPageCheckbox() {
 }
 
 function renderSelectionBar() {
-  const focusedAction = nodes.selectionBar.contains(document.activeElement) ? document.activeElement.id : "";
   const wasHidden = nodes.selectionBar.hidden;
-  ui.clear(nodes.selectionBar);
   const count = selectionCount();
   nodes.editSelected.disabled = count === 0;
+  if (!selectionControls) {
+    const screen = window.matchMedia("(max-width: 700px), (max-width: 1000px) and (max-height: 500px)");
+    const total = ui.el("strong"), note = ui.el("span"), chips = ui.el("div", { class: "selection-tracks" });
+    const review = ui.el("button", { type: "button", id: "selection-review", class: "btn btn-sm", text: "审阅已选", onClick: () => emit("library:review-selection") });
+    const extra = ui.el("div", { id: "selection-more-actions", class: "selection-more-actions" }, [
+      ui.el("button", { type: "button", id: "selection-edit", class: "btn btn-sm btn-primary", text: "编辑已选", onClick: () => openEdit(selectionRows()) }),
+      ui.el("button", { type: "button", id: "selection-scrape", class: "btn btn-sm", text: "批量刮削", onClick: () => emit("library:batch-scrape") }),
+      ui.el("button", { type: "button", id: "selection-clear", class: "btn btn-sm btn-ghost", text: "清空选择", onClick: () => {
+        clearSelection();
+        const pageCheck = state.tracks.view === "cards" ? nodes.checkGridPage : nodes.checkPage;
+        (pageCheck.disabled || !pageCheck.getClientRects().length ? nodes.q : pageCheck).focus({ preventScroll: true });
+      } }),
+    ]);
+    const more = ui.el("button", { type: "button", id: "selection-more-toggle", class: "btn btn-sm btn-ghost", text: "更多", "aria-controls": "selection-more-actions", "aria-expanded": "false", onClick: () => setMore(!selectionControls.expanded) });
+    function setMore(open, restore = true) {
+      selectionControls.expanded = Boolean(open);
+      const hide = screen.matches && !open;
+      if (screen.matches) more.hidden = false;
+      if (hide && restore && extra.contains(document.activeElement)) more.focus({ preventScroll: true });
+      if (!screen.matches && document.activeElement === more) review.focus({ preventScroll: true });
+      more.hidden = !screen.matches; more.setAttribute("aria-expanded", String(screen.matches && open));
+      more.textContent = open ? "收起" : "更多"; extra.hidden = hide;
+      nodes.selectionBar.dataset.expanded = String(screen.matches && open);
+      selectionControls.measure?.();
+    }
+    nodes.selectionBar.append(ui.el("div", { class: "selection-summary", role: "status", "aria-live": "polite" }, [total, note]), chips, ui.el("div", { class: "spacer" }), review, more, extra);
+    selectionControls = { total, note, chips, more, extra, expanded: false, setMore };
+    screen.addEventListener("change", () => setMore(false));
+    nodes.selectionBar.addEventListener("keydown", event => {
+      if (event.defaultPrevented || event.key !== "Escape" || !screen.matches || !selectionControls.expanded || document.querySelector("dialog[open]")) return;
+      event.preventDefault(); event.stopPropagation(); setMore(false); more.focus({ preventScroll: true });
+    });
+    const measure = () => {
+      const height = nodes.selectionBar.getBoundingClientRect().height;
+      document.documentElement.style.setProperty("--selection-bar-height", `${Math.ceil(height)}px`);
+    };
+    selectionControls.measure = measure;
+    new ResizeObserver(measure).observe(nodes.selectionBar);
+    nodes.selectionBar.addEventListener("animationend", () => nodes.selectionBar.classList.remove("selection-enter"));
+    setMore(false);
+  }
   if (!count) {
     nodes.selectionBar.hidden = true;
     nodes.selectionBar.classList.remove("selection-enter");
+    selectionControls.setMore(false, false);
+    selectionControls.total.textContent = selectionControls.note.textContent = "";
+    selectionControls.chips.replaceChildren();
+    document.documentElement.style.setProperty("--selection-bar-height", "0px");
     return;
   }
   nodes.selectionBar.hidden = false;
   if (wasHidden) nodes.selectionBar.classList.add("selection-enter");
   const rows = selectionRows().slice(0, 2);
   const onPage = state.tracks.items.filter((row) => isSelected(row.id)).length;
-  nodes.selectionBar.append(
-    ui.el("div", { class: "selection-summary", role: "status", "aria-live": "polite" }, [
-      ui.el("strong", { text: `已选 ${count} 首` }),
-      ui.el("span", { text: count > onPage ? `当前页 ${onPage} 首 · 其他页 ${count - onPage} 首` : "跨页保留选择" }),
-    ]),
+  selectionControls.total.textContent = `已选 ${count} 首`;
+  selectionControls.note.textContent = count > onPage ? `当前页 ${onPage} 首 · 其他页 ${count - onPage} 首` : "跨页保留选择";
+  selectionControls.chips.replaceChildren(
     ...rows.map((row) =>
       ui.el("span", { class: "chip selection-track", title: row.path || row.filename }, [
         ui.el("span", { class: "truncate", style: { maxWidth: "120px" }, text: row.title || row.filename || String(row.id) }),
       ]),
     ),
-    ui.el("div", { class: "spacer" }),
-    ui.el("button", { type: "button", id: "selection-review", class: "btn btn-sm", text: "审阅已选", onClick: () => emit("library:review-selection") }),
-    ui.el("button", {
-      type: "button", id: "selection-edit",
-      class: "btn btn-sm btn-primary",
-      text: "编辑已选",
-      onClick: () => openEdit(selectionRows()),
-    }),
-    ui.el("button", { type: "button", id: "selection-scrape", class: "btn btn-sm", text: "批量刮削", onClick: () => emit("library:batch-scrape") }),
-    ui.el("button", { type: "button", id: "selection-clear", class: "btn btn-sm btn-ghost", text: "清空选择", onClick: () => {
-      clearSelection();
-      const pageCheck = state.tracks.view === "cards" ? nodes.checkGridPage : nodes.checkPage;
-      (pageCheck.disabled || !pageCheck.getClientRects().length ? nodes.q : pageCheck).focus({ preventScroll: true });
-    } }),
   );
-  if (focusedAction) ui.byId(focusedAction)?.focus({ preventScroll: true });
+  selectionControls.measure();
 }
 
 function renderPager() {

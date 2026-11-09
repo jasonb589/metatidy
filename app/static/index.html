@@ -26,6 +26,8 @@
 <link rel="stylesheet" href="./audio-player.css">
 <link rel="stylesheet" href="./edit-sequence.css">
 <link rel="stylesheet" href="./collections.css">
+<link rel="stylesheet" href="./library-layout.css">
+<link rel="stylesheet" href="./palette.css">
     <script>
       // 首屏之前定好主题，避免先渲染深色再跳成浅色
       (function () {
@@ -150,10 +152,13 @@
 <!-- ==================================================== 页签 1：曲库 -->
 <section class="panel" id="panel-tracks" role="tabpanel" aria-labelledby="tab-tracks" data-panel="tracks" data-active="true">
   <div class="wrap">
-    <div class="library-overview">
-      <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
-      <div class="library-health" id="library-health" role="group" aria-label="音乐资料完整情况"></div>
-    </div>
+    <details class="library-overview" id="library-overview" open>
+      <summary id="library-overview-toggle"><span class="library-overview-label">曲库概览</span><span id="library-overview-summary">读取曲库资料…</span><span class="library-layout-chevron" aria-hidden="true">⌄</span></summary>
+      <div class="library-overview-content">
+        <div class="stat-strip" id="stats-strip" role="group" aria-label="曲库统计"></div>
+        <div class="library-health" id="library-health" role="group" aria-label="音乐资料完整情况"></div>
+      </div>
+    </details>
 
     <details class="card scan-options" id="scan-options">
       <summary><span class="disclosure-icon" aria-hidden="true">↻</span><span>扫描与导入</span><span class="hint">将新收藏加入音乐库</span><span class="disclosure-chevron" aria-hidden="true">⌄</span></summary>
@@ -175,11 +180,17 @@
         <h2>曲目收藏</h2>
         <span class="badge count-chip" id="tracks-total">—</span>
         <div class="grow">
-          <span class="hint" id="tracks-updated"></span>
-          <button class="btn btn-sm" id="btn-library-folders" type="button">浏览目录</button>
-          <button class="btn btn-sm" id="btn-duplicates" type="button">疑似重复</button>
           <button class="btn btn-sm btn-ghost" id="btn-tracks-reload" title="刷新列表"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg><span>刷新</span></button>
-          <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
+          <details id="library-tools" class="library-layout-disclosure">
+            <summary id="library-tools-toggle">曲库工具<span class="library-layout-chevron" aria-hidden="true">⌄</span></summary>
+            <div class="library-tools-panel library-popover-panel">
+              <p class="library-popover-heading">整理与查找</p>
+              <button class="btn btn-sm" id="btn-library-folders" type="button">浏览目录</button>
+              <button class="btn btn-sm" id="btn-duplicates" type="button">疑似重复</button>
+              <button class="btn btn-sm btn-primary" id="btn-edit-selected" disabled>编辑已选</button>
+              <span class="hint" id="tracks-updated"></span>
+            </div>
+          </details>
         </div>
       </div>
 
@@ -227,7 +238,8 @@
           </details>
         </div>
         <div class="filter-toolbar"><div class="quick-filters" id="quick-filters" role="group" aria-label="快速筛选"><button type="button" data-quick-filter="all" aria-pressed="true">全部曲目</button><button type="button" data-quick-filter="missing_cover" aria-pressed="false">待补封面</button><button type="button" data-quick-filter="missing_lyrics" aria-pressed="false">待补歌词</button></div><span class="filter-toolbar-hint">为你的收藏补全细节</span></div>
-        <details class="advanced-filters"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>更多筛选<span aria-hidden="true">⌄</span></summary><div class="row">
+        <div class="library-refine-row" id="library-refine-row">
+        <details class="advanced-filters library-layout-disclosure" id="library-filters"><summary id="library-filters-toggle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>筛选<span class="library-layout-chevron" aria-hidden="true">⌄</span></summary><div class="row library-popover-panel">
           <label class="row-inline"><span class="lbl">艺术家</span><input type="text" id="filter-artist" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
           <label class="row-inline"><span class="lbl">专辑</span><input type="text" id="filter-album" class="w-140" placeholder="精确匹配" autocomplete="off"></label>
           <label class="row-inline"><span class="lbl">语言</span><select id="filter-language"><option value="">全部</option></select></label>
@@ -241,8 +253,12 @@
           <label class="check"><input type="checkbox" id="filter-not-loaded"><span>待读标签</span></label>
           <button class="btn btn-sm btn-ghost" id="btn-filters-reset">清空筛选</button>
         </div></details>
+        <details id="library-saved-filters" class="library-layout-disclosure">
+          <summary id="library-saved-filters-toggle">常用筛选<span class="library-layout-chevron" aria-hidden="true">⌄</span></summary>
+          <div class="library-saved-panel library-popover-panel"><div id="saved-filters-host"></div></div>
+        </details>
+        </div>
         <div class="filter-chips" id="filter-chips" hidden></div>
-        <div id="saved-filters-host"></div>
       </div>
 
       <div class="row" id="selection-bar" hidden></div>

@@ -33,6 +33,8 @@
 .ap-utilities, .ap-volume { display: flex; align-items: center; gap: 5px; }
 #audio-player-volume { width: 57px; margin-right: 6px; }
 .ap-close { margin-left: 2px; }
+.ap-expand svg { transition: transform 160ms var(--ease-out); }
+.audio-player[data-expanded="true"] .ap-expand svg { transform: rotate(180deg); }
 .ap-queue { position: absolute; bottom: calc(100% + 10px); right: 0; width: min(430px, 100%); max-height: min(480px, calc(100dvh - var(--audio-player-height, 112px) - 36px)); display: flex; flex-direction: column; border: 1px solid var(--line-2); border-radius: 14px; background: var(--bg-1); box-shadow: var(--e3); overflow: hidden; }
 .ap-queue-head { flex: none; display: flex; align-items: start; justify-content: space-between; gap: 14px; padding: 16px 17px 12px; border-bottom: 1px solid var(--line); }
 .ap-queue-head h2 { font-size: 14px; font-weight: 600; }
@@ -47,11 +49,12 @@
 .ap-queue-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--fg-2); line-height: 1.6; }
 .ap-queue-time { flex: none; font-size: 10px; font-variant-numeric: tabular-nums; color: var(--fg-3); }
 .ap-queue-note { flex: none; padding: 11px 17px 13px; border-top: 1px solid var(--line); font-size: 10px; color: var(--fg-3); }
-body.audio-player-open .app-content { padding-bottom: var(--audio-player-height, 112px); }
-body.audio-player-open #selection-bar { bottom: calc(var(--audio-player-height, 112px) + 10px); }
+body.audio-player-open .app-content, body.audio-player-open:has(#selection-bar:not([hidden])) .app-content { padding-bottom: calc(var(--audio-player-height, 112px) + var(--selection-bar-height, 0px) + 20px); }
+body.audio-player-open #selection-bar { bottom: calc(var(--audio-player-height, 112px) + 8px); }
 body.audio-player-open .toast-stack { bottom: calc(var(--audio-player-height, 112px) + 12px); }
 .ti-audio-action { margin-top: 16px; width: 100%; }
 @keyframes ap-appear { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes ap-controls-in { from { opacity: .4; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 @media (max-width: 1200px) {
   .ap-bar { grid-template-columns: minmax(120px, 1fr) auto auto; gap: 10px 15px; padding-block: 12px; }
   .ap-track { grid-row: 1 / 3; }
@@ -59,22 +62,35 @@ body.audio-player-open .toast-stack { bottom: calc(var(--audio-player-height, 11
   .ap-utilities { justify-content: end; }
 }
 @media (max-width: 900px) { .audio-player { left: 16px; right: 16px; bottom: 10px; } }
-@media (max-width: 600px) {
+@media (max-width: 700px), (max-width: 1000px) and (max-height: 500px) {
   .audio-player { left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); }
-  .ap-bar { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 12px; border-radius: 13px; }
-  .ap-track { grid-column: 1; grid-row: 1; gap: 9px; }
-  .ap-art { width: 37px; height: 37px; border-radius: 7px; }
-  .ap-title { font-size: 11px; }
-  .ap-artist { font-size: 9px; }
-  .ap-status { font-size: 8px; max-height: 36px; }
-  .ap-transport { grid-column: 2; grid-row: 1; gap: 1px; }
-  .ap-transport .ap-button { width: 25px; height: 30px; }
-  .ap-transport .ap-toggle { width: 35px; height: 35px; }
-  .ap-progress { grid-column: 1 / 3; grid-row: 2; }
-  .ap-utilities { grid-column: 1 / 3; grid-row: 3; justify-content: end; gap: 8px; }
-  .ap-volume { margin-right: auto; gap: 5px; }
-  #audio-player-volume { width: 84px; }
-  .ap-button { height: 28px; }
+  .ap-bar { grid-template-columns: minmax(0, 1fr) 36px auto; gap: 6px; padding: 9px 10px; border-radius: 13px; }
+  .ap-track { grid-column: 1; grid-row: 1; gap: 8px; }
+  .ap-art { width: 32px; height: 32px; border-radius: 6px; }
+  .ap-title { font-size: 12px; }
+  .ap-artist { margin-top: 1px; font-size: 10px; }
+  .audio-player:not([data-state="error"]):not([data-state="loading"]) .ap-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .audio-player[data-state="error"] .ap-status, .audio-player[data-state="loading"] .ap-status { max-height: 29px; margin-top: 3px; font-size: 10px; }
+  .audio-player[data-state="error"] .ap-artist, .audio-player[data-state="loading"] .ap-artist { display: none; }
+  .ap-transport { grid-column: 2; grid-row: 1; gap: 4px; }
+  .ap-transport .ap-button { width: 30px; height: 32px; }
+  .ap-transport .ap-toggle { width: 36px; height: 36px; }
+  .ap-utilities { grid-column: 3; grid-row: 1; justify-content: end; gap: 0; }
+  .ap-utilities > .ap-button { width: 28px; height: 34px; }
+  .ap-close { margin: 0; }
+  .audio-player[data-expanded="true"] .ap-bar { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .audio-player[data-expanded="true"] .ap-track { grid-column: 1; grid-row: 1; }
+  .audio-player[data-expanded="true"] .ap-transport { grid-column: 1; grid-row: 2; }
+  .audio-player[data-expanded="true"] .ap-progress { grid-column: 1 / 3; grid-row: 3; }
+  .audio-player[data-expanded="true"] .ap-utilities { display: contents; }
+  .audio-player[data-expanded="true"] .ap-volume { grid-column: 2; grid-row: 2; gap: 4px; }
+  .audio-player[data-expanded="true"] .ap-progress, .audio-player[data-expanded="true"] .ap-volume { animation: ap-controls-in 160ms var(--ease-out); }
+  .audio-player[data-expanded="true"] .ap-utilities > .ap-button { position: absolute; top: 10px; }
+  .audio-player[data-expanded="true"] #audio-player-queue-toggle { right: 66px; }
+  .audio-player[data-expanded="true"] #audio-player-expand { right: 38px; }
+  .audio-player[data-expanded="true"] #audio-player-close { right: 10px; }
+  .audio-player[data-expanded="true"] .ap-track { padding-right: 84px; grid-column: 1 / 3; }
+  #audio-player-volume { width: 67px; margin: 0; }
   .ap-queue { width: 100%; border-radius: 12px; max-height: calc(100dvh - var(--audio-player-height, 172px) - 30px); }
   .ap-queue-head { padding: 12px; }
   .ap-queue-head h2 { font-size: 12px; }
@@ -82,4 +98,4 @@ body.audio-player-open .toast-stack { bottom: calc(var(--audio-player-height, 11
   .ap-queue-track { padding: 10px 7px; gap: 8px; }
   .ap-queue-note { padding: 10px 12px; }
 }
-@media (prefers-reduced-motion: reduce) { .audio-player:not([hidden]) .ap-bar { animation: none; } .ap-button { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .audio-player:not([hidden]) .ap-bar { animation: none; } .ap-button, .ap-expand svg { transition: none; } }

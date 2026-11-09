@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealLibraryTools } from './ui-library-controls.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.join(root, '.codex/ui-preview');
@@ -363,7 +364,7 @@ try {
       await page.locator('#tab-tracks').click();
       await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 18);
       await page.locator('#tracks-tbody tr[data-id="1"] input[type="checkbox"]').check();
-      await page.locator('#btn-edit-selected').click();
+      await revealLibraryTools(page); await page.locator('#btn-edit-selected').click();
       await page.locator('#edit-title').fill('不覆盖的候选标题'); await page.locator('#edit-genre').fill('Fixture Ambient');
       await page.locator('#edit-overwrite').uncheck(); await page.locator('#btn-edit-preview').click();
       const dialog = page.locator('dialog[open]'); await dialog.waitFor();
@@ -386,7 +387,7 @@ try {
     await page.locator('#tab-tracks').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 18);
     await page.locator('#tracks-tbody tr[data-id="1"] input[type="checkbox"]').check();
-    await page.locator('#btn-edit-selected').click(); await page.locator('#edit-overwrite').uncheck();
+    await revealLibraryTools(page); await page.locator('#btn-edit-selected').click(); await page.locator('#edit-overwrite').uncheck();
     await page.locator('#edit-title').fill('不会覆盖的标题'); await page.locator('#btn-edit-preview').click();
     const dialog = page.locator('dialog[open]'); await dialog.waitFor();
     assert.equal(await dialog.getByRole('button', { name: /确认处理/ }).count(), 0);

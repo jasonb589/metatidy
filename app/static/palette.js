@@ -5,7 +5,7 @@
  * 不用再满屏找按钮。它是一个**纯新增**的组件：不改动任何既有 DOM 钩子，
  * 需要别的模块做事时只发事件（`palette:*`）。
  */
-import { api } from "./api.js";
+import { API, qs, request } from "./api.js";
 import { emit } from "./store.js";
 import { icon } from "./ui.js";
 
@@ -105,15 +105,37 @@ let active = 0;
 let seq = 0;
 let searching = false;
 let paletteTrigger = null;
+let searchController = null;
+let initialized = false;
+let accessBlocked = false;
+
+function canUsePalette() {
+  const session = window.__MT_AUTH?.state;
+  const veil = document.getElementById("auth-veil");
+  return !accessBlocked && Boolean(session && (!session.required || session.authenticated))
+    && !document.querySelector(".app-content[inert]")
+    && !(veil && !veil.hidden && veil.getClientRects().length);
+}
+
+function anotherDialog() {
+  return [...document.querySelectorAll("dialog[open]")].some(dialog => dialog !== host);
+}
+
+function ready() { return isPaletteOpen() && canUsePalette() && !anotherDialog(); }
+
+function cancelSearch() {
+  seq += 1;
+  searchController?.abort(); searchController = null;
+  searching = false;
+}
 
 function build() {
   if (host) return;
-  host = document.createElement("div");
+  host = document.createElement("dialog");
   host.className = "palette-veil";
-  host.setAttribute("role", "dialog");
+  host.hidden = true;
   host.setAttribute("aria-modal", "true");
   host.setAttribute("aria-label", "命令面板");
-  host.style.display = "none";
 
   const box = document.createElement("div");
   box.className = "palette";
@@ -134,6 +156,9 @@ function build() {
   body.className = "palette-body";
   listNode = document.createElement("div");
   listNode.className = "palette-list";
+  listNode.id = "palette-list";
+  listNode.setAttribute("aria-label", "可执行的命令和曲目");
+  input.setAttribute("aria-controls", listNode.id);
   emptyNode = document.createElement("div");
   emptyNode.className = "palette-empty";
   emptyNode.setAttribute("role", "status");
@@ -148,28 +173,45 @@ function build() {
   host.append(box);
   document.body.append(host);
 
-  host.addEventListener("mousedown", (event) => {
-    if (event.target === host) closePalette();
+  let backdropDown = false;
+  host.addEventListener("pointerdown", event => { backdropDown = event.target === host; });
+  host.addEventListener("click", event => {
+    if (event.target === host && backdropDown) closePalette();
+    backdropDown = false;
   });
+  host.addEventListener("cancel", event => { event.preventDefault(); event.stopPropagation(); closePalette(); });
+  // Native callers (including the session guard) may close the dialog directly.
+  host.addEventListener("close", () => { if (!host.open) finishClose(); });
   input.addEventListener("input", () => {
     void refresh();
   });
-  input.addEventListener("keydown", (event) => {
+  host.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
-    if (event.key === "ArrowDown") {
+    if (((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") || event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation(); closePalette();
+    } else if (event.key === "Tab") {
+      trapTab(event);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      move(1);
-    } else if (event.key === "ArrowUp") {
+      event.stopPropagation(); move(event.key === "ArrowDown" ? 1 : -1);
+    } else if (event.key === "Enter" && event.target === input) {
       event.preventDefault();
-      move(-1);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      runActive();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      closePalette();
+      event.stopPropagation(); runActive();
     }
   });
+}
+
+function trapTab(event) {
+  const focusable = [input, ...listNode.querySelectorAll("button:not(:disabled)")];
+  const first = focusable[0], last = focusable.at(-1), focused = document.activeElement;
+  if (event.shiftKey && (focused === first || !host.contains(focused))) {
+    event.preventDefault(); last.focus({ preventScroll: true });
+    if (last !== input) last.scrollIntoView({ block: "nearest", behavior: "instant" });
+  } else if (!event.shiftKey && (focused === last || !host.contains(focused))) {
+    event.preventDefault(); first.focus({ preventScroll: true });
+  }
+  // The shell must not interpret the same Tab against an open lower widget.
+  event.stopPropagation();
 }
 
 function keyHint(key, label) {
@@ -189,8 +231,10 @@ function matches(text, query) {
 }
 
 async function refresh() {
+  if (!ready()) return;
   const query = (input.value || "").trim();
-  const my = ++seq;
+  cancelSearch();
+  const my = seq;
 
   const statics = STATIC_COMMANDS.filter((c) => matches(c.title, query)).map((c) => ({
     title: c.title,
@@ -204,14 +248,16 @@ async function refresh() {
   items = statics;
   active = 0;
   searching = query.length >= 2;
-  render();
+  renderItems();
   if (!searching) return;
 
   let tracks = [];
+  const controller = new AbortController(); searchController = controller;
   try {
-    const data = await api.tracks({ q: query, page_size: 8 });
-    if (my !== seq) return;
-    tracks = (data.items || []).map((row) => ({
+    const data = await request(`${API}/tracks?${qs({ q: query, page_size: 8 })}`, { signal: controller.signal });
+    if (my !== seq || !ready() || controller.signal.aborted) return;
+    const seen = new Set();
+    tracks = (Array.isArray(data.items) ? data.items : []).filter(row => Number.isSafeInteger(row?.id) && row.id > 0 && !seen.has(row.id) && seen.add(row.id)).slice(0, 8).map((row) => ({
       title: row.title || row.filename || String(row.id),
       hint: [row.artist, row.album].filter(Boolean).join(" · ") || "曲目",
       ico: "music",
@@ -220,58 +266,76 @@ async function refresh() {
   } catch {
     tracks = [];
   }
-  if (my !== seq) return;
+  if (my !== seq || !ready() || controller.signal.aborted) return;
 
-  // 请求期间用户可能已用方向键选中本地命令，追加曲目时保留该选择。
-  const selected = items[active];
+  // Local buttons remain the exact same DOM nodes. Appending remote results
+  // must preserve both the user's highlight and an actually focused command.
   items = [...statics, ...tracks];
-  active = Math.max(0, items.indexOf(selected));
+  tracks.forEach((item, index) => listNode.append(createRow(item, statics.length + index)));
   searching = false;
-  render();
+  searchController = null;
+  updateStatus(); updateHighlight();
 }
 
-function render() {
-  listNode.replaceChildren();
+function updateStatus() {
   listNode.setAttribute("aria-busy", String(searching));
   emptyNode.textContent = searching ? "正在查找曲目…" : "没有匹配的命令或曲目。";
-  emptyNode.style.display = items.length ? "none" : "";
-  items.forEach((item, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `palette-item${index === active ? " is-active" : ""}`;
-    // 读屏能播报当前高亮项（item 是原生 button，键盘导航不用额外处理）
-    if (index === active) row.setAttribute("aria-current", "true");
-    const ico = icon(item.ico || "command", { size: 15 });
-    if (ico) row.append(ico);
-    const main = document.createElement("span");
-    main.className = "palette-title";
-    main.textContent = item.title;
-    const hint = document.createElement("span");
-    hint.className = "palette-hint";
-    hint.textContent = item.hint || "";
-    row.append(main, hint);
-    row.addEventListener("mousemove", () => {
-      if (active !== index) {
-        active = index;
-        render();
-      }
-    });
-    row.addEventListener("click", () => {
-      active = index;
-      runActive();
-    });
-    listNode.append(row);
+  emptyNode.hidden = Boolean(items.length);
+}
+
+function renderItems() {
+  // Queries change only while the input is focused; hover and arrow navigation
+  // never call this renderer or detach a focused button.
+  listNode.replaceChildren(...items.map(createRow));
+  updateStatus(); updateHighlight();
+}
+
+function createRow(item, index) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "palette-item";
+  row.dataset.paletteIndex = index;
+  const ico = icon(item.ico || "command", { size: 15 });
+  if (ico) row.append(ico);
+  const main = document.createElement("span");
+  main.className = "palette-title";
+  main.textContent = item.title;
+  const hint = document.createElement("span");
+  hint.className = "palette-hint";
+  hint.textContent = item.hint || "";
+  row.append(main, hint);
+  row.addEventListener("pointermove", () => { if (ready() && active !== index) { active = index; updateHighlight(); } });
+  row.addEventListener("focus", () => { if (ready()) { active = index; updateHighlight(); } });
+  row.addEventListener("click", () => {
+    if (!ready()) return;
+    active = index;
+    runActive();
   });
+  return row;
+}
+
+function updateHighlight() {
+  for (const [index, row] of [...listNode.children].entries()) {
+    const selected = index === active;
+    row.classList.toggle("is-active", selected);
+    if (selected) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
 }
 
 function move(delta) {
-  if (!items.length) return;
+  if (!ready() || !items.length) return;
+  const rowFocused = listNode.contains(document.activeElement);
+  if (rowFocused) active = Number(document.activeElement.closest(".palette-item").dataset.paletteIndex);
   active = (active + delta + items.length) % items.length;
-  render();
-  listNode.children[active]?.scrollIntoView({ block: "nearest" });
+  updateHighlight();
+  const row = listNode.children[active];
+  if (rowFocused) row?.focus({ preventScroll: true });
+  row?.scrollIntoView({ block: "nearest", behavior: "instant" });
 }
 
 function runActive() {
+  if (!ready()) return;
   const item = items[active];
   if (!item) return;
   closePalette();
@@ -279,24 +343,28 @@ function runActive() {
 }
 
 export function openPalette() {
-  if (document.querySelector("dialog[open], .app-content[inert]")) return;
+  if (!canUsePalette() || anotherDialog()) return;
   build();
-  if (!isPaletteOpen()) paletteTrigger = document.activeElement;
-  host.style.display = "flex";
+  if (isPaletteOpen()) { input.focus({ preventScroll: true }); return; }
+  paletteTrigger = document.activeElement;
   input.value = "";
+  host.hidden = false;
+  host.showModal();
   void refresh();
-  // 等一帧再聚焦：display 刚切成 flex 时直接 focus 有概率落空
-  requestAnimationFrame(() => { if (isPaletteOpen()) input.focus(); });
+  input.focus({ preventScroll: true });
 }
 
-export function closePalette() {
-  if (!host) return;
-  const restoreFocus = host.contains(document.activeElement);
-  // 已关闭的查询不能在回包后覆盖下一次打开的命令列表。
-  seq += 1;
-  searching = false;
-  host.style.display = "none";
-  if (restoreFocus) {
+export function closePalette({ restoreFocus = true } = {}) {
+  if (!host?.open) return;
+  const restore = restoreFocus && host.contains(document.activeElement);
+  host.close();
+  finishClose(restore);
+}
+
+function finishClose(restoreFocus = false) {
+  cancelSearch();
+  host.hidden = true;
+  if (restoreFocus && canUsePalette() && !anotherDialog()) {
     const valid = paletteTrigger instanceof HTMLElement && paletteTrigger.isConnected
       && paletteTrigger.getClientRects().length && !paletteTrigger.closest("[inert]")
       && !paletteTrigger.matches(":disabled") && !host.contains(paletteTrigger);
@@ -306,13 +374,15 @@ export function closePalette() {
 }
 
 export function isPaletteOpen() {
-  return Boolean(host) && host.style.display !== "none";
+  return Boolean(host?.open);
 }
 
 export function initPalette() {
+  if (initialized) return;
+  initialized = true;
   build();
   window.addEventListener("keydown", (event) => {
-    if (event.defaultPrevented || event.isComposing || document.querySelector("dialog[open]")) return;
+    if (event.defaultPrevented || event.isComposing || anotherDialog()) return;
     const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && key === "k") {
       event.preventDefault();
@@ -325,5 +395,9 @@ export function initPalette() {
       closePalette();
     }
   });
+  const lock = () => { accessBlocked = true; closePalette({ restoreFocus: false }); cancelSearch(); };
+  window.addEventListener("metatidy:unauthorized", lock);
+  window.addEventListener("metatidy:logout", lock);
+  window.addEventListener("metatidy:authenticated", () => { accessBlocked = false; });
   document.getElementById("btn-palette")?.addEventListener("click", openPalette);
 }

@@ -33,6 +33,8 @@ jobs:
           PLAYWRIGHT_MODULE: ${{ runner.temp }}/metatidy-ui/node_modules/playwright
         run: |
           node tests/ui-smoke.mjs
+          node tests/ui-layout.mjs
+          node tests/ui-palette.mjs
           node tests/ui-library-tools.mjs
           node tests/ui-metadata-editor.mjs
           node tests/ui-edit-sequence.mjs

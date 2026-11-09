@@ -64,6 +64,10 @@ async function playing(page, id) {
 }
 async function paused(page) { await page.waitForFunction(() => document.querySelector('#audio-player')?.dataset.state === 'paused' && document.querySelector('#audio-player-media')?.paused); }
 async function clickPlay(page, id = 1, host = '#tracks-tbody') { await page.locator(`${host} button[data-play-id="${id}"]`).click(); }
+async function reloadTracks(page) {
+  if (!(await page.locator('#btn-tracks-reload').isVisible())) await page.locator('#library-tools-toggle').click();
+  await page.locator('#btn-tracks-reload').click();
+}
 async function rangeValue(page, selector, value) { await page.locator(selector).evaluate((node, value) => { node.value = String(value); node.dispatchEvent(new Event('input', { bubbles: true })); }, value); }
 async function selection(page) { return page.evaluate(async () => [...(await import('/store.js')).state.selection.keys()]); }
 const getCalls = model => model.calls.filter(call => call.method === 'GET');
@@ -84,7 +88,7 @@ try {
     await page.locator('#track-inspector-play').waitFor();
     assert.equal(await page.locator('audio[src]').count(), 0); assert.equal(model.calls.length, 0);
     await page.keyboard.press('Escape'); await page.locator('#view-list').click();
-    await page.locator('#btn-tracks-reload').click(); await frame(page);
+    await reloadTracks(page); await frame(page);
     assert.equal(model.calls.length, 0); assert.equal(await page.locator('audio[src]').count(), 0);
   }));
 
@@ -172,7 +176,7 @@ try {
     await page.evaluate(() => { window.playingAudio = document.querySelector('#audio-player-media'); });
     const reads = getCalls(model).length;
     await page.locator('#tab-settings').click(); await playing(page, 1);
-    await page.locator('#tab-tracks').click(); await page.locator('#btn-tracks-reload').click();
+    await page.locator('#tab-tracks').click(); await reloadTracks(page);
     await page.waitForFunction(() => document.querySelector('#tracks-tbody [data-play-id="1"]')?.getAttribute('aria-pressed') === 'true');
     assert.equal(await page.evaluate(() => window.playingAudio === document.querySelector('#audio-player-media')), true);
     assert.equal(getCalls(model).length, reads);
@@ -280,7 +284,7 @@ try {
   }));
 
   await check('Player and queue fit both themes, long titles and 320px layouts without covering selection actions', async () => {
-    for (const [width, height, colorScheme] of [[1440, 1000, 'light'], [1440, 1000, 'dark'], [768, 1024, 'light'], [390, 844, 'light'], [320, 568, 'dark']]) {
+    for (const [width, height, colorScheme] of [[1440, 1000, 'light'], [1440, 1000, 'dark'], [768, 1024, 'light'], [390, 844, 'light'], [320, 568, 'dark'], [320, 480, 'dark'], [844, 390, 'dark']]) {
       await withPage(async ({ page }) => {
         await ready(page); await page.locator('#tracks-tbody tr[data-id="2"] input[type="checkbox"]').check();
         await clickPlay(page); await playing(page, 1);
@@ -295,9 +299,10 @@ try {
         }
         await page.locator('#audio-player-toggle').click(); await paused(page);
         await frame(page);
-        const bounds = await page.locator('#audio-player').evaluate(node => { const b = node.getBoundingClientRect(), selection = document.querySelector('#selection-bar').getBoundingClientRect(); return { left: b.left, right: b.right, bottom: b.bottom, top: b.top, width: node.scrollWidth, client: node.clientWidth, selectionBottom: selection.bottom, animations: node.getAnimations({ subtree: true }).length, page: document.documentElement.scrollWidth }; });
+        const bounds = await page.locator('#audio-player').evaluate(node => { const b = node.getBoundingClientRect(), selection = document.querySelector('#selection-bar').getBoundingClientRect(); return { left: b.left, right: b.right, bottom: b.bottom, top: b.top, width: node.scrollWidth, client: node.clientWidth, selectionBottom: selection.bottom, selectionTop: selection.top, animations: node.getAnimations({ subtree: true }).length, page: document.documentElement.scrollWidth }; });
         assert.ok(bounds.left >= 0 && bounds.right <= width + 1 && bounds.bottom <= height + 1 && bounds.width <= bounds.client + 1 && bounds.page <= width + 1, JSON.stringify(bounds));
         assert.ok(bounds.selectionBottom <= bounds.top - 2, JSON.stringify(bounds)); assert.equal(bounds.animations, 0);
+        if (width <= 700 || height <= 500) assert.ok(height - bounds.selectionTop <= 145, `Compact bottom controls exceed their space budget: ${JSON.stringify(bounds)}`);
         await page.screenshot({ path: path.join(out, `audio-player-list-${width}-${colorScheme}.png`) });
         await page.locator('#view-cards').click(); await page.screenshot({ path: path.join(out, `audio-player-cards-${width}-${colorScheme}.png`) });
         await page.locator('#audio-player-queue-toggle').click();
@@ -319,6 +324,77 @@ try {
       }, { viewport: { width, height }, colorScheme });
     }
   });
+
+  await check('Compact controls expand without replacing media, seeking, fetching audio, or changing the selection', async () => {
+    for (const [width, height] of [[320, 568], [844, 390]]) await withPage(async ({ page, model }) => {
+      await ready(page); await clickPlay(page); await playing(page, 1); await page.locator('#audio-player-toggle').click(); await paused(page);
+      await page.evaluate(async () => { const store = await import('/store.js'); store.selectRows(store.state.tracks.items.slice(0, 2)); window.keptAudio = document.querySelector('#audio-player-media'); });
+      const selected = await selection(page), reads = model.calls.length;
+      assert.equal(await page.locator('#audio-player-seek').isVisible(), false);
+      assert.equal(await page.locator('#selection-edit').isVisible(), false);
+      await page.locator('#audio-player-expand').click();
+      assert.equal(await page.locator('#audio-player-seek').isVisible(), true);
+      assert.equal(await page.locator('#audio-player-volume').isVisible(), true);
+      await rangeValue(page, '#audio-player-seek', 4); await rangeValue(page, '#audio-player-volume', 27);
+      await page.locator('#audio-player-seek').focus(); await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#audio-player-expand').evaluate(node => node === document.activeElement), true);
+      assert.equal(await page.locator('#audio-player-seek').isVisible(), false);
+      await page.locator('#selection-more-toggle').click(); await page.locator('#selection-edit').focus();
+      const addedId = await page.evaluate(async () => { window.keptSelectionButton = document.activeElement; const store = await import('/store.js'); store.selectRows([store.state.tracks.items[2]]); return store.state.tracks.items[2].id; });
+      assert.equal(await page.evaluate(() => document.activeElement === window.keptSelectionButton && window.keptSelectionButton.isConnected), true);
+      assert.equal(await page.locator('#selection-more-toggle').getAttribute('aria-expanded'), 'true');
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#selection-more-toggle').evaluate(node => node === document.activeElement), true);
+      assert.equal(await page.locator('#selection-edit').isVisible(), false);
+      await page.locator('#audio-player-expand').click(); await page.locator('#audio-player-volume').focus();
+      await page.setViewportSize({ width: 1440, height: 1000 }); await frame(page);
+      assert.equal(await page.locator('#audio-player-volume').evaluate(node => node === document.activeElement), true);
+      await page.setViewportSize({ width, height }); await frame(page);
+      assert.equal(await page.locator('#audio-player-expand').evaluate(node => node === document.activeElement), true);
+      assert.equal(await page.evaluate(() => document.querySelector('#audio-player-media') === window.keptAudio && window.keptAudio.paused && Math.abs(window.keptAudio.currentTime - 4) < .2 && window.keptAudio.volume === .27), true);
+      assert.equal(model.calls.length, reads, 'Compact expansion must not request the source again');
+      assert.deepEqual(await selection(page), [...selected, addedId]);
+      await page.evaluate(async () => { const store = await import('/store.js'); store.clearSelection(); store.selectRows([store.state.tracks.items[3]]); });
+      assert.equal(await page.locator('#selection-more-toggle').getAttribute('aria-expanded'), 'false');
+      assert.equal(await page.locator('#selection-edit').evaluate(node => node === window.keptSelectionButton), true);
+      await page.locator('#audio-player-expand').click(); await page.screenshot({ path: path.join(out, `audio-player-expanded-${width}x${height}.png`) });
+    }, { viewport: { width, height }, colorScheme: 'dark' });
+  });
+
+  await check('Bottom spacing lets the last music row and pager scroll above both compact bars', async () => {
+    for (const [width, height] of [[320, 480], [390, 844], [844, 390]]) await withPage(async ({ page }) => {
+      await ready(page); await clickPlay(page); await playing(page, 1); await page.locator('#audio-player-toggle').click(); await paused(page);
+      await page.evaluate(async () => { const store = await import('/store.js'); store.selectRows([store.state.tracks.items[0]]); });
+      const last = page.locator('#tracks-tbody tr[data-id]').last();
+      await last.evaluate(node => node.scrollIntoView({ block: 'end', behavior: 'instant' })); await frame(page);
+      const bounds = await last.evaluate(node => { const row = node.getBoundingClientRect(), selection = document.querySelector('#selection-bar').getBoundingClientRect(), wrap = node.closest('.table-wrap'); return { rowTop: row.top, rowBottom: row.bottom, selectionTop: selection.top, pad: getComputedStyle(document.documentElement).scrollPaddingBottom, player: getComputedStyle(document.documentElement).getPropertyValue('--audio-player-height'), selection: getComputedStyle(document.documentElement).getPropertyValue('--selection-bar-height'), scrollY, scrollMax: document.documentElement.scrollHeight-innerHeight, wrapTop:wrap.getBoundingClientRect().top, wrapBottom:wrap.getBoundingClientRect().bottom, wrapScroll:wrap.scrollTop, wrapMax:wrap.scrollHeight-wrap.clientHeight }; });
+      assert.ok(bounds.rowBottom <= bounds.selectionTop - 3 && bounds.rowTop >= 0, JSON.stringify({ width, height, ...bounds }));
+      await page.locator('#tracks-pager').evaluate(node => node.scrollIntoView({ block: 'end', behavior: 'instant' })); await frame(page);
+      assert.equal(await page.locator('#tracks-pager').evaluate(node => { const pager = node.getBoundingClientRect(), bar = document.querySelector('#selection-bar').getBoundingClientRect(); return pager.top >= 0 && pager.bottom <= bar.top - 3; }), true);
+      await page.locator('#tracks-pager input').focus(); await page.keyboard.press('Shift+Tab'); await frame(page);
+      assert.equal(await page.evaluate(() => { const focus = document.activeElement.getBoundingClientRect(), bar = document.querySelector('#selection-bar').getBoundingClientRect(); return focus.top >= 0 && focus.bottom <= bar.top - 3; }), true);
+    }, { viewport: { width, height } });
+  });
+
+  await check('Compact expansion uses finite motion and Escape belongs to the foreground dialog', () => withPage(async ({ page }) => {
+    await ready(page); await clickPlay(page); await playing(page, 1); await page.locator('#audio-player-toggle').click(); await paused(page);
+    await page.evaluate(async () => { const store = await import('/store.js'); store.selectRows([store.state.tracks.items[0]]); });
+    await page.locator('#audio-player-expand').click();
+    const motion = await page.locator('#audio-player').evaluate(node => node.getAnimations({ subtree: true }).map(animation => ({ duration: animation.effect.getTiming().duration, iterations: animation.effect.getTiming().iterations })));
+    assert.ok(motion.length > 0 && motion.every(animation => animation.duration <= 220 && animation.iterations === 1));
+    await page.locator('#audio-player').evaluate(async node => { await Promise.all(node.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {}))); });
+    assert.equal(await page.locator('#audio-player').evaluate(node => node.getAnimations({ subtree: true }).some(animation => animation.playState === 'running')), false);
+    await page.locator('#selection-more-toggle').click(); await page.locator('#selection-review').click();
+    await page.locator('#selection-review-dialog').waitFor(); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#selection-review-dialog').count(), 0);
+    assert.equal(await page.locator('#selection-more-toggle').getAttribute('aria-expanded'), 'true');
+    assert.equal(await page.locator('#audio-player-expand').getAttribute('aria-expanded'), 'true');
+    await page.locator('#audio-player-expand').click();
+    await page.locator('#audio-player').evaluate(async node => { await Promise.all(node.getAnimations({ subtree: true }).map(animation => animation.finished.catch(() => {}))); });
+    await frame(page);
+    const gap = await page.evaluate(() => { const player = document.querySelector('#audio-player').getBoundingClientRect(), selected = document.querySelector('#selection-bar').getBoundingClientRect(); return player.top - selected.bottom; });
+    assert.ok(gap >= 7 && gap <= 9, `Measured height must not retain the entry-animation transform: ${gap}`);
+  }, { viewport: { width: 390, height: 844 }, reducedMotion: 'no-preference' }));
 
   console.log(`\n${passed} audio player checks passed; ${failures.length} failed. Screenshots: ${out}`);
   if (failures.length) process.exitCode = 1;

@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealLibraryTools } from './ui-library-controls.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url)), outputDir = path.join(root, '.codex/ui-preview');
 const require = createRequire(import.meta.url);
@@ -40,7 +41,7 @@ async function withPage(action, options = {}) {
 }
 async function ready(page) { await page.goto(base); await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 18); }
 async function loaded(page) { await page.waitForFunction(() => document.querySelector('#folder-browser-items')?.getAttribute('aria-busy') === 'false' && !document.querySelector('#folder-browser-browse')?.disabled); }
-async function open(page) { await page.locator('#btn-library-folders').click(); await loaded(page); }
+async function open(page) { await revealLibraryTools(page); await page.locator('#btn-library-folders').click(); await loaded(page); }
 async function enter(page, name) { await page.locator('.fb-folder').filter({ has: page.locator('strong', { hasText: name }) }).click(); await loaded(page); }
 async function snapshot(page) { return page.evaluate(async () => { const { state } = await import('/store.js'); return { q: state.tracks.q, filters: { ...state.tracks.filters }, page: state.tracks.page, selected: [...state.selection.keys()] }; }); }
 async function settle(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
@@ -184,7 +185,7 @@ try {
     await ready(page);
     for (const response of badResponses) {
       model.handler = ({ route }) => route.fulfill({ json: response });
-      await page.locator('#btn-library-folders').click();
+      await revealLibraryTools(page); await page.locator('#btn-library-folders').click();
       await page.waitForFunction(() => document.querySelector('#folder-browser-status')?.textContent.includes('不完整或位置不一致'));
       assert.equal(await page.locator('#folder-browser-browse').isDisabled(), true); assert.equal(await page.locator('#folder-browser-scan').isDisabled(), true);
       await page.keyboard.press('Escape');
@@ -194,12 +195,12 @@ try {
 
   await check('Folder 401 closes the dialog and prevents a pending browse or scan handoff', () => withPage(async ({ page, model }) => {
     await ready(page); model.handler = ({ route }) => route.fulfill({ status: 401, json: { detail: '登录已过期' } });
-    await page.locator('#btn-library-folders').click(); await page.locator('#auth-password').waitFor({ state: 'visible' });
+    await revealLibraryTools(page); await page.locator('#btn-library-folders').click(); await page.locator('#auth-password').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#folder-browser').count(), 0); assert.equal(await page.locator('.app-content').evaluate(node => node.inert), true); assert.deepEqual(model.posts, []);
   }));
 
   await check('Folder keyboard navigation retains focus after loading and traps focus until Escape', () => withPage(async ({ page }) => {
-    await ready(page); await page.locator('#btn-library-folders').focus(); await page.keyboard.press('Enter'); await loaded(page);
+    await ready(page); await revealLibraryTools(page); await page.locator('#btn-library-folders').focus(); await page.keyboard.press('Enter'); await loaded(page);
     assert.equal(await page.locator('#folder-browser-close').evaluate(node => node === document.activeElement), true);
     await page.keyboard.press('Shift+Tab'); assert.equal(await page.locator('#folder-browser-browse').evaluate(node => node === document.activeElement), true);
     await page.keyboard.press('Tab'); assert.equal(await page.locator('#folder-browser-close').evaluate(node => node === document.activeElement), true);

@@ -10,6 +10,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealLibraryTools, revealSavedFilters, revealSelectionActions } from './ui-library-controls.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.join(root, '.codex/ui-preview');
@@ -74,7 +75,7 @@ async function noOverflow(page, selector) {
 }
 
 async function saveFilter(page, name) {
-  await page.locator('#saved-filter-save').click();
+  await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
   await page.locator('#saved-filter-name').fill(name);
   await page.locator('#saved-filter-submit').click();
   await page.locator('#saved-filters-dialog').waitFor({ state: 'detached' });
@@ -323,13 +324,14 @@ try {
     await page.locator('#tracks-order').selectOption('asc');
     await page.locator('#tracks-pagesize').selectOption('100');
     await page.keyboard.press('Escape');
-    await page.locator('.saved-filter-chip').click();
+    await revealSavedFilters(page); await page.locator('.saved-filter-chip').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-grid .track-card').length === 1 && !document.querySelector('#tracks-grid').hidden);
     assert.deepEqual(await snapshot(page), before);
     assert.equal(await page.locator('.saved-filter-chip').getAttribute('aria-pressed'), 'true');
     await page.reload();
     await page.locator('#tracks-grid .track-card[data-id]').first().waitFor();
     assert.deepEqual(await snapshot(page), before);
+    await revealSavedFilters(page);
     assert.equal(await page.locator('.saved-filter-chip').innerText(), '周杰伦待补歌词');
     assert.equal(await page.locator('.saved-filter-chip').getAttribute('aria-pressed'), 'true');
     await page.screenshot({ path: path.join(outputDir, 'saved-filter-library.png'), fullPage: true, animations: 'disabled' });
@@ -374,7 +376,7 @@ try {
     }, folder);
     await saveFilter(page, '目录收藏');
     await page.locator('[data-quick-filter="all"]').click();
-    await page.locator('.saved-filter-chip').click();
+    await revealSavedFilters(page); await page.locator('.saved-filter-chip').click();
     await page.waitForFunction(folder => document.querySelector('[data-filter-key="folder"]')?.textContent.includes(folder), folder);
     const restored = await snapshot(page);
     assert.equal(restored.filters.folder, folder);
@@ -413,7 +415,7 @@ try {
 
   await check('Saved filter names validate and management renames or confirms deletion', () => withPage(async ({ page }) => {
     await ready(page);
-    await page.locator('#saved-filter-save').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
     for (const [name, message] of [['   ', /名字/], ['长'.repeat(37), /最多 36/]]) {
       await page.locator('#saved-filter-name').fill(name);
       await page.locator('#saved-filter-submit').click();
@@ -423,14 +425,14 @@ try {
     await page.locator('#saved-filter-name').fill('Rock');
     await page.locator('#saved-filter-submit').click();
     await page.locator('#saved-filters-dialog').waitFor({ state: 'detached' });
-    await page.locator('#saved-filter-save').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
     await page.locator('#saved-filter-name').fill('ＲＯＣＫ');
     await page.locator('#saved-filter-submit').click();
     assert.match(await page.locator('#saved-filter-form-error').innerText(), /同名/);
     await page.keyboard.press('Escape');
     await page.locator('#saved-filters-dialog').waitFor({ state: 'detached' });
     assert.equal(await page.evaluate(() => document.activeElement.id), 'saved-filter-save');
-    await page.locator('#saved-filter-manage').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-manage').click();
     await page.getByRole('button', { name: '重命名收藏 Rock', exact: true }).click();
     await page.getByRole('textbox', { name: '收藏 Rock 的新名称', exact: true }).fill('摇滚收藏');
     await page.getByRole('button', { name: '保存名称', exact: true }).click();
@@ -452,7 +454,7 @@ try {
   await check('Cross-tab saved filter updates preserve a pending rename and merge new entries', () => withPage(async ({ page, context }) => {
     await ready(page);
     await saveFilter(page, '原始收藏');
-    await page.locator('#saved-filter-manage').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-manage').click();
     await page.getByRole('button', { name: '重命名收藏 原始收藏', exact: true }).click();
     const rename = page.getByRole('textbox', { name: '收藏 原始收藏 的新名称', exact: true });
     await rename.fill('还在输入的名称');
@@ -472,10 +474,11 @@ try {
     for (let index = 0; index < 20; index += 1) data.items.push({ id: `filter-${index}`, name: `收藏${index}`, snapshot: {} });
     await page.addInitScript(({ key, data }) => localStorage.setItem(key, JSON.stringify(data)), { key: savedKey, data });
     await ready(page);
+    await revealSavedFilters(page);
     assert.equal(await page.locator('.saved-filter-chip').count(), 12);
     assert.equal(await page.locator('.saved-filter-chip').first().innerText(), unsafeName);
     assert.equal(await page.locator('.saved-filters img').count(), 0);
-    await page.locator('.saved-filter-chip').first().click();
+    await revealSavedFilters(page); await page.locator('.saved-filter-chip').first().click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 3);
     const current = await snapshot(page);
     assert.equal(current.sort, 'artist');
@@ -486,7 +489,7 @@ try {
     assert.equal(current.filters.not_loaded, false);
     assert.equal(current.filters.missing_cover, false);
     assert.equal('injected' in current.filters, false);
-    await page.locator('#saved-filter-save').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
     await page.locator('#saved-filter-name').fill('第十三条');
     await page.locator('#saved-filter-submit').click();
     assert.match(await page.locator('#saved-filter-form-error').innerText(), /最多保存 12/);
@@ -501,7 +504,7 @@ try {
       };
     }, savedKey);
     await ready(page);
-    await page.locator('#saved-filter-save').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
     await page.locator('#saved-filter-name').fill('不能保存');
     await page.locator('#saved-filter-submit').click();
     assert.match(await page.locator('#saved-filter-form-error').innerText(), /保存失败/);
@@ -514,6 +517,7 @@ try {
     await withPage(async ({ page }) => {
       await page.addInitScript(key => localStorage.setItem(key, '{broken'), savedKey);
       await ready(page);
+      await revealSavedFilters(page);
       assert.match(await page.locator('.saved-filter-warning').innerText(), /无法读取/);
       await saveFilter(page, '恢复后的收藏');
       assert.equal((await storedItems(page))[0].name, '恢复后的收藏');
@@ -522,8 +526,9 @@ try {
       const future = JSON.stringify({ version: 99, items: [{ id: 'future', name: '未来版本', snapshot: {} }] });
       await page.addInitScript(({ key, data }) => localStorage.setItem(key, data), { key: savedKey, data: future });
       await ready(page);
+      await revealSavedFilters(page);
       assert.match(await page.locator('.saved-filter-warning').innerText(), /暂不支持/);
-      await page.locator('#saved-filter-save').click();
+      await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
       await page.locator('#saved-filter-name').fill('不应覆盖');
       await page.locator('#saved-filter-submit').click();
       assert.match(await page.locator('#saved-filter-form-error').innerText(), /暂不支持/);
@@ -569,13 +574,13 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 1);
     assert.match(await page.locator('#selection-bar').innerText(), /当前页 0 首/);
     assert.match(await page.locator('#selection-bar').innerText(), /其他页 2 首/);
-    await page.locator('#selection-scrape').click();
+    await revealSelectionActions(page); await page.locator('#selection-scrape').click();
     await page.waitForFunction(() => document.querySelector('#tab-scrape')?.getAttribute('aria-selected') === 'true');
     await page.waitForFunction(() => document.activeElement?.matches('input[name="batch-mode"]:checked'));
     assert.deepEqual(await page.evaluate(async () => [...(await import('/store.js')).state.selection.keys()]), [1, 2]);
     assert.deepEqual(writes, []);
     await page.locator('#tab-tracks').click();
-    await page.locator('#selection-clear').click();
+    await revealSelectionActions(page); await page.locator('#selection-clear').click();
     assert.equal(await page.locator('#selection-bar').isVisible(), false);
     assert.equal(await page.evaluate(() => document.activeElement.id), 'check-page');
   }));
@@ -590,7 +595,7 @@ try {
       await page.locator('#tracks-q').fill('no-fixture-can-match-this-title');
       await page.locator('#tracks-q').press('Enter');
       await page.waitForFunction(() => document.querySelector('#tracks-total')?.textContent.includes('0'));
-      await page.locator('#selection-clear').click();
+      await revealSelectionActions(page); await page.locator('#selection-clear').click();
       assert.equal(await page.locator('#selection-bar').isVisible(), false);
       assert.equal(await page.evaluate(() => document.activeElement.id), 'tracks-q');
     }
@@ -599,9 +604,9 @@ try {
   await check('Command shortcuts cannot open the palette behind native dialogs', () => withPage(async ({ page }) => {
     await ready(page);
     const scenarios = [
-      { open: () => page.locator('#btn-library-shortcuts').click(), selector: 'dialog[open]:has(#keyboard-shortcuts)' },
+      { open: async () => { await revealLibraryTools(page); await page.locator('#btn-library-shortcuts').click(); }, selector: 'dialog[open]:has(#keyboard-shortcuts)' },
       { open: () => openTrack(page), selector: '#track-inspector[open]' },
-      { open: () => page.locator('#saved-filter-save').click(), selector: '#saved-filters-dialog[open]' },
+      { open: async () => { await revealSavedFilters(page); await page.locator('#saved-filter-save').click(); }, selector: '#saved-filters-dialog[open]' },
     ];
     for (const { open, selector } of scenarios) {
       await open();
@@ -669,14 +674,14 @@ try {
         await page.screenshot({ path: path.join(outputDir, `track-details-${width}-${colorScheme}.png`) });
         await page.keyboard.press('Escape');
         await saveFilter(page, '日常整理与待补资料');
-        await page.locator('#saved-filter-manage').click();
+        await revealSavedFilters(page); await page.locator('#saved-filter-manage').click();
         await noOverflow(page, '#saved-filters-dialog');
         await noOverflow(page, '#saved-filters-dialog .modal-body');
         const foot = await page.locator('#saved-filters-dialog .modal-foot').boundingBox();
         assert.ok(foot && foot.y >= 0 && foot.y + foot.height <= height, 'Management actions must stay within a short mobile viewport');
         await page.screenshot({ path: path.join(outputDir, `saved-filter-manager-${width}-${colorScheme}.png`), animations: 'disabled' });
         await page.keyboard.press('Escape');
-        await page.locator('#btn-library-shortcuts').click();
+        await revealLibraryTools(page); await page.locator('#btn-library-shortcuts').click();
         await page.locator('#keyboard-shortcuts').waitFor();
         await noOverflow(page, 'dialog[open]');
       }, { viewport: { width, height }, colorScheme, reducedMotion });

@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { revealSavedFilters } from './ui-library-controls.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const outputDir = path.join(root, '.codex/ui-preview');
@@ -170,13 +171,13 @@ try {
     assert.equal(await page.locator('#tracks-q').inputValue(), '');
     assert.match(await page.locator('#filter-chips').innerText(), /同名专辑.*群星/);
     assert.match(await page.locator('#selection-bar').innerText(), /已选 1 首/);
-    await page.locator('#saved-filter-save').click();
+    await revealSavedFilters(page); await page.locator('#saved-filter-save').click();
     await page.locator('#saved-filter-name').fill('这张群星合辑');
     await page.locator('#saved-filter-submit').click();
     await page.locator('#saved-filters-dialog').waitFor({ state: 'detached' });
     await page.locator('[data-filter-key="album_group"] button').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 18);
-    await page.locator('.saved-filter-chip').click();
+    await revealSavedFilters(page); await page.locator('.saved-filter-chip').click();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 2);
     await page.reload();
     await page.waitForFunction(() => document.querySelectorAll('#tracks-tbody tr[data-id]').length === 2);
