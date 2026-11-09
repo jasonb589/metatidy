@@ -59,9 +59,9 @@ def check_artists(base: str, music: Path, check) -> None:
     client.trust_env = False
     route = "/api/library/artists"
 
-    def get(path=route, *, expected=200, code=None, **params):
-        response = client.get(base + path, params=params, timeout=60)
-        assert response.status_code == expected, (path, response.status_code, response.text[:600])
+    def get(endpoint=route, *, expected=200, code=None, **params):
+        response = client.get(base + endpoint, params=params, timeout=60)
+        assert response.status_code == expected, (endpoint, response.status_code, response.text[:600])
         data = response.json()
         if code:
             assert data.get("detail", {}).get("code") == code, data
