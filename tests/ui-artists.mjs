@@ -72,6 +72,14 @@ async function withPage(action, { model = modelOf(), start = 'artists', ...optio
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url()), call = { path: url.pathname, method: req.method(), query: Object.fromEntries(url.searchParams) };
     model.calls.push(call);
+    if (call.path === '/api/albums/selection' && model.preparationGate) {
+      const delay = model.preparationGate; model.preparationGate = null;
+      try {
+        const reply = await route.fetch(); delay.entered.resolve(); await delay.release.promise;
+        await route.fulfill({ response: reply });
+      } finally { delay.done.resolve(); }
+      return;
+    }
     if (!model.server && call.path === '/api/tracks') {
       let rows = model.rows;
       if (call.query.artist_group) rows = rows.filter(row => trim(row.artist) === call.query.artist_group);
@@ -278,6 +286,49 @@ try {
         assert.deepEqual([...new Set(model.calls.filter(call => call.method === 'POST').map(call => call.path))].sort(), ['/api/albums/selection', '/api/tracks/selection']);
       }
     }, { model: { ...modelOf(), server: true } });
+  });
+
+  await check('Mobile nested album preparation keeps readable controls and a usable track list in every state', async () => {
+    for (const [width, height] of [[320, 480], [390, 844]]) for (const colorScheme of ['light', 'dark']) await withPage(async ({ page, context, model }) => {
+      const tracks = (await (await context.request.get(`${base}/api/tracks`)).json()).items;
+      await seed(page, [tracks.find(row => row.id === 18)]); const before = await selected(page);
+      await openDetail(page, '周杰伦'); await page.locator('.ard-album-name').first().click();
+      await page.waitForFunction(() => document.getElementById('album-detail-list')?.getAttribute('aria-busy') === 'false');
+      const inspect = async state => {
+        await flush(page);
+        await page.screenshot({ path: path.join(output, `artists-nested-prepare-${width}x${height}-${colorScheme}-${state}.png`) });
+        const enabled = ['album-detail-close', 'album-detail-return', 'album-detail-view-tracks', ...(state === 'normal' ? ['album-detail-prepare'] : ['album-detail-cancel']), ...(state === 'prepared' ? ['album-detail-confirm'] : [])];
+        await geometry(page, '#album-detail-dialog', enabled);
+        const layout = await page.locator('#album-detail-dialog').evaluate(node => {
+          const list = node.querySelector('#album-detail-list'), footer = node.querySelector('.ad-footer');
+          return { list: list.getBoundingClientRect().toJSON(), footer: footer.getBoundingClientRect().toJSON(), viewport: { width: innerWidth, height: innerHeight },
+            buttons: [...node.querySelectorAll('.ad-footer-actions button')].filter(button => !button.hidden).map(button => {
+              const box = button.getBoundingClientRect(), range = document.createRange(); range.selectNodeContents(button);
+              return { id: button.id, disabled: button.disabled, box: box.toJSON(), overflow: button.scrollWidth > button.clientWidth + 1,
+                text: [...range.getClientRects()].filter(rect => rect.width && rect.height).map(rect => rect.toJSON()) };
+            }) };
+        });
+        const diagnostic = `${width}x${height} ${colorScheme} ${state}: ${JSON.stringify(layout)}`;
+        assert.ok(layout.list.height >= 40 && layout.list.bottom <= layout.footer.top + 1, `The track list must retain a visible, usable reading area. ${diagnostic}`);
+        assert.ok(layout.footer.bottom <= height + 1, `Footer must remain reachable without scrolling the page. ${diagnostic}`);
+        assert.deepEqual(layout.buttons.map(button => button.id).sort(), [...enabled.filter(id => id !== 'album-detail-close'), ...(state === 'preparing' ? ['album-detail-prepare'] : [])].sort(), diagnostic);
+        for (const button of layout.buttons) {
+          assert.ok(button.box.width >= 80 && !button.overflow, `Footer labels must not collapse to one-glyph columns. ${diagnostic}`);
+          assert.ok(button.box.top >= 0 && button.box.bottom <= height + 1, diagnostic);
+          assert.ok(button.text.length > 0 && new Set(button.text.map(rect => Math.round(rect.top))).size <= 2, `Normal two-line wrapping is allowed. ${diagnostic}`);
+          for (const text of button.text) assert.ok(text.left >= button.box.left - 1 && text.right <= button.box.right + 1 && text.top >= button.box.top - 1 && text.bottom <= button.box.bottom + 1, diagnostic);
+        }
+        assert.deepEqual(layout.buttons.filter(button => button.disabled).map(button => button.id), state === 'preparing' ? ['album-detail-prepare'] : [], diagnostic);
+        assert.deepEqual(await selected(page), before, 'Preparing and previewing an album must preserve the existing selection');
+      };
+      await inspect('normal');
+      model.allowedPosts.add('/api/albums/selection'); model.allowedPosts.add('/api/tracks/selection');
+      const delay = gate(); model.preparationGate = delay; model.gates.push(delay);
+      await page.locator('#album-detail-prepare').click(); await entered(delay); await inspect('preparing');
+      delay.release.resolve(); await delay.done.promise; await page.locator('#album-detail-confirm').waitFor({ state: 'visible' }); await inspect('prepared');
+      await page.locator('#album-detail-cancel').click(); await inspect('normal');
+      await page.locator('#album-detail-return').click(); await detailPhase(page); await validFocus(page); assert.deepEqual(await selected(page), before);
+    }, { model: { ...modelOf(), server: true }, viewport: { width, height }, colorScheme });
   });
 
   await check('Search whitespace normalization matches the server while exact artist identity remains unchanged', () => withPage(async ({ page, model }) => {

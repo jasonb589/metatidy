@@ -68,6 +68,10 @@
   .ad-footer-actions { gap: 6px; }
   .ad-footer-actions .btn { font-size: 10px; padding-inline: 8px; height: auto; min-height: 33px; white-space: normal; }
   .ad-footer-actions .spacer { flex: 0; }
+  .ad-footer-actions:has(#album-detail-return) { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .ad-footer-actions:has(#album-detail-return) .spacer { display: none; }
+  .ad-footer-actions:has(#album-detail-return) .btn { min-width: 0; width: 100%; }
+  .ad-footer-actions:has(#album-detail-return):has(#album-detail-cancel[hidden]) #album-detail-prepare { grid-column: 1 / -1; }
   #album-detail-view-tracks { flex: 1; }
   .ad-add-status { font-size: 9px; }
 }
