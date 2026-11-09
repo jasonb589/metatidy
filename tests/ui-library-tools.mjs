@@ -394,6 +394,29 @@ try {
     assert.equal((await snapshot(page)).filters.folder_recursive, true);
   }));
 
+  await check('Saved artist scopes keep significant Unicode whitespace through restore and reload', () => withPage(async ({ page }) => {
+    await ready(page);
+    const name = '\u00a0合作 & 歌手 / %_!\u0085';
+    await page.evaluate(async name => {
+      (await import('/tracks.js')).setArtistScope(`  ${name}  `);
+    }, name);
+    await saveFilter(page, '艺术家收藏');
+    assert.equal((await storedItems(page))[0].snapshot.filters.artist_group, name);
+    await page.locator('[data-quick-filter="all"]').click();
+    await revealSavedFilters(page); await page.locator('.saved-filter-chip').click();
+    await page.waitForFunction(name => document.querySelector('[data-filter-key="artist_group"]')?.textContent.includes(name), name);
+    assert.equal((await snapshot(page)).filters.artist_group, name);
+    assert.equal((await snapshot(page)).filters.artist, '');
+    await page.reload();
+    await page.waitForFunction(async () => {
+      const { tracks } = (await import('/store.js')).state;
+      return !tracks.loading && tracks.loadedAt > 0;
+    });
+    assert.equal((await snapshot(page)).filters.artist_group, name);
+    await page.locator('[data-filter-key="artist_group"] button').click();
+    assert.equal((await snapshot(page)).filters.artist_group, '');
+  }));
+
   await check('Folder scan preparation preserves exact paths and rejects browser-normalized names without starting jobs', () => withPage(async ({ page }) => {
     await ready(page);
     const writes = [];

@@ -9,6 +9,7 @@ import { state, on, selectionRevision, selectionRows, setCurrentTrack } from "./
 import * as tracks from "./tracks.js";
 import { init as initLibraryLayout } from "./library-layout.js";
 import * as albums from "./albums.js";
+import * as artists from "./artists.js";
 import * as collections from "./collections.js";
 import * as artistPortraits from "./artist-portraits.js";
 import * as scrape from "./scrape.js";
@@ -26,9 +27,10 @@ import { openDuplicateReview, invalidateDuplicateReview } from "./duplicate-revi
 import { openFolderBrowser } from "./folder-browser.js";
 import { initAudioPlayer } from "./audio-player.js";
 
-const TABS = ["tracks", "albums", "collections", "artist-portraits", "scrape", "move", "settings"];
+const TABS = ["tracks", "artists", "albums", "collections", "artist-portraits", "scrape", "move", "settings"];
 const PAGE_COPY = {
   tracks: { eyebrow: "YOUR MUSIC ARCHIVE", title: "我的音乐库", description: "收藏有序，热爱如初。" },
+  artists: { eyebrow: "THE VOICES YOU COLLECT", title: "艺术家收藏", description: "从熟悉的名字，走进你的音乐收藏。" },
   albums: { eyebrow: "THE ALBUM COLLECTION", title: "专辑收藏", description: "让散落的曲目，在专辑里重逢。" },
   collections: { eyebrow: "YOUR TRACK COLLECTIONS", title: "曲目清单", description: "把想整理的歌曲留在一起，下次继续。" },
   "artist-portraits": { eyebrow: "FACES BEHIND THE MUSIC", title: "歌手头像", description: "为熟悉的声音，找到一张合适的肖像。" },
@@ -55,6 +57,9 @@ let libraryRefreshTimer = 0;
 let pendingAlbumsRefresh = false;
 let albumsRefreshRunning = false;
 let albumsRefreshTimer = 0;
+let pendingArtistsRefresh = false;
+let artistsRefreshRunning = false;
+let artistsRefreshTimer = 0;
 
 function boot() {
   if (booted) return;
@@ -62,6 +67,7 @@ function boot() {
   tracks.init();
   initLibraryLayout();
   albums.init();
+  artists.init();
   collections.init();
   artistPortraits.init();
   scrape.init();
@@ -142,6 +148,10 @@ function boot() {
   });
   on("albums:open", (group) => {
     if (!canUseWorkspace() || !tracks.setAlbumScope(group)) return;
+    void showScopedTracks();
+  });
+  on("artists:open-tracks", ({ name } = {}) => {
+    if (!canUseWorkspace() || !tracks.setArtistScope(name)) return;
     void showScopedTracks();
   });
   on("albums:all-tracks", (options = {}) => {
@@ -252,6 +262,7 @@ async function pollBackgroundState() {
   await Promise.allSettled([loadStatus({ lightweight: true }), refreshJobs()]);
   scheduleLibraryRefresh();
   scheduleAlbumsRefresh();
+  scheduleArtistsRefresh();
 }
 
 function canRefreshLibrary({ allowLoading = false } = {}) {
@@ -295,6 +306,7 @@ function wireLibraryUpdates() {
   for (const event of ["focusout", "click", "keyup", "close"]) {
     document.addEventListener(event, scheduleLibraryRefresh, true);
     document.addEventListener(event, scheduleAlbumsRefresh, true);
+    document.addEventListener(event, scheduleArtistsRefresh, true);
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void pollBackgroundState();
@@ -305,6 +317,9 @@ function invalidateAlbums() {
   invalidateDuplicateReview();
   collections.invalidate();
   albums.invalidate();
+  artists.invalidate();
+  pendingArtistsRefresh = true;
+  scheduleArtistsRefresh();
   pendingAlbumsRefresh = true;
   scheduleAlbumsRefresh();
 }
@@ -330,6 +345,29 @@ async function flushAlbumsRefresh() {
     if (await albums.refresh({ background: true, canApply: canRefreshAlbums }) === false) pendingAlbumsRefresh = true;
   } catch { pendingAlbumsRefresh = true; }
   finally { albumsRefreshRunning = false; }
+}
+
+function canRefreshArtists() {
+  return state.tab === "artists" && canUseWorkspace() && document.visibilityState === "visible"
+    && !hasForegroundOverlay() && !document.activeElement?.closest(".artists-toolbar, #artists-pager");
+}
+
+function scheduleArtistsRefresh() {
+  if (!pendingArtistsRefresh || artistsRefreshTimer || state.tab !== "artists") return;
+  artistsRefreshTimer = window.setTimeout(() => {
+    artistsRefreshTimer = 0;
+    void flushArtistsRefresh();
+  }, 150);
+}
+
+async function flushArtistsRefresh() {
+  if (!pendingArtistsRefresh || artistsRefreshRunning || artists.isLoading() || !canRefreshArtists()) return;
+  pendingArtistsRefresh = false;
+  artistsRefreshRunning = true;
+  try {
+    if (await artists.refresh({ background: true, canApply: canRefreshArtists }) === false) pendingArtistsRefresh = true;
+  } catch { pendingArtistsRefresh = true; }
+  finally { artistsRefreshRunning = false; }
 }
 
 /* ------------------------------------------------------------------ 页签 */
@@ -370,6 +408,7 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
   if (changed) closeFilenameTags({ restoreFocus: false });
   if (state.tab === "tracks" && name !== "tracks") tracks.leave();
   if (state.tab === "albums" && name !== "albums") albums.leave();
+  if (state.tab === "artists" && name !== "artists") artists.leave();
   if (state.tab === "collections" && name !== "collections") collections.leave();
   if (state.tab === "artist-portraits" && name !== "artist-portraits") artistPortraits.leave();
   state.tab = name;
@@ -403,6 +442,10 @@ async function activateTab(name, { focus = true, dismissSidebar = true, scroll =
   if (name === "tracks" && !loadedTabs.has("tracks")) {
     loadedTabs.add("tracks");
     await tracks.refresh();
+  } else if (name === "artists") {
+    pendingArtistsRefresh = false;
+    await artists.activate();
+    loadedTabs.add("artists");
   } else if (name === "albums") {
     pendingAlbumsRefresh = false;
     await albums.activate();
@@ -443,6 +486,7 @@ function setWorkspaceLocked(locked) {
     closeJobs({ restoreFocus: false });
     palette.closePalette();
     albums.leave();
+    artists.leave();
     collections.leave();
     artistPortraits.leave();
     // 原生 dialog 位于浏览器顶层，会遮住登录框；失效会话下按取消处理。

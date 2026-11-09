@@ -59,6 +59,7 @@ async function withPage(action, { view = 'list', viewport = { width: 1440, heigh
     if (call.path === '/api/tracks') {
       let matches = [...rows];
       if (call.query.artist) matches = matches.filter(row => row.artist === call.query.artist);
+      if (call.query.artist_group) matches = matches.filter(row => trim(row.artist) === trim(call.query.artist_group));
       if (call.query.q) matches = matches.filter(row => `${row.title} ${row.artist} ${row.album}`.includes(call.query.q));
       if (call.query.album_group) { const group = JSON.parse(call.query.album_group); matches = matches.filter(row => trim(row.album) === group[0] && (trim(row.albumartist) || trim(row.artist)) === group[1]); }
       const size = Number(call.query.page_size) || 100, pages = Math.max(1, Math.ceil(matches.length / size)), number = Math.min(pages, Math.max(1, Number(call.query.page) || 1));
@@ -126,13 +127,14 @@ try {
       await seed(page, [rows[1], { ...rows[105], title: '离页保留的已选快照' }]); const before = await selection(page);
       await setupConflicts(page); const prior = callsFor(calls, '/api/tracks').length;
       await artistLink(page, view, 1).click(); await settled(page);
-      const current = await scope(page); assert.equal(current.q, ''); assert.equal(current.page, 1); assert.equal(current.filters.artist, composite);
-      for (const [key, value] of Object.entries(current.filters)) if (key !== 'artist') assert.equal(value, key === 'folder_recursive' ? true : typeof value === 'boolean' ? false : '', key);
+      const current = await scope(page); assert.equal(current.q, ''); assert.equal(current.page, 1); assert.equal(current.filters.artist_group, composite);
+      for (const [key, value] of Object.entries(current.filters)) if (key !== 'artist_group') assert.equal(value, key === 'folder_recursive' ? true : typeof value === 'boolean' ? false : '', key);
       assert.equal(callsFor(calls, '/api/tracks').length, prior + 1); const query = callsFor(calls, '/api/tracks').at(-1).query;
-      assert.equal(query.artist, composite); assert.ok(!query.q && !query.album_group && !query.folder && !query.album);
+      assert.equal(query.artist_group, composite); assert.ok(!query.q && !query.artist && !query.album_group && !query.folder && !query.album);
       assert.equal(await container(page, view, 1).count(), 1); assert.equal(await container(page, view, 2).count(), 1); assert.equal(await container(page, view, 7).count(), 0);
       assert.deepEqual(await selection(page), before); assert.equal(await page.locator('#track-detail-dialog').count(), 0);
-      assert.equal(await page.locator('#filter-artist').inputValue(), composite); assert.equal(await page.locator('#tracks-q').inputValue(), '');
+      assert.equal(await page.locator('#filter-artist').inputValue(), ''); assert.equal(await page.locator('#tracks-q').inputValue(), '');
+      assert.match(await page.locator('[data-filter-key="artist_group"]').textContent(), /艺术家收藏/);
     }, { view });
   });
 
@@ -143,7 +145,7 @@ try {
     const before = await selection(page); assert.deepEqual(before.ids, [1, 106]);
     await page.locator('#tracks-pager input.jump').fill('1'); await page.locator('#tracks-pager input.jump').press('Enter'); await page.locator('#tracks-tbody tr[data-id="1"]').waitFor();
     await artistLink(page, 'list', 1).click(); await settled(page); assert.deepEqual(await selection(page), before);
-    assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist, rows[0].artist);
+    assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist_group, rows[0].artist);
   }));
 
   await check('Album links resolve exact same-name groups with albumartist priority and artist fallback', async () => {
@@ -199,7 +201,7 @@ try {
       await accessibleLink(page, albumLink(page, view, 1)); await page.keyboard.press('Enter'); await page.locator('#album-detail-dialog[open]').waitFor();
       assert.deepEqual(await selection(page), before); await page.locator('#album-detail-close').click();
       await accessibleLink(page, artistLink(page, view, 1)); await page.keyboard.press('Space'); await settled(page);
-      assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist, composite); assert.deepEqual(await selection(page), before);
+      assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist_group, composite); assert.deepEqual(await selection(page), before);
       assert.equal(await container(page, view, 1).locator('input[type="checkbox"]').isChecked(), false);
     }, { view });
   });
@@ -260,7 +262,7 @@ try {
         await albumLink(page, view, 1).click(); await page.locator('#album-detail-dialog[open]').waitFor();
         assert.deepEqual(JSON.parse(callsFor(calls, '/api/albums/detail').at(-1).query.album_group), [trim(rows[0].album), trim(rows[0].albumartist)]);
         await page.locator('#album-detail-close').click(); await artistLink(page, view, 1).click(); await settled(page);
-        assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist, trim(rows[0].artist)); assert.deepEqual(await selection(page), before);
+        assert.equal(callsFor(calls, '/api/tracks').at(-1).query.artist_group, trim(rows[0].artist)); assert.deepEqual(await selection(page), before);
       }, { viewport, view, colorScheme, long: true });
     }
   });

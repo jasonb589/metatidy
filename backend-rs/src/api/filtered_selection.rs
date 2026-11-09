@@ -21,6 +21,7 @@ const MAX_SAFE_ID: i64 = 9_007_199_254_740_991;
 const TEXT_FIELDS: &[&str] = &[
     "q",
     "artist",
+    "artist_group",
     "album",
     "language",
     "albumtype",
@@ -203,7 +204,7 @@ fn parse_request(root: &Path, payload: &Map<String, Value>) -> ApiResult<Request
 
 fn canonical_query(query: &TrackQuery) -> Value {
     json!({
-        "q": query.q, "artist": query.artist, "album": query.album,
+        "q": query.q, "artist": query.artist, "artist_group": query.artist_group, "album": query.album,
         "language": query.language, "albumtype": query.albumtype,
         "genre": query.genre, "year": query.year, "sort": query.sort,
         "order": if query.order_desc { "desc" } else { "asc" },
@@ -295,7 +296,8 @@ mod tests {
     #[test]
     fn canonical_scope_uses_the_shared_list_parser_and_semantic_defaults() {
         let default = request(json!({"query":{}})).unwrap();
-        assert_eq!(default.canonical.as_object().unwrap().len(), 17);
+        assert_eq!(default.canonical.as_object().unwrap().len(), 18);
+        assert_eq!(default.canonical["artist_group"], "");
         assert_eq!(default.canonical["sort"], "artist");
         assert_eq!(default.canonical["folder_recursive"], true);
         assert_eq!(default.canonical["album_group"], Value::Null);
@@ -318,6 +320,8 @@ mod tests {
     fn strict_query_types_and_unknown_fields_cannot_widen_or_truncate_selection() {
         for value in [
             json!({}),
+            json!({"query":{"artist_group":null}}),
+            json!({"query":{"artist_group":["artist"]}}),
             json!({"query":null}),
             json!({"query":[],"page":1}),
             json!({"query":{},"ids":[]}),
@@ -341,6 +345,14 @@ mod tests {
             }
             assert!(request(json!({"query":{*field:"歌".repeat(4000)}})).is_ok());
         }
+    }
+
+    #[test]
+    fn exact_artist_group_is_canonicalized_without_unicode_trimming_or_splitting() {
+        let value = request(json!({"query":{"artist_group":" \u{3000}A & B / C\u{3000} "}})).unwrap();
+        assert_eq!(value.canonical["artist_group"], "\u{3000}A & B / C\u{3000}");
+        assert_eq!(value.query.artist_group, "\u{3000}A & B / C\u{3000}");
+        assert_eq!(request(json!({"query":{"artist_group":"   "}})).unwrap().canonical["artist_group"], "");
     }
 
     #[test]

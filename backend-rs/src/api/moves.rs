@@ -58,6 +58,11 @@ pub async fn move_preview(State(state): State<AppState>, body: Bytes) -> ApiResu
             genre: filter_text(&filters, "genre"),
             year: filter_text(&filters, "year"),
             artist: filter_text(&filters, "artist"),
+            artist_group: match filters.get("artist_group") {
+                None => String::new(),
+                Some(Value::String(value)) => super::library_artists::parse_artist_group(Some(value), false)?,
+                Some(_) => return Err(ApiError::bad_request("artist_group 必须是字符串")),
+            },
             album: filter_text(&filters, "album"),
             album_group: None,
             folder: None,

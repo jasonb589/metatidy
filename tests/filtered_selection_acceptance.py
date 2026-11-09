@@ -31,7 +31,7 @@ def check_filtered_selection(base: str, music: Path, check) -> None:
     ids: list[int] = []
     owned_collections: set[str] = set()
     route = "/api/tracks/filtered-selection"
-    keys = {"q", "sort", "order", "artist", "album", "language", "albumtype", "genre", "year",
+    keys = {"q", "sort", "order", "artist", "artist_group", "album", "language", "albumtype", "genre", "year",
             "album_group", "folder", "folder_recursive", "missing_cover", "missing_lyrics",
             "no_artist", "no_album", "not_loaded"}
 
@@ -122,7 +122,8 @@ def check_filtered_selection(base: str, music: Path, check) -> None:
                   and _database_snapshot() == indexed and disk_snapshot() == original_disk)
 
             filters = [
-                {"artist": f"{marker} Artist 1"}, {"album": "同名专辑 1"}, {"language": "中文"},
+                {"artist": f"{marker} Artist 1"}, {"artist_group": f"  {marker} Artist 1  "},
+                {"album": "同名专辑 1"}, {"language": "中文"},
                 {"genre": "WithinLimit"}, {"albumtype": "single"}, {"missing_cover": True},
                 {"missing_lyrics": True}, {"no_artist": True}, {"no_album": True}, {"not_loaded": True},
                 {"language": "English", "missing_cover": True, "missing_lyrics": True, "not_loaded": True},
@@ -271,7 +272,7 @@ def check_filtered_selection(base: str, music: Path, check) -> None:
             validation_before = _database_snapshot()
 
             invalid = [{}, {"query": None}, {"query": []}, {"query": "all"}, {"query": {}, "ids": []}]
-            for field in ("q", "artist", "album", "language", "albumtype", "genre", "year", "folder"):
+            for field in ("q", "artist", "artist_group", "album", "language", "albumtype", "genre", "year", "folder"):
                 invalid += [{"query": {field: value}} for value in (None, 1, True, [], "a\0b")]
             for field in ("missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded", "folder_recursive"):
                 invalid += [{"query": {field: value}} for value in (None, 1, "true", [])]

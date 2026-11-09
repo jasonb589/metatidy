@@ -12,6 +12,7 @@ import path from 'node:path';
 import { jpeg as portraitJpeg, avif as portraitAvif } from './portrait-image-fixtures.mjs';
 import { createCollectionsFixture } from './collections-fixture.mjs';
 import { createFilenameTagsFixture } from './filename-tags-fixture.mjs';
+import { createArtistsFixture } from './artists-fixture.mjs';
 
 const staticRoot = fileURLToPath(new URL('../app/static/', import.meta.url));
 const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.split('=')[1] || 8765);
@@ -77,6 +78,7 @@ if (!empty && process.argv.includes('--duplicates')) {
   tracks.push(...tracks.slice(0, 6).map((row, index) => ({ ...row, id: 1001 + index, ext: 'mp3', size: 9500000 + index * 80000, album: `${row.album} · 精选`, path: `/fixture-music/精选/${row.artist}/${row.title}.mp3`, filename: `${row.title}.mp3`, duration: row.duration + index * 2, has_cover: 0 })));
 }
 const collections = createCollectionsFixture(tracks, { seed: !empty });
+const artistBrowser = createArtistsFixture(tracks);
 let values = {
   dir_template: '{language?}/{artist}/{album}', filename_template: '{track:02} - {title}',
   conflict_policy: 'rename', unknown_artist: '未知艺术家', unknown_album: '未知专辑', unknown_other: '未知',
@@ -190,6 +192,7 @@ function filterTracks(params) {
     if (!Array.isArray(group) || group.length !== 2 || group.some(value => typeof value !== 'string')) throw new Error('album_group must contain an album and album artist');
     result = result.filter(t => albumText(t.album) === albumText(group[0]) && (albumText(t.albumartist) || albumText(t.artist)) === albumText(group[1]));
   }
+  if (params.get('artist_group')) result = result.filter(t => albumText(t.artist) === albumText(params.get('artist_group')));
   const q = (params.get('q') || '').toLowerCase();
   if (q) result = result.filter(t => [t.title, t.artist, t.album, t.filename, t.path, t.genre, t.year].some(v => v.toLowerCase().includes(q)));
   for (const field of ['language', 'albumtype', 'genre', 'year', 'artist', 'album']) {
@@ -315,7 +318,7 @@ function filteredSelection(payload) {
     if (!['query', 'revision'].includes(key)) invalid(['body', key], '不支持这个字段；筛选选择不接受分页或截断参数', payload[key], 'extra_forbidden');
   }
   if (!object(payload.query)) invalid(['body', 'query'], '请提供完整的筛选条件对象', payload.query ?? null, 'dict_type');
-  const query = { q: '', artist: '', album: '', language: '', albumtype: '', genre: '', year: '', sort: 'artist', order: 'asc',
+  const query = { q: '', artist: '', artist_group: '', album: '', language: '', albumtype: '', genre: '', year: '', sort: 'artist', order: 'asc',
     album_group: null, folder: '', folder_recursive: true, missing_cover: false, missing_lyrics: false, no_artist: false, no_album: false, not_loaded: false };
   const textFields = ['q', 'artist', 'album', 'language', 'albumtype', 'genre', 'year'];
   const boolFields = ['folder_recursive', 'missing_cover', 'missing_lyrics', 'no_artist', 'no_album', 'not_loaded'];
@@ -336,6 +339,9 @@ function filteredSelection(payload) {
     } else if (key === 'order') {
       if (typeof value !== 'string' || !['asc', 'desc'].includes(trim(value).toLowerCase())) invalid(location, '排序方向须为 asc 或 desc', value);
       query.order = trim(value).toLowerCase();
+    } else if (key === 'artist_group') {
+      if (!validText(value, 4000)) invalid(location, '艺术家分组须为最多4000字且不含空字符的字符串', value);
+      query.artist_group = albumText(value);
     } else if (key === 'album_group') {
       if (value !== null) {
         if (!Array.isArray(value) || value.length !== 2 || value.some(part => !validText(part, 4000)) || !albumText(value[0])) {
@@ -510,6 +516,10 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
+  if (route === '/api/library/artists' || route === '/api/library/artists/detail') {
+    try { return json(res, artistBrowser.handle(route, method, url.searchParams)); }
+    catch (error) { return json(res, { detail: error.detail ?? error.message }, error.status || 500); }
+  }
   if (route.startsWith('/api/tracks/filename-tags/')) {
     try { return json(res, filenameTags.handle(route, method, url.searchParams, payload)); }
     catch (error) { return json(res, { detail: error.detail ?? error.message }, error.status || 500); }

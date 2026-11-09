@@ -14,6 +14,7 @@ import { openAlbumDetail } from "./album-detail.js";
 import { initSavedFilters } from "./saved-filters.js";
 import { showKeyboardHelp } from "./keyboard-help.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
+import { normalizeArtistGroup } from "./artist-group.js";
 import { playTrack } from "./audio-player.js";
 import { createEditSequence } from "./edit-sequence.js";
 import { openFilteredSelection, closeFilteredSelection } from "./filtered-selection.js";
@@ -54,7 +55,7 @@ const EDIT_FIELDS = [
 /** 打开面板时从文件里读回来的歌词基线：只有改动过才带进预览 / 写入。 */
 let lyricsBase = "";
 
-const FILTER_KEYS = ["folder", "album_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
+const FILTER_KEYS = ["folder", "album_group", "artist_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
 const SORT_KEYS = ["artist", "album", "title", "year", "track", "disc_track", "path", "indexed", "edited"];
 // Rust str::trim follows Unicode White_Space (includes NEL, excludes BOM).
 const QUERY_SPACE = /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
@@ -531,7 +532,7 @@ function trackAlbumGroup(row) {
 /** Link text remains metadata: only known names become navigation controls. */
 function libraryLink(row, kind, fallback = "—") {
   const text = String(row[kind] || "");
-  const available = kind === "artist" ? Boolean(trimQueryText(text)) : Boolean(trackAlbumGroup(row));
+  const available = kind === "artist" ? Boolean(normalizeArtistGroup(text)) : Boolean(trackAlbumGroup(row));
   if (!available) return ui.el("span", { class: "truncate", text: fallback });
   const label = kind === "artist" ? `查看 ${text} 的曲目` : `查看 ${text} 的专辑详情`;
   return ui.el("button", {
@@ -550,11 +551,7 @@ function followLibraryLink(event) {
   const row = state.tracks.items.find(item => String(item.id) === id);
   if (!row) return true;
   if (link.dataset.libraryArtist) {
-    const artist = trimQueryText(String(row.artist || ""));
-    if (!artist) return true;
-    resetFilters();
-    state.tracks.filters.artist = artist;
-    syncControls();
+    if (!setArtistScope(row.artist)) return true;
     // The old link is replaced by the filtered rows, so keep keyboard focus on
     // a stable control rather than dropping it to the document body.
     nodes.q.focus({ preventScroll: true });
@@ -611,6 +608,7 @@ export function captureQueryScope() {
     q: trimQueryText(state.tracks.q), sort: state.tracks.sort, order: state.tracks.order,
     folder: filters.folder, folder_recursive: filters.folder ? filters.folder_recursive !== false : true,
     album_group: group ? JSON.parse(group) : null,
+    artist_group: normalizeArtistGroup(filters.artist_group),
   };
   for (const key of ["artist", "album", "language", "albumtype", "genre", "year"]) query[key] = trimQueryText(filters[key]);
   for (const key of ["missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"]) query[key] = filters[key];
@@ -698,6 +696,16 @@ export function prepareFolderScan(folder) {
   return true;
 }
 
+/** Artist browsing and track links share a normalized exact group. */
+export function setArtistScope(name) {
+  const group = normalizeArtistGroup(name);
+  if (!group) return false;
+  resetFilters();
+  state.tracks.filters.artist_group = group;
+  syncControls();
+  return true;
+}
+
 /** Prepare an exact album scope before app.js navigates and loads the track page. */
 export function setAlbumScope(group) {
   const encoded = normalizeAlbumGroup(JSON.stringify([group?.album, group?.album_artist]));
@@ -710,9 +718,10 @@ export function setAlbumScope(group) {
   return true;
 }
 
-export function setAllTracksScope({ no_album = false } = {}) {
+export function setAllTracksScope({ no_album = false, no_artist = false } = {}) {
   resetFilters();
   state.tracks.filters.no_album = Boolean(no_album);
+  state.tracks.filters.no_artist = Boolean(no_artist);
   syncControls();
 }
 
@@ -760,6 +769,7 @@ function syncFilterShortcuts() {
 const FILTER_LABELS = {
   folder: "目录",
   album_group: "专辑分组",
+  artist_group: "艺术家收藏",
   artist: "艺术家",
   album: "专辑",
   language: "语言",
@@ -781,7 +791,7 @@ function renderFilterChips() {
   if (!box) return;
   const active = FILTER_KEYS.filter((key) => {
     const value = state.tracks.filters[key];
-    return typeof value === "boolean" ? value : Boolean(String(value || "").trim());
+    return typeof value === "boolean" ? value : key === "artist_group" ? Boolean(normalizeArtistGroup(value)) : Boolean(String(value || "").trim());
   });
   ui.clear(box);
   box.hidden = active.length === 0;
@@ -839,6 +849,7 @@ function loadPrefs() {
         const value = saved.filters ? saved.filters[key] : undefined;
         if (key === "folder") { state.tracks.filters.folder = typeof value === "string" && !value.includes("\0") ? value : ""; return; }
         if (key === "album_group") { state.tracks.filters[key] = normalizeAlbumGroup(value); return; }
+        if (key === "artist_group") { state.tracks.filters[key] = normalizeArtistGroup(value); return; }
         if (typeof value === typeof state.tracks.filters[key]) state.tracks.filters[key] = typeof value === "string" ? value.slice(0, 1000) : value;
       });
       state.tracks.filters.folder_recursive = saved.filters?.folder_recursive !== false;

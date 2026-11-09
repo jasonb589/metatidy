@@ -30,6 +30,7 @@ use crate::repo;
 use crate::AppState;
 
 mod albums;
+mod library_artists;
 mod audio;
 mod collections;
 mod duplicates;
@@ -844,6 +845,8 @@ pub fn router(state: AppState) -> Router {
             post(filtered_selection::prepare),
         )
         .route("/api/albums", get(albums::list_albums))
+        .route("/api/library/artists", get(library_artists::list))
+        .route("/api/library/artists/detail", get(library_artists::detail))
         .route("/api/albums/detail", get(albums::detail))
         .route("/api/albums/selection", post(albums::selection))
         .route("/api/collections", get(collections::list).post(collections::create))

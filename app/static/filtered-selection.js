@@ -4,7 +4,7 @@ import * as ui from "./ui.js";
 import { on, emit, selectionIds, selectionRevision, selectRows } from "./store.js";
 
 const LIMIT = 20000;
-const QUERY_TEXT = ["q", "artist", "album", "language", "albumtype", "genre", "year", "sort", "order", "folder"];
+const QUERY_TEXT = ["q", "artist", "artist_group", "album", "language", "albumtype", "genre", "year", "sort", "order", "folder"];
 const QUERY_FLAGS = ["folder_recursive", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
 const QUERY_KEYS = [...QUERY_TEXT, ...QUERY_FLAGS, "album_group"];
 const ROW_TEXT = ["path", "dir", "filename", "ext", "title", "artist", "album", "albumartist", "genre", "year", "track", "disc", "language", "albumtype"];
@@ -147,6 +147,7 @@ export function openFilteredSelection({ capture, current, canApply }) {
     if (query.q) parts.push(["搜索", query.q]);
     if (query.folder) parts.push(["目录", `${query.folder}${query.folder_recursive ? "（含子目录）" : "（仅本层）"}`]);
     if (query.album_group) parts.push(["专辑分组", `${query.album_group[0]} · ${query.album_group[1] || "未知专辑艺术家"}`]);
+    if (query.artist_group) parts.push(["艺术家收藏", query.artist_group]);
     for (const [key, label] of [["artist", "艺术家"], ["album", "专辑"], ["language", "语言"], ["albumtype", "专辑类型"], ["genre", "流派"], ["year", "年份"]]) {
       if (query[key]) parts.push([label, query[key]]);
     }

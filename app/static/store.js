@@ -55,6 +55,7 @@ export const state = {
       folder: "",
       folder_recursive: true,
       album_group: "",
+      artist_group: "",
       artist: "",
       album: "",
       language: "",

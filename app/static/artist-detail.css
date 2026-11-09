@@ -1,0 +1,128 @@
+.artist-detail { width: min(1040px, calc(100vw - 40px)); max-width: none; height: min(800px, calc(100dvh - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; border: 1px solid var(--line-2); border-radius: 20px; color: var(--fg); background: var(--bg-1); box-shadow: var(--e3); }
+.artist-detail[open] { display: flex; flex-direction: column; animation: artist-detail-in 180ms var(--ease-out) both; }
+.artist-detail::backdrop { background: var(--scrim); backdrop-filter: blur(4px); }
+.ard-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 23px; border-bottom: 1px solid var(--line); }
+.ard-head .eyebrow { font-size: 8px; letter-spacing: 1.8px; margin: 0; }
+.ard-head-actions { display: flex; align-items: center; gap: 7px; }
+.ard-head-actions .btn { font-size: 10px; min-height: 31px; height: auto; padding: 7px 10px; }
+.ard-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); flex: 1; min-width: 0; min-height: 0; }
+.ard-overview { overflow: auto; min-width: 0; padding: 27px 24px; border-right: 1px solid var(--line); background: linear-gradient(155deg, var(--accent-soft), var(--bg-1) 65%); scrollbar-gutter: stable; overscroll-behavior: contain; }
+.ard-avatar { width: 112px; height: 112px; font-size: 43px; margin-bottom: 21px; box-shadow: 0 0 0 8px color-mix(in srgb, var(--bg-1) 45%, transparent); }
+.ard-avatar::before { inset: 8px; }
+.ard-title { margin: 0; color: var(--fg); font-size: 25px; font-weight: 600; letter-spacing: -.5px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ard-description { margin-top: 9px; color: var(--fg-3); font-size: 10px; line-height: 1.9; }
+.ard-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px 12px; margin: 22px 0 0; }
+.ard-facts > div { min-width: 0; }
+.ard-facts dt { color: var(--fg-3); font-size: 9px; line-height: 1.8; }
+.ard-facts dd { margin: 4px 0 0; color: var(--fg); font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.5; }
+.ard-metadata { margin-top: 22px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: 10px; line-height: 1.9; overflow-wrap: anywhere; }
+.ard-metadata p + p { margin-top: 6px; }
+.ard-quality { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 15px; }
+.ard-quality .badge { white-space: normal; font-size: 9px; }
+.ard-note { margin-top: 18px; font-size: 9px; line-height: 1.9; color: var(--fg-3); overflow-wrap: anywhere; }
+.ard-browser { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.ard-tabs { display: flex; gap: 7px; flex: none; padding: 15px 20px 12px; border-bottom: 1px solid var(--line); }
+.ard-tabs button { appearance: none; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; flex: 1; min-height: 35px; padding: 7px 10px; border: 1px solid transparent; border-radius: 7px; color: var(--fg-3); background: transparent; cursor: pointer; font-size: 11px; }
+.ard-tabs button[aria-selected="true"] { color: var(--accent-2); background: var(--accent-soft); border-color: var(--accent-line); }
+.ard-tabs button span { font-size: 10px; font-variant-numeric: tabular-nums; opacity: .75; }
+.ard-load-state { padding: 0 20px; flex: none; }
+.ard-status { color: var(--fg-3); font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.ard-status:not(:empty) { padding-top: 12px; }
+.artist-detail[data-phase="error"] .ard-status, .artist-detail[data-phase="stale"] .ard-status { color: var(--warn-fg); }
+.ard-load-state .btn { margin-top: 9px; font-size: 10px; }
+.ard-content { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 20px; }
+.ard-list { margin: 0; padding: 0; list-style: none; }
+.ard-album { min-width: 0; display: flex; align-items: center; gap: 14px; padding: 17px 0; border-bottom: 1px solid var(--line); }
+.ard-record { position: relative; display: grid; place-items: center; flex: none; width: 48px; height: 48px; border: 1px solid var(--accent-line); border-radius: 10px; color: var(--accent-2); background: var(--accent-soft); }
+.ard-record::after { content: ""; position: absolute; inset: 9px; border: 1px solid currentColor; border-radius: 50%; opacity: .15; }
+.ard-album-copy { min-width: 0; flex: 1; }
+.ard-album-name { display: block; padding: 0; border: 0; background: transparent; color: var(--fg); font-size: 13px; font-weight: 500; line-height: 1.8; text-align: left; overflow-wrap: anywhere; white-space: pre-wrap; cursor: pointer; }
+.ard-album-name:hover { color: var(--accent-2); text-decoration: underline; text-underline-offset: 4px; }
+.ard-album-artist { margin-top: 3px; color: var(--fg-3); font-size: 10px; line-height: 1.8; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ard-album-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; color: var(--fg-3); font-size: 9px; line-height: 1.8; }
+.ard-album .ard-album-open { font-size: 10px; padding-inline: 9px; flex: none; }
+.ard-track { min-width: 0; display: grid; grid-template-columns: 29px minmax(0, 1fr) auto; align-items: start; gap: 11px; padding: 15px 0; border-bottom: 1px solid var(--line); }
+.ard-track-number { padding-top: 2px; font: 9px/1.8 var(--mono); color: var(--fg-3); }
+.ard-track-copy { min-width: 0; }
+.ard-track-name { display: block; color: var(--fg); font-size: 12px; font-weight: 500; line-height: 1.8; overflow-wrap: anywhere; }
+.ard-track-album { display: inline-block; max-width: 100%; margin-top: 3px; padding: 0; border: 0; background: transparent; color: var(--accent-2); font-size: 10px; line-height: 1.8; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.ard-track-album:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ard-track-path { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 3px; color: var(--fg-3); font: 8px/1.8 var(--mono); }
+.ard-track-missing { margin-top: 4px; color: var(--warn-fg); font-size: 9px; line-height: 1.8; }
+.ard-track-missing:empty { display: none; }
+.ard-track-duration { padding-top: 3px; font-size: 10px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ard-empty { padding: 40px 12px; text-align: center; color: var(--fg-3); font-size: 11px; line-height: 1.9; }
+.ard-pager { display: flex; align-items: center; gap: 8px; flex: none; padding: 12px 20px; border-top: 1px solid var(--line); font-size: 10px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.ard-pager .btn { height: 30px; font-size: 10px; padding-inline: 9px; }
+.ard-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 23px; border-top: 1px solid var(--line); background: var(--bg-2); }
+.ard-footer-note { min-width: 0; color: var(--fg-3); font-size: 10px; line-height: 1.8; }
+.ard-footer .btn { min-height: 37px; height: auto; padding: 8px 13px; font-size: 11px; line-height: 1.6; white-space: normal; }
+.ard-list-enter { animation: artist-detail-list-in 160ms var(--ease-out) both; }
+@keyframes artist-detail-in { from { opacity: .45; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
+@keyframes artist-detail-list-in { from { opacity: .6; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (max-width: 700px) {
+  .artist-detail { width: calc(100vw - 16px); height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); border-radius: 14px; }
+  .ard-head { padding: 10px 14px; gap: 8px; }
+  .ard-head .eyebrow { font-size: 7px; letter-spacing: 1px; }
+  .ard-head-actions { gap: 5px; }
+  .ard-head-actions .btn { min-height: 29px; padding: 6px 8px; font-size: 9px; }
+  .ard-layout { display: flex; flex-direction: column; }
+  .ard-overview { display: grid; grid-template-columns: 66px minmax(0, 1fr); gap: 14px; padding: 17px 16px; border-right: 0; border-bottom: 1px solid var(--line); flex: none; max-height: min(240px, 35dvh); }
+  .ard-avatar { width: 63px; height: 63px; margin: 3px 0 0; font-size: 25px; box-shadow: 0 0 0 5px color-mix(in srgb, var(--bg-1) 45%, transparent); }
+  .ard-avatar::before { inset: 5px; }
+  .ard-title { font-size: 19px; line-height: 1.5; }
+  .ard-description { font-size: 9px; margin-top: 5px; }
+  .ard-facts { margin-top: 12px; gap: 10px; }
+  .ard-facts dd { font-size: 18px; margin-top: 1px; }
+  .ard-facts dt { font-size: 8px; }
+  .ard-metadata { margin-top: 12px; padding-top: 9px; font-size: 9px; }
+  .ard-quality { gap: 4px; margin-top: 10px; }
+  .ard-quality .badge { font-size: 8px; }
+  .ard-note { margin-top: 10px; font-size: 8px; }
+  .ard-browser { flex: 1; }
+  .ard-tabs { padding: 10px 13px; }
+  .ard-tabs button { min-height: 31px; font-size: 10px; padding: 5px 8px; }
+  .ard-load-state, .ard-content { padding-inline: 14px; }
+  .ard-status { font-size: 10px; }
+  .ard-album { gap: 10px; padding-block: 13px; }
+  .ard-record { width: 37px; height: 37px; border-radius: 8px; }
+  .ard-record svg { width: 18px; height: 18px; }
+  .ard-album-name { font-size: 11px; }
+  .ard-album-artist { font-size: 9px; }
+  .ard-album-meta { font-size: 8px; gap: 3px 7px; }
+  .ard-album .ard-album-open { display: none; }
+  .ard-track { grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; padding-block: 12px; }
+  .ard-track-name { font-size: 11px; }
+  .ard-track-album { font-size: 9px; }
+  .ard-track-duration { font-size: 9px; }
+  .ard-pager { padding: 10px 14px; gap: 6px; flex-wrap: wrap; }
+  #artist-detail-range { flex: 1 1 100%; }
+  .ard-pager .spacer { display: none; }
+  .ard-pager .btn { flex: 1; }
+  .ard-footer { padding: 11px 14px 13px; gap: 11px; }
+  .ard-footer-note { font-size: 9px; }
+  .ard-footer .btn { min-height: 36px; font-size: 10px; padding: 7px 10px; }
+}
+@media (max-height: 520px) {
+  .artist-detail { height: calc(100dvh - 16px); max-height: calc(100dvh - 16px); }
+  .ard-head { padding-block: 7px; }
+  .ard-overview { padding: 12px 14px; }
+  .ard-footer { padding: 8px 14px; }
+  .ard-footer .btn { min-height: 31px; padding-block: 6px; font-size: 10px; }
+  .ard-tabs { padding-block: 7px; }
+  .ard-pager { padding-block: 8px; }
+}
+@media (max-height: 520px) and (min-width: 701px) {
+  .ard-layout { grid-template-columns: 255px minmax(0, 1fr); }
+  .ard-overview { display: grid; grid-template-columns: 57px minmax(0, 1fr); gap: 12px; align-content: start; }
+  .ard-avatar { width: 54px; height: 54px; font-size: 24px; margin: 2px 0 0; box-shadow: none; }
+  .ard-title { font-size: 18px; }
+  .ard-facts { margin-top: 12px; gap: 9px; }
+  .ard-facts dd { font-size: 18px; }
+  .ard-metadata { margin-top: 12px; padding-top: 9px; font-size: 9px; }
+  .ard-note { font-size: 8px; margin-top: 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .artist-detail[open], .ard-list-enter { animation: none; }
+  .artist-detail * { transition: none !important; scroll-behavior: auto !important; }
+}

@@ -12,7 +12,9 @@ const trimSpaces = (value) => String(value || "").replace(/^ +| +$/g, "");
 const groupOf = (row) => JSON.stringify([trimSpaces(row.album), trimSpaces(row.albumartist) || trimSpaces(row.artist)]);
 const number = (value) => Math.max(0, Number(value) || 0);
 
-export function openAlbumDetail(initial) {
+export function closeAlbumDetail(options = {}) { closeActive?.(options); }
+
+export function openAlbumDetail(initial, { onClose = () => {}, returnLabel = "" } = {}) {
   const key = normalizeAlbumGroup(JSON.stringify([initial.album, initial.album_artist]));
   if (!key) return;
   closeActive?.({ restoreFocus: false });
@@ -49,6 +51,7 @@ export function openAlbumDetail(initial) {
   const viewTracks = ui.el("button", { id: "album-detail-view-tracks", type: "button", class: "btn", text: "在曲库查看", onClick: () => {
     close({ restoreFocus: false }); emit("albums:open", { album: group[0], album_artist: group[1] });
   } });
+  const returnButton = returnLabel ? ui.el("button", { id: "album-detail-return", type: "button", class: "btn btn-ghost", text: returnLabel, onClick: () => close() }) : null;
   dialog.append(
     ui.el("header", { class: "ad-head" }, [ui.el("p", { class: "eyebrow", text: "INSIDE THE ALBUM" }), ui.el("div", { class: "ad-head-actions" }, [refresh, closeButton])]),
     ui.el("div", { class: "ad-layout" }, [
@@ -59,7 +62,7 @@ export function openAlbumDetail(initial) {
         ui.el("nav", { class: "ad-pager", "aria-label": "专辑曲目分页" }, [range, ui.el("div", { class: "spacer" }), previous, pageLabel, next]),
       ]),
     ]),
-    ui.el("footer", { class: "ad-footer" }, [addStatus, ui.el("div", { class: "ad-footer-actions" }, [viewTracks, ui.el("div", { class: "spacer" }), cancel, prepare, confirm])]),
+    ui.el("footer", { class: "ad-footer" }, [addStatus, ui.el("div", { class: "ad-footer-actions" }, [returnButton, viewTracks, ui.el("div", { class: "spacer" }), cancel, prepare, confirm])]),
   );
   const unsubscribe = on("selection:changed", () => {
     const expected = prepared?.members ?? addController?.members;
@@ -80,6 +83,7 @@ export function openAlbumDetail(initial) {
     window.removeEventListener("metatidy:unauthorized", unauthorized); window.removeEventListener("hashchange", hashChanged);
     if (closeActive === close) closeActive = null;
     if (dialog.open) dialog.close(); dialog.remove();
+    onClose({ restoreFocus });
     const fallback = ui.byId("albums-q");
     const target = opener?.isConnected && opener.getClientRects().length ? opener : fallback;
     if (restoreFocus && target?.getClientRects().length && !target.closest("[inert]")) target.focus({ preventScroll: true });
@@ -255,7 +259,7 @@ export function openAlbumDetail(initial) {
       cancelAddition("范围已变化，请重新准备整张选择。"); sync(); return;
     }
     const tracks = pending.tracks; const added = pending.added; const merged = pending.total;
-    close({ restoreFocus: true }); selectRows(tracks);
+    close({ restoreFocus: false }); selectRows(tracks);
     emit("library:review-selection"); ui.toast("ok", `已追加 ${ui.fmtNum(added)} 首`, `合并后共选中 ${ui.fmtNum(merged)} 首，可在已选审阅中继续核对。`);
   }
 }

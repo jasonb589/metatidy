@@ -244,6 +244,8 @@ pub struct TrackQuery {
     pub album: String,
     /// Exact normalized album group from the album browser, including blank artists.
     pub album_group: Option<(String, String)>,
+    /// ASCII-space-normalized, exact track-artist scope; legacy artist stays unchanged.
+    pub artist_group: String,
     /// Validated native directory scope, shared with indexed folder browsing.
     pub folder: Option<crate::folders::FolderScope>,
     pub missing_cover: bool,
@@ -319,6 +321,10 @@ fn track_sql(query: &TrackQuery) -> TrackSql {
         let album_bind = placeholder(&params);
         params.push(Param::Text(artist.clone()));
         clauses.push(album_group_predicate(album_bind, placeholder(&params)));
+    }
+    if !query.artist_group.is_empty() {
+        params.push(Param::Text(query.artist_group.clone()));
+        clauses.push(artist_group_predicate(placeholder(&params)));
     }
     if let Some(folder) = &query.folder {
         params.push(Param::Text(folder.directory().to_owned()));
@@ -469,6 +475,10 @@ fn album_group_predicate(album_bind: usize, artist_bind: usize) -> String {
         md5({ALBUM_ARTIST_EXPR}) = md5(${artist_bind}::text) AND \
         {ALBUM_NAME_EXPR} = ${album_bind} AND {ALBUM_ARTIST_EXPR} = ${artist_bind}"
     )
+}
+
+fn artist_group_predicate(bind: usize) -> String {
+    format!("BTRIM(artist) <> '' AND md5(BTRIM(artist))=md5(${bind}::text) AND BTRIM(artist)=${bind}")
 }
 
 /// All album pages and whole-album selections use the track list's numeric
@@ -718,6 +728,195 @@ pub async fn list_albums(pool: &PgPool, query: &AlbumQuery) -> anyhow::Result<Pa
         pages,
         items,
     })
+}
+
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct ArtistSummary {
+    pub name: String,
+    pub track_count: i64,
+    pub album_count: i64,
+    pub unalbumed_count: i64,
+    pub duration: f64,
+    pub bytes: i64,
+    pub missing_cover: i64,
+    pub missing_lyrics: i64,
+    pub not_loaded: i64,
+    pub indexed_at: f64,
+}
+
+pub struct PagedArtists {
+    pub total: i64,
+    pub page: i64,
+    pub pages: i64,
+    pub items: Vec<ArtistSummary>,
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+pub struct ArtistAlbum {
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub summary: AlbumSummary,
+    pub artist_track_count: i64,
+}
+
+pub enum ArtistItems {
+    Albums(Vec<ArtistAlbum>),
+    Tracks(Vec<Track>),
+}
+
+pub struct ArtistDetail {
+    pub summary: ArtistSummary,
+    pub revision: String,
+    pub total: i64,
+    pub page: i64,
+    pub pages: i64,
+    pub items: ArtistItems,
+}
+
+pub enum ArtistDetailResult {
+    Missing,
+    Changed,
+    Ready(ArtistDetail),
+}
+
+fn artist_summary_sql(predicate: &str) -> String {
+    format!("SELECT BTRIM(artist) AS name, count(*) AS track_count, \
+        count(DISTINCT ({ALBUM_NAME_EXPR},{ALBUM_ARTIST_EXPR})) FILTER (WHERE {ALBUM_NAME_EXPR}<>'') AS album_count, \
+        count(*) FILTER (WHERE {ALBUM_NAME_EXPR}='') AS unalbumed_count, \
+        COALESCE(sum(duration),0)::double precision AS duration, COALESCE(sum(size),0)::bigint AS bytes, \
+        count(*) FILTER (WHERE NOT has_cover) AS missing_cover, \
+        count(*) FILTER (WHERE NOT has_lyrics) AS missing_lyrics, \
+        count(*) FILTER (WHERE NOT tags_loaded) AS not_loaded, \
+        COALESCE(extract(epoch from max(indexed_at)),0)::double precision AS indexed_at \
+        FROM tracks WHERE {predicate} GROUP BY BTRIM(artist)")
+}
+
+/// Artist stats and the page use one database snapshot. No audio paths, cover
+/// URLs, portrait services or caches are accessed by this browsing query.
+pub async fn list_library_artists(
+    pool: &PgPool,
+    q: &str,
+    sort: &str,
+    descending: bool,
+    requested: i64,
+    page_size: i64,
+) -> anyhow::Result<PagedArtists> {
+    let grouped = artist_summary_sql("BTRIM(artist)<>'' AND BTRIM(artist) ILIKE $1 ESCAPE '!'");
+    let column = match sort {
+        "tracks" => "track_count",
+        "recent" => "indexed_at",
+        _ => "name",
+    };
+    let direction = if descending { "DESC" } else { "ASC" };
+    let pattern = album_search_pattern(q);
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM ({grouped}) AS artists"))
+        .bind(&pattern)
+        .fetch_one(&mut *tx)
+        .await?;
+    let (page, pages, offset) = album_page(total, requested, page_size);
+    let items = sqlx::query_as(&format!("SELECT * FROM ({grouped}) AS artists ORDER BY {column} {direction},name ASC LIMIT $2 OFFSET $3"))
+        .bind(&pattern).bind(page_size).bind(offset).fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(PagedArtists {
+        total,
+        page,
+        pages,
+        items,
+    })
+}
+
+/// Related full-album rows participate in the revision because album cards
+/// report whole-album metadata, including tracks by other artists. xmin also
+/// catches A→B→A edits whose final values happen to match the original values.
+const ARTIST_RELATED_CTE: &str = "WITH own_rows AS MATERIALIZED (
+    SELECT id,xmin::text AS row_version,BTRIM(album) AS album,
+        COALESCE(NULLIF(BTRIM(albumartist),''),BTRIM(artist)) AS album_artist
+    FROM tracks WHERE BTRIM(artist)<>'' AND md5(BTRIM(artist))=md5($1::text) AND BTRIM(artist)=$1),
+    own_groups AS MATERIALIZED (SELECT DISTINCT album,album_artist FROM own_rows WHERE album<>''), related AS (
+    SELECT id,row_version FROM own_rows UNION
+    SELECT t.id,t.xmin::text AS row_version FROM own_groups g JOIN tracks t
+        ON BTRIM(t.album)<>'' AND md5(BTRIM(t.album))=md5(g.album)
+        AND md5(COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist)))=md5(g.album_artist)
+        AND BTRIM(t.album)=g.album AND COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist))=g.album_artist)";
+
+pub async fn library_artist_detail(
+    pool: &PgPool,
+    name: &str,
+    section: &str,
+    requested: i64,
+    page_size: i64,
+    expected_revision: Option<&str>,
+) -> anyhow::Result<ArtistDetailResult> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let predicate = artist_group_predicate(1);
+    let summary: Option<ArtistSummary> = sqlx::query_as(&artist_summary_sql(&predicate))
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(summary) = summary else {
+        return Ok(ArtistDetailResult::Missing);
+    };
+    let revision: String = sqlx::query_scalar(&format!("{ARTIST_RELATED_CTE} SELECT md5(jsonb_build_array($1::text,COALESCE(string_agg(jsonb_build_array(id,row_version)::text,',' ORDER BY id),''))::text) FROM related"))
+        .bind(name).fetch_one(&mut *tx).await?;
+    if expected_revision.is_some_and(|expected| expected != revision) {
+        return Ok(ArtistDetailResult::Changed);
+    }
+    let total = if section == "albums" {
+        summary.album_count
+    } else {
+        summary.track_count
+    };
+    let (page, pages, offset) = album_page(total, requested, page_size);
+    let items = if section == "albums" {
+        // Aggregate only the requested groups, but aggregate every track within
+        // those groups. artist_track_count explicitly describes the subset.
+        let sql = format!("WITH groups AS (
+            SELECT {ALBUM_NAME_EXPR} AS album,{ALBUM_ARTIST_EXPR} AS album_artist,count(*) AS artist_track_count
+            FROM tracks WHERE {predicate} AND {ALBUM_NAME_EXPR}<>'' GROUP BY {ALBUM_NAME_EXPR},{ALBUM_ARTIST_EXPR}
+            ORDER BY album,album_artist LIMIT $2 OFFSET $3)
+            SELECT details.*,g.artist_track_count FROM groups g CROSS JOIN LATERAL (
+                SELECT BTRIM(t.album) AS album,COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist)) AS album_artist,
+                {ALBUM_SUMMARY_FIELDS} FROM tracks t
+                WHERE BTRIM(t.album)=g.album AND COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist))=g.album_artist
+                AND md5(BTRIM(t.album))=md5(g.album)
+                AND md5(COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist)))=md5(g.album_artist)
+                GROUP BY BTRIM(t.album),COALESCE(NULLIF(BTRIM(t.albumartist),''),BTRIM(t.artist))) details
+            ORDER BY g.album,g.album_artist");
+        ArtistItems::Albums(
+            sqlx::query_as(&sql)
+                .bind(name)
+                .bind(page_size)
+                .bind(offset)
+                .fetch_all(&mut *tx)
+                .await?,
+        )
+    } else {
+        let sql = format!("SELECT {TRACK_COLUMNS} FROM tracks WHERE {predicate} ORDER BY {ALBUM_NAME_EXPR},{ALBUM_ARTIST_EXPR},{} LIMIT $2 OFFSET $3",disc_track_order(false));
+        ArtistItems::Tracks(
+            sqlx::query_as(&sql)
+                .bind(name)
+                .bind(page_size)
+                .bind(offset)
+                .fetch_all(&mut *tx)
+                .await?,
+        )
+    };
+    tx.commit().await?;
+    Ok(ArtistDetailResult::Ready(ArtistDetail {
+        summary,
+        revision,
+        total,
+        page,
+        pages,
+        items,
+    }))
 }
 
 /// 库统计。
@@ -1029,6 +1228,17 @@ mod tests {
         let direct_sql = track_sql(&direct);
         assert_eq!(direct_sql.predicate, " WHERE dir = $1");
         assert_eq!(direct_sql.params, vec![Param::Text(directory)]);
+    }
+
+    #[test]
+    fn exact_artist_group_does_not_change_the_legacy_artist_filter() {
+        let query = TrackQuery { artist: " Legacy ".into(), artist_group: "\u{3000}A & B / O'Brien\u{3000}".into(), ..Default::default() };
+        let sql = track_sql(&query);
+        assert_eq!(sql.params,vec![Param::Text("Legacy".into()),Param::Text("\u{3000}A & B / O'Brien\u{3000}".into())]);
+        assert!(sql.predicate.contains("artist = $1"));
+        assert!(sql.predicate.contains("BTRIM(artist)=$2"));
+        assert!(sql.predicate.contains("md5(BTRIM(artist))=md5($2::text)"));
+        assert!(!sql.predicate.contains("O'Brien"));
     }
 
     #[test]

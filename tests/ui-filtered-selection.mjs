@@ -17,7 +17,7 @@ for (const value of [process.env.PLAYWRIGHT_MODULE, 'playwright', path.join(path
 if (!playwright) throw new Error('Install Playwright or set PLAYWRIGHT_MODULE.');
 const port = Number(process.env.METATIDY_FILTERED_UI_PORT || 18987), base = `http://127.0.0.1:${port}`;
 const endpoint = '/api/tracks/filtered-selection', dialog = '#filtered-selection-dialog';
-const defaults = { q: '', artist: '', album: '', language: '', albumtype: '', genre: '', year: '', sort: 'artist', order: 'asc',
+const defaults = { q: '', artist: '', artist_group: '', album: '', language: '', albumtype: '', genre: '', year: '', sort: 'artist', order: 'asc',
   album_group: null, folder: '', folder_recursive: true, missing_cover: false, missing_lyrics: false, no_artist: false, no_album: false, not_loaded: false };
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const gate = () => ({ entered: deferred(), release: deferred(), done: deferred(), index: -1 });
@@ -191,7 +191,7 @@ try {
   }));
 
   await check('Raw inputs and every query field are captured without page, view or density limits', () => withPage(async ({ page, model }) => {
-    const expected = { ...defaults, q: '待补 %_', artist: '歌手', album: '专辑', genre: 'Rock', year: '2025', language: '中文', albumtype: '专辑',
+    const expected = { ...defaults, q: '待补 %_', artist: '歌手', artist_group: '\u00a0精确歌手\u0085', album: '专辑', genre: 'Rock', year: '2025', language: '中文', albumtype: '专辑',
       sort: 'disc_track', order: 'desc', album_group: ['合集', '共同艺术家'], folder: '/fixture-music/  收藏 %_!  ', folder_recursive: false,
       missing_cover: true, missing_lyrics: true, no_artist: true, no_album: true, not_loaded: true };
     await page.evaluate(async expected => {
@@ -404,8 +404,8 @@ try {
     }, { model: modelOf(3) });
   });
 
-  await check('Scope changes from sorting, directories, album groups and quick filters reject old confirmed snapshots', async () => {
-    for (const mutation of ['sort-ABA', 'folder', 'album-group', 'quick-filter']) await withPage(async ({ page, model }) => {
+  await check('Scope changes from sorting, directories, artist and album groups and quick filters reject old confirmed snapshots', async () => {
+    for (const mutation of ['sort-ABA', 'folder', 'album-group', 'artist-group', 'quick-filter']) await withPage(async ({ page, model }) => {
       await seed(page, rowsOf(1, 9000)); const before = await selected(page); await prepare(page);
       const delay = gate(); plan(model, { gate: delay }); await page.locator('#filtered-selection-confirm').click(); await entered(delay);
       await page.evaluate(async mutation => {
@@ -415,6 +415,7 @@ try {
           for (const value of ['title', original]) { node.value = value; node.dispatchEvent(new Event('change', { bubbles: true })); }
         } else if (mutation === 'folder') tracks.setFolderScope({ folder: '/fixture-music/  新目录  ', recursive: false });
         else if (mutation === 'album-group') tracks.setAlbumScope({ album: '新专辑', album_artist: '新歌手' });
+        else if (mutation === 'artist-group') tracks.setArtistScope('  新歌手\u00a0  ');
         else document.querySelector('[data-quick-filter="missing_cover"]').click();
       }, mutation);
       await phase(page, 'stale'); await release(page, delay); assert.deepEqual(await selected(page), before, mutation);

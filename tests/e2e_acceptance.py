@@ -35,6 +35,7 @@ from tests.cover_acceptance import check_covers, seed_cover_fixtures  # noqa: E4
 from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
 from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: E402
 from tests.albums_acceptance import check_albums  # noqa: E402
+from tests.artists_acceptance import check_artists  # noqa: E402
 from tests.write_acceptance import check_writes  # noqa: E402
 from tests.filename_tags_acceptance import check_filename_tags  # noqa: E402
 from tests.move_acceptance import check_moves  # noqa: E402
@@ -562,6 +563,8 @@ def main() -> int:
         check_collections(BASE, music, check, restart=restart_for_collections)
         print("\n=== 21. 跨页筛选完整选择与一致性确认 ===")
         check_filtered_selection(BASE, music, check)
+        print("\n=== 22. 艺术家浏览、完整合辑统计与精确曲库范围 ===")
+        check_artists(BASE, music, check)
     finally:
         proc.terminate()
         try:

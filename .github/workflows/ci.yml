@@ -44,6 +44,7 @@ jobs:
           node tests/ui-collections.mjs
           node tests/ui-audio-player.mjs
           node tests/ui-albums.mjs
+          node tests/ui-artists.mjs
           node tests/ui-scrape-scope.mjs
           node tests/ui-review-queue.mjs
           node tests/ui-move-review.mjs

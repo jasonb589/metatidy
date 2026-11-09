@@ -87,6 +87,7 @@ pub(super) fn parse_track_query(root: &std::path::Path, query: &RawQuery) -> Api
         genre: query.str("genre", "").trim().to_owned(),
         year: query.str("year", "").trim().to_owned(),
         artist: query.str("artist", "").trim().to_owned(),
+        artist_group: super::library_artists::parse_artist_group(query.0.get("artist_group"), false)?,
         album: query.str("album", "").trim().to_owned(),
         album_group: super::albums::parse_album_group(query.0.get("album_group"))?,
         folder: super::folders::track_scope(root, query)?,

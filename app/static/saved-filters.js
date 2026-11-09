@@ -1,6 +1,7 @@
 /** Named library views, stored only in this browser. No server or file writes. */
 import * as ui from "./ui.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
+import { normalizeArtistGroup } from "./artist-group.js";
 
 const STORAGE_KEY = "metatidy.saved-filters.v1";
 const MAX_ITEMS = 12;
@@ -29,6 +30,7 @@ function snapshotOf(value) {
   for (const key of TEXT_FILTERS) filters[key] = text(incoming[key]);
   for (const key of FLAG_FILTERS) filters[key] = incoming[key] === true;
   filters.album_group = normalizeAlbumGroup(incoming.album_group);
+  filters.artist_group = normalizeArtistGroup(incoming.artist_group);
   return {
     q: text(source.q, 4000),
     sort: SORTS.includes(source.sort) ? source.sort : "artist",
@@ -45,6 +47,7 @@ function describe(snapshot) {
   if (snapshot.q) parts.push(`搜索：${snapshot.q}`);
   if (snapshot.filters.folder) parts.push(`目录：${snapshot.filters.folder}${snapshot.filters.folder_recursive ? "（含子目录）" : "（仅本层）"}`);
   if (snapshot.filters.album_group) parts.push(`专辑分组：${albumGroupLabel(snapshot.filters.album_group)}`);
+  if (snapshot.filters.artist_group) parts.push(`艺术家收藏：${snapshot.filters.artist_group}`);
   for (const key of TEXT_FILTERS) if (snapshot.filters[key]) parts.push(`${LABELS[key]}：${snapshot.filters[key]}`);
   for (const key of FLAG_FILTERS) if (snapshot.filters[key]) parts.push(LABELS[key]);
   if (!parts.length) parts.push("全部曲目");
