@@ -410,6 +410,8 @@ try {
         } else {
           await page.locator('#tab-tracks').focus();
           await page.keyboard.press('ArrowDown');
+          assert.equal(await page.locator('#tab-artists').getAttribute('aria-selected'), 'true');
+          await page.keyboard.press('ArrowDown');
           assert.equal(await page.locator('#tab-albums').getAttribute('aria-selected'), 'true');
         }
       }, { viewport: { width, height }, colorScheme, reducedMotion });
