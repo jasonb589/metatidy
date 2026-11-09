@@ -51,12 +51,15 @@ export function init() {
     // Saved presets and updated status text can grow an already-open panel.
     // Re-anchor the same controls after content changes, including a modal return.
     new ResizeObserver(() => place(disclosure)).observe(panel);
-    disclosure.addEventListener("toggle", () => {
+    // Native details toggle events are queued and may arrive after a frame.
+    // Position at the open-attribute microtask so reopening after a resize
+    // never paints the previous viewport's coordinates, even for one frame.
+    new MutationObserver(() => {
       summary.setAttribute("aria-expanded", String(disclosure.open));
       if (!disclosure.open) return;
       for (const other of disclosures) if (other !== disclosure) close(other);
       place(disclosure); reveal(panel);
-    });
+    }).observe(disclosure, { attributes: true, attributeFilter: ["open"] });
   }
   function updateOverview() {
     const count = ui.byId("stats-strip")?.querySelector(".stat .v")?.textContent?.trim();

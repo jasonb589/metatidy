@@ -217,6 +217,67 @@ try {
     assert.deepEqual(await snapshot(page), before);
   }, { viewport: { width: 390, height: 844 } }));
 
+  await check('Reopened popovers fit before the first frame after closed viewport changes', async () => {
+    for (const reducedMotion of ['reduce', 'no-preference']) await withPage(async ({ page }) => {
+      await ready(page);
+      const before = await snapshot(page);
+      const disclosures = [
+        ['library-display-toggle', 'library-display-settings', 'library-display-settings-panel'],
+        ['library-tools-toggle', 'library-tools', 'library-tools-panel'],
+        ['library-filters-toggle', 'library-filters', 'library-filters-panel'],
+        ['library-saved-filters-toggle', 'library-saved-filters', 'library-saved-filters-panel'],
+      ];
+      await page.evaluate(ids => {
+        window.layoutOpeningAnimations = [];
+        for (const id of ids) {
+          const panel = document.getElementById(id), animate = panel.animate.bind(panel);
+          panel.animate = (...args) => {
+            window.layoutOpeningAnimations.push({ id, options: args[1] });
+            return animate(...args);
+          };
+        }
+      }, disclosures.map(([, , panel]) => panel));
+      for (const [toggle, disclosure, panel] of disclosures) {
+        for (const [width, height] of [[320, 480], [844, 390]]) {
+          // Store a real desktop position, then resize while the panel is closed.
+          await page.setViewportSize({ width: 1440, height: 1000 });
+          await page.locator(`#${toggle}`).click(); await flush(page);
+          await finishMotion(page, `#${disclosure}`);
+          await page.keyboard.press('Escape');
+          await page.setViewportSize({ width, height });
+          const immediate = await page.evaluate(async ({ toggle, disclosure, panel }) => {
+            const count = window.layoutOpeningAnimations.length;
+            document.getElementById(toggle).click();
+            // A queued native details toggle may run after the next paint. Read
+            // at the microtask checkpoint so stale coordinates cannot flash.
+            await Promise.resolve();
+            const node = document.getElementById(panel), rect = node.getBoundingClientRect();
+            return { open: document.getElementById(disclosure).open, expanded: document.getElementById(toggle).getAttribute('aria-expanded'),
+              opened: document.querySelectorAll('#library-tools[open], #library-display-settings[open], #library-filters[open], #library-saved-filters[open]').length,
+              panel, left: rect.left, right: rect.right,
+              top: rect.top, bottom: rect.bottom, width: innerWidth, height: innerHeight,
+              scrollX, scrollY, inline: node.getAttribute('style'), count };
+          }, { toggle, disclosure, panel });
+          assert.equal(immediate.open, true);
+          assert.equal(immediate.expanded, 'true');
+          assert.equal(immediate.opened, 1, 'Opening a disclosure must update accessibility and exclusivity before its first frame');
+          assert.ok(immediate.left >= 0 && immediate.right <= width && immediate.top >= 0 && immediate.bottom <= height,
+            `The first visible frame must use the current viewport: ${JSON.stringify(immediate)}`);
+          await flush(page); await finishMotion(page, `#${disclosure}`);
+          await withinViewport(page, `#${panel}`); await noOverflow(page);
+          const animations = await page.evaluate(count => window.layoutOpeningAnimations.slice(count), immediate.count);
+          assert.equal(animations.length, reducedMotion === 'reduce' ? 0 : 1, 'A later native toggle must not replay the opening animation');
+          if (animations.length) {
+            assert.equal(animations[0].id, panel);
+            assert.equal(animations[0].options.duration, 160);
+          }
+          await page.keyboard.press('Escape');
+        }
+      }
+      assert.deepEqual(await snapshot(page), before, 'Reopening and resizing must preserve browsing and selection state');
+    }, { viewport: { width: 1440, height: 1000 }, reducedMotion });
+  });
+
   await check('Folder and duplicate tools remain reachable and return focus without starting a scan', () => withPage(async ({ page }) => {
     await ready(page);
     const before = await snapshot(page);
