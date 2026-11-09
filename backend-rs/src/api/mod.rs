@@ -33,6 +33,7 @@ mod albums;
 mod audio;
 mod collections;
 mod duplicates;
+mod filtered_selection;
 mod folders;
 mod moves;
 mod portraits;
@@ -108,6 +109,8 @@ pub enum ApiError {
     Unprocessable(Value),
     /// 其它显式状态码（409、404 等）
     Status(StatusCode, String),
+    /// Machine-readable errors for an explicitly bounded selection operation.
+    StatusDetail(StatusCode, Value),
 }
 
 impl ApiError {
@@ -155,6 +158,11 @@ impl ApiError {
                 .unwrap_or("参数校验失败")
                 .to_string(),
             ApiError::Status(_, detail) => detail.clone(),
+            ApiError::StatusDetail(_, detail) => detail
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("请求未完成")
+                .to_owned(),
         }
     }
 }
@@ -182,6 +190,9 @@ impl IntoResponse for ApiError {
                 if code.is_server_error() {
                     tracing::error!("请求失败：{detail}");
                 }
+                (code, Json(json!({ "detail": detail }))).into_response()
+            }
+            ApiError::StatusDetail(code, detail) => {
                 (code, Json(json!({ "detail": detail }))).into_response()
             }
         }
@@ -822,6 +833,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/navidrome/test", post(portraits::connection))
         .route("/api/navidrome/artists", get(portraits::targets))
         .route("/api/tracks/selection", post(tracks::selection))
+        .route(
+            "/api/tracks/filtered-selection",
+            post(filtered_selection::prepare),
+        )
         .route("/api/albums", get(albums::list_albums))
         .route("/api/albums/detail", get(albums::detail))
         .route("/api/albums/selection", post(albums::selection))

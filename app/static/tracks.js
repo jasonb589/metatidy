@@ -15,6 +15,7 @@ import { showKeyboardHelp } from "./keyboard-help.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
 import { playTrack } from "./audio-player.js";
 import { createEditSequence } from "./edit-sequence.js";
+import { openFilteredSelection, closeFilteredSelection } from "./filtered-selection.js";
 import {
   state,
   emit,
@@ -54,6 +55,9 @@ let lyricsBase = "";
 
 const FILTER_KEYS = ["folder", "album_group", "artist", "album", "language", "albumtype", "genre", "year", "missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"];
 const SORT_KEYS = ["artist", "album", "title", "year", "track", "disc_track", "path", "indexed", "edited"];
+// Rust str::trim follows Unicode White_Space (includes NEL, excludes BOM).
+const QUERY_SPACE = /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+const trimQueryText = value => value.replace(QUERY_SPACE, "");
 
 let nodes = null;
 let editTrigger = null;
@@ -73,6 +77,8 @@ let editSequenceView = null;
 let editLeavePrompt = null;
 let editAccessBlocked = false;
 let selectionControls = null;
+let queryGeneration = 0;
+let lastQueryScopeKey = "";
 
 export function init() {
   nodes = {
@@ -143,6 +149,11 @@ export function init() {
     refresh();
   }, 300);
   cancelPendingSearch = debouncedSearch.cancel;
+
+  // Invalidate before debounce or change commits, including raw A → B → A.
+  for (const input of [nodes.q, nodes.fArtist, nodes.fAlbum, nodes.fGenre, nodes.fYear]) {
+    input.addEventListener("input", invalidateQueryScope);
+  }
 
   nodes.q.addEventListener("input", () => {
     // 先保存文字，避免防抖期间点击快捷筛选时被旧 query 覆盖。
@@ -291,6 +302,9 @@ export function init() {
   // 「快速扫描」与「全量重扫」可以叠加：fast 只从路径建索引（不打开文件），
   // full 忽略 mtime 缓存强制重算——两个一起勾就是「按目录结构把整库重算一遍」。
   nodes.editSelected.addEventListener("click", () => openEdit(selectionRows()));
+  ui.byId("btn-filtered-selection").addEventListener("click", () => {
+    openFilteredSelection({ capture: prepareQueryScope, current: currentQueryScope, canApply: canSelectFiltered });
+  });
 
   nodes.checkPage.addEventListener("change", () => {
     selectRows(state.tracks.items, nodes.checkPage.checked);
@@ -338,7 +352,7 @@ export function init() {
     input.addEventListener("input", () => { editTouched.add(key); syncEditDraft(); });
   }
   nodes.editLyrics?.addEventListener("input", () => { lyricsTouched = true; syncEditDraft(); });
-  const lockEdit = () => { editAccessBlocked = true; closeEdit({ restoreFocus: false, force: true }); };
+  const lockEdit = () => { editAccessBlocked = true; leave(); closeEdit({ restoreFocus: false, force: true }); };
   window.addEventListener("metatidy:unauthorized", lockEdit);
   window.addEventListener("metatidy:logout", lockEdit);
   window.addEventListener("metatidy:authenticated", () => { editAccessBlocked = false; });
@@ -540,6 +554,62 @@ function applyFilter(key, value) {
   refresh();
 }
 
+/** Canonical POST scope: paging and visual preferences never change this range. */
+export function captureQueryScope() {
+  const filters = state.tracks.filters;
+  const group = normalizeAlbumGroup(filters.album_group);
+  const query = {
+    q: trimQueryText(state.tracks.q), sort: state.tracks.sort, order: state.tracks.order,
+    folder: filters.folder, folder_recursive: filters.folder ? filters.folder_recursive !== false : true,
+    album_group: group ? JSON.parse(group) : null,
+  };
+  for (const key of ["artist", "album", "language", "albumtype", "genre", "year"]) query[key] = trimQueryText(filters[key]);
+  for (const key of ["missing_cover", "missing_lyrics", "no_artist", "no_album", "not_loaded"]) query[key] = filters[key];
+  return query;
+}
+
+function invalidateQueryScope() {
+  queryGeneration += 1;
+  emit("tracks:query-changed");
+}
+
+function syncQueryScope() {
+  const key = JSON.stringify(captureQueryScope());
+  if (key === lastQueryScopeKey) return;
+  const hadScope = Boolean(lastQueryScopeKey);
+  lastQueryScopeKey = key;
+  if (hadScope) invalidateQueryScope();
+}
+
+function currentQueryScope() {
+  return { query: captureQueryScope(), generation: queryGeneration };
+}
+
+function prepareQueryScope() {
+  cancelPendingSearch();
+  const before = lastQueryScopeKey;
+  state.tracks.q = nodes.q.value.trim();
+  for (const [key, input] of [["artist", nodes.fArtist], ["album", nodes.fAlbum], ["genre", nodes.fGenre], ["year", nodes.fYear]]) {
+    state.tracks.filters[key] = input.value.trim();
+  }
+  syncQueryScope();
+  if (before !== lastQueryScopeKey) {
+    state.tracks.page = 1;
+    syncControls();
+    void refresh();
+  }
+  return currentQueryScope();
+}
+
+function canSelectFiltered() {
+  return state.tab === "tracks" && !editAccessBlocked && !document.querySelector(".app-content")?.inert;
+}
+
+/** replaceState navigation does not dispatch hashchange; app.js calls this explicitly. */
+export function leave() {
+  closeFilteredSelection({ restoreFocus: false });
+}
+
 function resetFilters() {
   cancelPendingSearch();
   FILTER_KEYS.forEach((key) => {
@@ -598,6 +668,7 @@ export function setAllTracksScope({ no_album = false } = {}) {
 }
 
 function syncControls() {
+  syncQueryScope();
   nodes.q.value = state.tracks.q;
   nodes.sort.value = state.tracks.sort;
   nodes.order.value = state.tracks.order;
@@ -809,6 +880,7 @@ function wireTableKeys() {
 /* --------------------------------------------------------------- 数据 */
 
 export async function refresh({ background = false, canApply = () => true } = {}) {
+  syncQueryScope();
   const sequence = ++refreshSequence;
   state.tracks.loading = true;
   if (!background) {

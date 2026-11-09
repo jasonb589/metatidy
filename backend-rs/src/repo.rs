@@ -258,6 +258,7 @@ pub struct TrackQuery {
 }
 
 /// 绑定参数：文本与数字 id 混排时必须按位置区分类型。
+#[derive(Debug, PartialEq)]
 enum Param {
     Text(String),
     Ids(Vec<i64>),
@@ -273,8 +274,15 @@ pub struct PagedTracks {
     pub items: Vec<Track>,
 }
 
-/// 分页列出曲目。**只查索引，绝不读音频文件**——这是「歌一多就卡」的解法。
-pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<PagedTracks> {
+/// The list and whole-filter snapshot must share their actual predicates and
+/// deterministic ordering, rather than maintaining two similar query builders.
+struct TrackSql {
+    predicate: String,
+    order: String,
+    params: Vec<Param>,
+}
+
+fn track_sql(query: &TrackQuery) -> TrackSql {
     let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<Param> = Vec::new();
     // 刚 push 进去的那个参数在 SQL 里的下标：Postgres 从 1 开始，push 之后
@@ -363,6 +371,25 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         _ => "artist",
     };
     let direction = if query.order_desc { "DESC" } else { "ASC" };
+    let order_sql = if query.sort == "disc_track" {
+        disc_track_order(query.order_desc)
+    } else {
+        format!("{sort_expr} {direction}, id ASC")
+    };
+    TrackSql {
+        predicate: where_sql,
+        order: order_sql,
+        params,
+    }
+}
+
+/// 分页列出曲目。**只查索引，绝不读音频文件**——这是「歌一多就卡」的解法。
+pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<PagedTracks> {
+    let TrackSql {
+        predicate: where_sql,
+        order: order_sql,
+        params,
+    } = track_sql(query);
     let page_size = query.page_size.clamp(1, 1000);
     let page = query.page.max(1);
     let offset = (page - 1).saturating_mul(page_size);
@@ -376,12 +403,6 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         };
     }
     let total = count_query.fetch_one(pool).await?;
-
-    let order_sql = if query.sort == "disc_track" {
-        disc_track_order(query.order_desc)
-    } else {
-        format!("{sort_expr} {direction}, id ASC")
-    };
     let list_sql = format!(
         "SELECT {TRACK_COLUMNS} FROM tracks{where_sql} ORDER BY {order_sql} LIMIT ${} OFFSET ${}",
         params.len() + 1,
@@ -407,6 +428,31 @@ pub async fn list_tracks(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Pa
         pages: if total == 0 { 0 } else { (total + page_size - 1) / page_size },
         items,
     })
+}
+
+/// One statement gets one PostgreSQL MVCC snapshot. The extra row detects an
+/// over-limit result without COUNT or exposing a truncated successful response.
+/// The caller must reject more than FILTERED_SELECTION_LIMIT rows in full.
+pub const FILTERED_SELECTION_LIMIT: usize = 20_000;
+
+pub async fn filtered_track_snapshot(pool: &PgPool, query: &TrackQuery) -> anyhow::Result<Vec<Track>> {
+    let TrackSql {
+        predicate,
+        order,
+        params,
+    } = track_sql(query);
+    let sql = format!(
+        "SELECT {TRACK_COLUMNS} FROM tracks{predicate} ORDER BY {order} LIMIT {}",
+        FILTERED_SELECTION_LIMIT + 1,
+    );
+    let mut statement = sqlx::query_as::<_, Track>(&sql);
+    for param in &params {
+        statement = match param {
+            Param::Text(value) => statement.bind(value),
+            Param::Ids(value) => statement.bind(value),
+        };
+    }
+    Ok(statement.fetch_all(pool).await?)
 }
 
 /// These expressions are shared by album grouping and its exact track filter.
@@ -913,7 +959,114 @@ pub async fn sync_after_write(
 
 #[cfg(test)]
 mod tests {
-    use super::album_page;
+    use super::{album_page, disc_track_order, track_sql, Param, TrackQuery};
+
+    #[test]
+    fn track_scope_binds_search_groups_directories_and_ids_without_interpolation() {
+        let root = if cfg!(windows) {
+            std::path::Path::new(r"C:\Music")
+        } else {
+            std::path::Path::new("/music")
+        };
+        let directory = crate::models::path_key(&root.join("100%_! 's"));
+        let folder = crate::folders::FolderScope::new(root, &directory, true).unwrap();
+        let descendants = folder.descendant_pattern();
+        let query = TrackQuery {
+            q: "  O'Brien%_  ".into(),
+            language: " zh ".into(),
+            albumtype: " studio ".into(),
+            genre: " pop ".into(),
+            year: " 2026 ".into(),
+            artist: " artist ".into(),
+            album: " album ".into(),
+            album_group: Some(("A 'group'".into(), "".into())),
+            folder: Some(folder),
+            missing_cover: true,
+            missing_lyrics: true,
+            no_artist: true,
+            no_album: true,
+            not_loaded: true,
+            ids: vec![3, 5],
+            ..TrackQuery::default()
+        };
+        let sql = track_sql(&query);
+        assert_eq!(sql.params, vec![
+            Param::Text("%O'Brien%_%".into()),
+            Param::Text("zh".into()),
+            Param::Text("studio".into()),
+            Param::Text("pop".into()),
+            Param::Text("2026".into()),
+            Param::Text("artist".into()),
+            Param::Text("album".into()),
+            Param::Text("A 'group'".into()),
+            Param::Text("".into()),
+            Param::Text(directory.clone()),
+            Param::Text(descendants.clone()),
+            Param::Ids(vec![3, 5]),
+        ]);
+        // Query wildcards keep the list endpoint's meaning; native directory
+        // wildcards are escaped so an exact folder cannot widen into its peers.
+        assert!(descendants.contains("100!%!_!! 's"));
+        assert!(!sql.predicate.contains("O'Brien"));
+        assert!(!sql.predicate.contains(&directory));
+        for column in ["title", "artist", "album", "albumartist", "filename", "path", "genre", "year"] {
+            assert!(sql.predicate.contains(&format!("{column} ILIKE $1")));
+        }
+        for predicate in [
+            "language = $2", "albumtype = $3", "genre = $4", "year = $5",
+            "artist = $6", "album = $7", "BTRIM(album) = $8",
+            "COALESCE(NULLIF(BTRIM(albumartist), ''), BTRIM(artist)) = $9",
+            "(dir = $10 OR dir LIKE $11 ESCAPE '!')", "has_cover = false",
+            "has_lyrics = false", "artist = ''", "BTRIM(album) = ''",
+            "tags_loaded = false", "id = ANY($12)",
+        ] {
+            assert!(sql.predicate.contains(predicate), "{predicate}");
+        }
+        let direct = TrackQuery {
+            folder: Some(crate::folders::FolderScope::new(root, &directory, false).unwrap()),
+            ..TrackQuery::default()
+        };
+        let direct_sql = track_sql(&direct);
+        assert_eq!(direct_sql.predicate, " WHERE dir = $1");
+        assert_eq!(direct_sql.params, vec![Param::Text(directory)]);
+    }
+
+    #[test]
+    fn track_sort_has_stable_ties_and_scope_is_independent_of_pagination() {
+        for (sort, column) in [
+            ("artist", "artist"), ("title", "title"), ("album", "album"),
+            ("year", "year"), ("path", "path"), ("track", "track"),
+            ("indexed", "indexed_at"), ("edited", "edited_at"),
+            ("artist; DROP TABLE tracks", "artist"),
+        ] {
+            for descending in [false, true] {
+                let query = TrackQuery {
+                    sort: sort.into(), order_desc: descending,
+                    ..TrackQuery::default()
+                };
+                let sql = track_sql(&query);
+                let direction = if descending { "DESC" } else { "ASC" };
+                assert_eq!(sql.order, format!("{column} {direction}, id ASC"));
+                assert!(sql.predicate.is_empty());
+                assert!(sql.params.is_empty());
+            }
+        }
+        for descending in [false, true] {
+            let query = TrackQuery {
+                sort: "disc_track".into(), order_desc: descending,
+                q: "filtered".into(), ..TrackQuery::default()
+            };
+            let sql = track_sql(&query);
+            assert_eq!(sql.order, disc_track_order(descending));
+            assert!(sql.order.ends_with("NULLS LAST, id ASC"));
+            let paginated = track_sql(&TrackQuery {
+                page: i64::MAX, page_size: 1, ..query
+            });
+            assert_eq!(sql.predicate, paginated.predicate);
+            assert_eq!(sql.params, paginated.params);
+            assert_eq!(sql.order, paginated.order);
+        }
+    }
 
     #[test]
     fn album_pages_cover_large_groups_and_clamp_without_overflow() {

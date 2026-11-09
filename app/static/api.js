@@ -36,12 +36,13 @@ export function explainDetail(detail) {
 }
 
 export async function request(path, { method = "GET", body, timeout = 30000, signal } = {}) {
+  if (signal?.aborted) throw new ApiError("请求已取消", 0, "");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   const relay = () => controller.abort();
   if (signal) signal.addEventListener("abort", relay);
 
-  let res;
+  let res, text;
   try {
     res = await fetch(path, {
       method,
@@ -51,19 +52,18 @@ export async function request(path, { method = "GET", body, timeout = 30000, sig
       credentials: "same-origin",
       cache: "no-store",
     });
+    text = await res.text();
   } catch (err) {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", relay);
     if (err && err.name === "AbortError") {
       if (signal && signal.aborted) throw new ApiError("请求已取消", 0, "");
       throw new ApiError(`请求超时（超过 ${Math.round(timeout / 1000)} 秒）`, 0, "");
     }
     throw new ApiError("无法连接后端服务，请确认服务仍在运行", 0, String((err && err.message) || err));
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", relay);
   }
-  clearTimeout(timer);
-  if (signal) signal.removeEventListener("abort", relay);
 
-  const text = await res.text();
   let data = null;
   if (text) {
     try {
@@ -78,7 +78,9 @@ export async function request(path, { method = "GET", body, timeout = 30000, sig
     if (res.status === 401) {
       window.dispatchEvent(new CustomEvent("metatidy:unauthorized", { detail }));
     }
-    throw new ApiError(detail, res.status, detail);
+    const error = new ApiError(detail, res.status, detail);
+    if (data?.detail && typeof data.detail === "object" && typeof data.detail.code === "string") error.code = data.detail.code;
+    throw error;
   }
   return data === null ? {} : data;
 }
@@ -196,6 +198,7 @@ export const api = {
   logout: () => request(`${API}/logout`, { method: "POST" }),
 
   tracks: (params) => request(`${API}/tracks?${qs({ ...params, ...(params?.folder ? { folder_recursive: params.folder_recursive === false ? "false" : "true" } : {}) })}`),
+  filteredSelection: (payload, options = {}) => request(`${API}/tracks/filtered-selection`, { ...options, method: "POST", body: payload }),
   collections: (params, options = {}) => request(`${API}/collections?${qs(params)}`, options),
   collection: (id, params = {}, options = {}) => request(`${API}/collections/${encodeURIComponent(id)}?${qs(params)}`, options),
   createCollection: (payload) => request(`${API}/collections`, { method: "POST", body: payload }),

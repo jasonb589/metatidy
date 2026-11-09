@@ -52,30 +52,9 @@ pub async fn list_tracks(
         ));
     }
 
-    let page = query.i64("page", 1)?;
-    let order = query.str("order", "asc");
-    let track_query = TrackQuery {
-        q: query.str("q", ""),
-        page,
-        page_size,
-        sort: query.str("sort", "artist"),
-        order_desc: order.trim().eq_ignore_ascii_case("desc"),
-        language: query.str("language", ""),
-        albumtype: query.str("albumtype", ""),
-        genre: query.str("genre", ""),
-        year: query.str("year", ""),
-        artist: query.str("artist", ""),
-        album: query.str("album", ""),
-        album_group: super::albums::parse_album_group(query.0.get("album_group"))?,
-        folder: super::folders::track_scope(&state.config.music_dir, &query)?,
-        missing_cover: query.bool("missing_cover", false)?,
-        missing_lyrics: query.bool("missing_lyrics", false)?,
-        no_artist: query.bool("no_artist", false)?,
-        no_album: query.bool("no_album", false)?,
-        // Rust 新增参数（Python 没有，前端也没用；快速扫描后用得上）
-        not_loaded: query.bool("not_loaded", false)?,
-        ids: Vec::new(),
-    };
+    let mut track_query = parse_track_query(&state.config.music_dir, &query)?;
+    track_query.page = query.i64("page", 1)?;
+    track_query.page_size = page_size;
 
     let page = repo::list_tracks(&state.db, &track_query).await?;
     let items: Vec<Value> = page.items.iter().map(light_track_json).collect();
@@ -86,6 +65,38 @@ pub async fn list_tracks(
         "pages": page.pages,
         "items": items,
     })))
+}
+
+/// Shared semantic scope parser for both list browsing and a whole-filter
+/// selection. The JSON endpoint validates wire types before calling this parser.
+pub(super) fn parse_track_query(root: &std::path::Path, query: &RawQuery) -> ApiResult<TrackQuery> {
+    let sort = query.str("sort", "artist");
+    let sort = match sort.as_str() {
+        "artist" | "title" | "album" | "year" | "path" | "track" | "indexed" | "edited"
+        | "disc_track" => sort,
+        _ => "artist".to_owned(),
+    };
+    Ok(TrackQuery {
+        q: query.str("q", "").trim().to_owned(),
+        page: 1,
+        page_size: 100,
+        sort,
+        order_desc: query.str("order", "asc").trim().eq_ignore_ascii_case("desc"),
+        language: query.str("language", "").trim().to_owned(),
+        albumtype: query.str("albumtype", "").trim().to_owned(),
+        genre: query.str("genre", "").trim().to_owned(),
+        year: query.str("year", "").trim().to_owned(),
+        artist: query.str("artist", "").trim().to_owned(),
+        album: query.str("album", "").trim().to_owned(),
+        album_group: super::albums::parse_album_group(query.0.get("album_group"))?,
+        folder: super::folders::track_scope(root, query)?,
+        missing_cover: query.bool("missing_cover", false)?,
+        missing_lyrics: query.bool("missing_lyrics", false)?,
+        no_artist: query.bool("no_artist", false)?,
+        no_album: query.bool("no_album", false)?,
+        not_loaded: query.bool("not_loaded", false)?,
+        ids: Vec::new(),
+    })
 }
 
 /// Resolve an explicit selection against PostgreSQL only. Missing index rows

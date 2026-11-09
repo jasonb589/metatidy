@@ -354,6 +354,7 @@ function reportNavigationError(err) {
 async function activateTab(name, { focus = true, dismissSidebar = true, scroll = true } = {}) {
   if (!TABS.includes(name) || !canUseWorkspace()) return;
   const changed = name !== state.tab;
+  if (state.tab === "tracks" && name !== "tracks") tracks.leave();
   if (state.tab === "albums" && name !== "albums") albums.leave();
   if (state.tab === "collections" && name !== "collections") collections.leave();
   if (state.tab === "artist-portraits" && name !== "artist-portraits") artistPortraits.leave();
@@ -422,6 +423,7 @@ function canUseWorkspace() {
 
 function setWorkspaceLocked(locked) {
   if (locked) {
+    tracks.leave();
     closeSidebar({ restoreFocus: false });
     closeJobs({ restoreFocus: false });
     palette.closePalette();

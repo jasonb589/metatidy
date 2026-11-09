@@ -45,6 +45,7 @@ from tests.duplicates_acceptance import check_duplicates  # noqa: E402
 from tests.folders_acceptance import check_empty_folders, check_folders  # noqa: E402
 from tests.audio_acceptance import check_audio  # noqa: E402
 from tests.collections_acceptance import check_collections, check_collections_auth  # noqa: E402
+from tests.filtered_selection_acceptance import check_filtered_selection  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -434,6 +435,9 @@ def main() -> int:
                   requests.get(f"{auth_base}/api/albums", timeout=20).status_code == 401)
             check("未登录不能核对已选曲目索引（401）",
                   requests.post(f"{auth_base}/api/tracks/selection", json={"ids": []}, timeout=20).status_code == 401)
+            check("整批筛选选择先鉴权，合法或非法范围与版本均返回401",
+                  all(requests.post(f"{auth_base}/api/tracks/filtered-selection", json=payload, timeout=20).status_code == 401
+                      for payload in ({"query": {}}, {"query": {"folder": "../outside"}, "revision": "invalid"})))
             check("未登录不能读取专辑详情或准备整张选择（401）",
                   requests.get(f"{auth_base}/api/albums/detail", timeout=20).status_code == 401
                   and requests.post(f"{auth_base}/api/albums/selection", json={}, timeout=20).status_code == 401)
@@ -553,6 +557,8 @@ def main() -> int:
             raise RuntimeError("清单持久验收重启后健康检查超时")
 
         check_collections(BASE, music, check, restart=restart_for_collections)
+        print("\n=== 21. 跨页筛选完整选择与一致性确认 ===")
+        check_filtered_selection(BASE, music, check)
     finally:
         proc.terminate()
         try:

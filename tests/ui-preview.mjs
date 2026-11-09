@@ -299,6 +299,82 @@ function lightTrack(track) {
   return Object.fromEntries(keys.map(key => [key, track[key]]));
 }
 
+function filteredSelection(payload) {
+  const limit = 20000;
+  const invalid = (location, message, input, type = 'value_error') => {
+    throw Object.assign(fixtureError(message), { detail: [{ type, loc: location, msg: message, input }] });
+  };
+  const conflict = (code, message, extra = {}) => {
+    throw Object.assign(fixtureError(message, 409), { detail: { code, message, ...extra } });
+  };
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(payload)) invalid(['body'], '请提供筛选条件对象', payload, 'dict_type');
+  for (const key of Object.keys(payload)) {
+    if (!['query', 'revision'].includes(key)) invalid(['body', key], '不支持这个字段；筛选选择不接受分页或截断参数', payload[key], 'extra_forbidden');
+  }
+  if (!object(payload.query)) invalid(['body', 'query'], '请提供完整的筛选条件对象', payload.query ?? null, 'dict_type');
+  const query = { q: '', artist: '', album: '', language: '', albumtype: '', genre: '', year: '', sort: 'artist', order: 'asc',
+    album_group: null, folder: '', folder_recursive: true, missing_cover: false, missing_lyrics: false, no_artist: false, no_album: false, not_loaded: false };
+  const textFields = ['q', 'artist', 'album', 'language', 'albumtype', 'genre', 'year'];
+  const boolFields = ['folder_recursive', 'missing_cover', 'missing_lyrics', 'no_artist', 'no_album', 'not_loaded'];
+  const sorts = ['artist', 'title', 'album', 'year', 'path', 'track', 'indexed', 'edited', 'disc_track'];
+  const validText = (value, maximum) => typeof value === 'string' && !value.includes('\0') && [...value].length <= maximum;
+  const trim = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+  for (const [key, value] of Object.entries(payload.query)) {
+    const location = ['body', 'query', key];
+    if (textFields.includes(key)) {
+      if (!validText(value, 4000)) invalid(location, '筛选文字须为不含空字符且最多 4000 字的字符串', value);
+      query[key] = trim(value);
+    } else if (boolFields.includes(key)) {
+      if (typeof value !== 'boolean') invalid(location, '筛选开关须为 JSON 布尔值', value);
+      query[key] = value;
+    } else if (key === 'sort') {
+      if (!sorts.includes(value)) invalid(location, '排序字段无效', value);
+      query.sort = value;
+    } else if (key === 'order') {
+      if (typeof value !== 'string' || !['asc', 'desc'].includes(trim(value).toLowerCase())) invalid(location, '排序方向须为 asc 或 desc', value);
+      query.order = trim(value).toLowerCase();
+    } else if (key === 'album_group') {
+      if (value !== null) {
+        if (!Array.isArray(value) || value.length !== 2 || value.some(part => !validText(part, 4000)) || !albumText(value[0])) {
+          invalid(location, '专辑分组须为 null 或两项字符串数组，专辑名不能为空且每项最多 4000 字', value);
+        }
+        query.album_group = value.map(albumText);
+      }
+    } else if (key === 'folder') {
+      if (!validText(value, 32768)) invalid(location, '目录须为不含空字符且最多 32768 字的字符串', value);
+      query.folder = value;
+    } else invalid(location, '不支持这个筛选字段；不能传入分页、数量限制或曲目 ID', value);
+  }
+  if (query.folder) {
+    const root = '/fixture-music', folder = query.folder;
+    if (folder !== root && !folder.startsWith(`${root}/`) || folder.includes('//') || folder.endsWith('/') || folder.split('/').some(part => part === '.' || part === '..')) {
+      throw fixtureError('目录须为已配置音乐目录内的规范绝对路径', 400);
+    }
+  } else query.folder_recursive = true;
+  if (payload.revision != null && (typeof payload.revision !== 'string' || !/^[a-f\d]{64}$/i.test(payload.revision) || payload.revision.length !== 64)) {
+    invalid(['body', 'revision'], '请提供准备结果返回的 64 位版本标识', payload.revision);
+  }
+  // Reuse the fixture list's exact filters/order; this route never paginates.
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) if (value !== null) params.set(key, Array.isArray(value) ? JSON.stringify(value) : String(value));
+  const rows = filterTracks(params);
+  if (rows.length > limit) conflict('selection_limit_exceeded', '当前筛选超过 20000 首，请缩小范围后重新准备；未加入任何曲目', { limit, matched_at_least: limit + 1 });
+  const seen = new Set();
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.id) || row.id <= 0 || seen.has(row.id)) conflict('invalid_selection_snapshot', '筛选结果含无效或重复曲目编号，请刷新曲库后重试；未加入任何曲目');
+    seen.add(row.id);
+  }
+  const items = rows.map(lightTrack), hash = createHash('sha256').update('metatidy-filtered-selection-v1\0');
+  for (const value of [query, ...items]) {
+    const encoded = Buffer.from(JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))));
+    const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(encoded.length)); hash.update(size).update(encoded);
+  }
+  const revision = hash.digest('hex');
+  if (payload.revision != null && payload.revision.toLowerCase() !== revision) conflict('selection_changed', '筛选结果或曲目资料已变化，请重新准备并核对范围；未加入任何曲目');
+  return { query, revision, total: items.length, limit, items };
+}
+
 function selectionPage(payload) {
   const ids = selectionIds(payload);
   const size = integerBody(payload.page_size, 100);
@@ -568,6 +644,11 @@ async function handleApi(req, res, url) {
     const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
     const page = Math.min(pages, Math.max(1, Number(url.searchParams.get('page')) || 1));
     return json(res, { total: filtered.length, page, page_size: pageSize, pages, items: filtered.slice((page - 1) * pageSize, page * pageSize) });
+  }
+  if (route === '/api/tracks/filtered-selection') {
+    if (method !== 'POST') { res.setHeader('Allow', 'POST'); return json(res, { detail: '筛选选择只接受 POST 请求' }, 405); }
+    try { return json(res, filteredSelection(payload)); }
+    catch (error) { return json(res, { detail: error.detail ?? error.message }, error.status || 500); }
   }
   const audioMatch = route.match(/^\/api\/tracks\/(\d+)\/audio$/);
   if (audioMatch) {

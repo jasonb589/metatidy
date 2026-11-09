@@ -34,6 +34,7 @@ jobs:
         run: |
           node tests/ui-smoke.mjs
           node tests/ui-layout.mjs
+          node tests/ui-filtered-selection.mjs
           node tests/ui-palette.mjs
           node tests/ui-library-tools.mjs
           node tests/ui-metadata-editor.mjs
