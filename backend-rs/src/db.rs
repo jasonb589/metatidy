@@ -34,7 +34,7 @@ pub async fn connect_and_migrate(config: &Config) -> anyhow::Result<PgPool> {
     if let Err(err) = sqlx::query(
         "UPDATE jobs SET state = 'error', message = '容器重启导致任务中断', \
          error = '容器重启导致任务中断', updated_at = now() \
-         WHERE state IN ('queued', 'running')",
+         WHERE state IN ('queued', 'running') AND kind <> 'filename_tags'",
     )
     .execute(&pool)
     .await

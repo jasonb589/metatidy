@@ -33,7 +33,7 @@
 .sr-pager .btn { height: 30px; font-size: 10px; }
 .sr-footer { padding: 13px 24px 17px; background: var(--bg-2); border-top: 1px solid var(--line); }
 .sr-footer > p { color: var(--fg-3); font-size: 10px; line-height: 1.7; }
-.sr-handoffs { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 9px; margin-top: 10px; }
+.sr-handoffs { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 9px; margin-top: 10px; }
 .sr-handoffs .btn { min-width: 0; height: auto; min-height: 34px; padding: 7px 9px; font-size: 11px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
 .sr-handoffs .sr-sequence-action { color: var(--accent-2); background: var(--accent-soft); border-color: var(--accent-line); }
 .sr-handoffs .sr-sequence-action:hover:not(:disabled) { color: var(--accent-2); background: var(--accent-soft); border-color: var(--accent); }

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { jpeg as portraitJpeg, avif as portraitAvif } from './portrait-image-fixtures.mjs';
 import { createCollectionsFixture } from './collections-fixture.mjs';
+import { createFilenameTagsFixture } from './filename-tags-fixture.mjs';
 
 const staticRoot = fileURLToPath(new URL('../app/static/', import.meta.url));
 const port = Number(process.argv.find(arg => arg.startsWith('--port='))?.split('=')[1] || 8765);
@@ -94,6 +95,7 @@ const jobs = empty ? [] : [{
   message: '测试样本已就绪 · 未扫描真实文件', error: '', created_at: now - 3600, updated_at: now - 3600,
   result: JSON.stringify({ scanned: tracks.length, added: tracks.length, updated: 0, skipped: 0, removed: 0 }),
 }];
+const filenameTags = createFilenameTagsFixture(tracks, { jobs });
 const plans = new Map();
 const portraitCache = new Map();
 const portraitSyncs = new Map();
@@ -508,6 +510,10 @@ async function handleApi(req, res, url) {
   }
   if (route === '/api/health') return json(res, { ok: true, fixture: true });
   if (!authenticated) return json(res, { detail: '请先登录' }, 401);
+  if (route.startsWith('/api/tracks/filename-tags/')) {
+    try { return json(res, filenameTags.handle(route, method, url.searchParams, payload)); }
+    catch (error) { return json(res, { detail: error.detail ?? error.message }, error.status || 500); }
+  }
   if (route === '/api/collections' || route.startsWith('/api/collections/')) return json(res, collections.handle(route, method, url.searchParams, payload));
   if (route === '/api/duplicates' || route === '/api/duplicates/detail' || route === '/api/duplicates/selection') {
     const groups = new Map();

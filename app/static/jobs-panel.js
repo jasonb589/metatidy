@@ -1,10 +1,11 @@
 /** Keyed task cards: polling updates text, never replaces disclosure controls. */
 import * as ui from "./ui.js";
 import { api, jobReportUrl } from "./api.js";
+import { emit } from "./store.js";
 
 const collections = new Map();
 let sessionRevision = 0;
-const KIND_ICONS = { scan: "scan", scrape: "search", move: "move" };
+const KIND_ICONS = { scan: "scan", scrape: "search", move: "move", filename_tags: "edit" };
 const STATE_COPY = { running: ["运行中", "badge-info"], done: ["已完成", "badge-ok"], error: ["失败", "badge-err"] };
 
 export function parseResult(job) {
@@ -63,7 +64,9 @@ function summaryMetrics(job, result) {
       ? [["applied", "已写入"], ["skipped", result.search_only ? "仅搜索 / 跳过" : "跳过"], ["failed", "失败"]]
       : job.kind === "move"
         ? [["moved", "已移动"], ["renamed", "自动改名"], ["skipped", "跳过"], ["failed", "失败"]]
-        : [];
+        : job.kind === "filename_tags"
+          ? [["written", "已写入"], ["unchanged", "无需变更"], ["failed", "失败"], ["stale", "文件已变化"], ["needs_verification", "需核对"], ["not_started", "未处理"]]
+          : [];
   return fields.filter(([key]) => result[key] != null && Number.isFinite(Number(result[key])));
 }
 
@@ -78,6 +81,7 @@ function contextRows(job, result, automatic) {
   } else if (result.search_only != null) rows.push(["执行方式", result.search_only ? "仅搜索候选" : "自动写入"]);
   if (result.dry_run != null) rows.push(["执行方式", result.dry_run ? "仅演练" : "实际移动"]);
   if (result.library_root) rows.push(["归档目录", result.library_root]);
+  if (job.kind === "filename_tags" && result.token) rows.push(["预览计划", result.token]);
   const seconds = Number(result.total_seconds ?? result.seconds);
   if (Number.isFinite(seconds) && seconds >= 0) rows.push(["耗时", `${seconds.toLocaleString("zh-CN", { maximumFractionDigits: 2 })} 秒`]);
   return rows;
@@ -114,12 +118,17 @@ function createCard(id, cards, isAutomatic) {
   const retry = ui.el("button", { type: "button", class: "btn btn-sm job-detail-retry", text: "重新读取结果", hidden: true });
   const report = ui.el("a", { class: "btn btn-sm job-report-download", href: jobReportUrl(id), download: "", text: "下载已存结果 JSON" });
   const reportNote = ui.el("span", { class: "hint", text: "下载服务器已保存的汇总与明细。" });
-  const body = ui.el("div", { class: "job-body" }, [progress, metrics, context, resultStatus, retry, errors, details, ui.el("div", { class: "job-report-actions" }, [reportNote, report])]);
+  const filenameResults = ui.el("button", { type: "button", class: "btn btn-sm job-filename-results", text: "查看全部标签提取结果", hidden: true });
+  const body = ui.el("div", { class: "job-body" }, [progress, metrics, context, resultStatus, retry, errors, details, ui.el("div", { class: "job-report-actions" }, [reportNote, filenameResults, report])]);
   const node = ui.el("details", { class: "job-card", dataset: { jobId: id } }, [summary, body]);
   const card = { node, title, time, message, icon, state, metrics, context, progress, progressText, progressBar, progressFill,
-    errors, errorTitle, errorText, copy, copyFeedback, details, detailRows, detailNote, resultStatus, retry, report, reportNote,
+    errors, errorTitle, errorText, copy, copyFeedback, details, detailRows, detailNote, resultStatus, retry, report, reportNote, filenameResults,
     fingerprint: "", errorReport: "", hasErrors: false, job: null, detail: null, loading: false, request: 0, controller: null, sourceVersion: "", isAutomatic };
   retry.addEventListener("click", () => void loadDetails(card, cards));
+  filenameResults.addEventListener("click", () => {
+    const result = card.detail ? parseResult(card.detail) : card.job?.result !== undefined ? parseResult(card.job) : card.job?.summary || {};
+    if (card.job?.kind === "filename_tags" && typeof result.token === "string" && result.token) emit("filename-tags:results", result.token);
+  });
   node.addEventListener("toggle", () => { if (node.open && card.job && card.job.result === undefined && !card.detail && !card.loading) void loadDetails(card, cards); });
   copy.addEventListener("click", async () => {
     const text = card.errorReport;
@@ -178,7 +187,8 @@ function updateCard(card, job, automatic) {
   card.fingerprint = fingerprint;
   const result = hasResult ? parseResult(job) : job.summary || {};
   const state = STATE_COPY[job.state] || [job.state || "未知", "badge-mute"];
-  const partial = job.state === "done" && (job.has_errors || Number(result.failed) > 0 || errorsFor(job, result).length > 0);
+  const partial = job.state === "done" && (job.has_errors || Number(result.failed) > 0 || errorsFor(job, result).length > 0
+    || job.kind === "filename_tags" && ["stale", "needs_verification", "not_started"].some(key => Number(result[key]) > 0));
   card.node.dataset.partial = String(Boolean(partial));
   card.node.dataset.jobState = job.state;
   setText(card.title, automatic ? "自动增量扫描" : ui.jobKindLabel(job.kind));
@@ -218,6 +228,7 @@ function updateCard(card, job, automatic) {
     if (hasResult) card.retry.hidden = true;
   }
   setText(card.reportNote, job.state === "running" ? "下载进行中的快照，结果尚未最终完成。" : job.kind === "scrape" && result.details_truncated !== false ? "已存明细可能截断；报告不会补造缺失记录。" : job.kind === "move" ? "结果不包含全部成功文件的最终路径。" : "下载服务器已保存的汇总与明细。");
+  card.filenameResults.hidden = job.kind !== "filename_tags" || typeof result.token !== "string" || !result.token;
 
   card.metrics.hidden = !metrics.length;
   card.metrics.replaceChildren(...metrics.map(([key, label]) => ui.el("div", { class: "job-metric", dataset: { metric: key } }, [
@@ -245,8 +256,9 @@ function updateCard(card, job, automatic) {
   card.details.hidden = !storedRows.length && result.details_truncated !== true;
   card.detailRows.replaceChildren(...rows.slice(0, 30).map(item => {
     const candidate = item.candidate || {};
-    const who = [candidate.title || item.title || (item.track_id != null ? `曲目 #${item.track_id}` : "曲目"), candidate.artist].filter(Boolean).join(" · ");
-    const what = [item.status, candidate.source, item.score != null ? `匹配分 ${item.score}` : ""].filter(Boolean).join(" · ");
+    const who = [candidate.title || item.title || item.filename || (item.track_id != null ? `曲目 #${item.track_id}` : "曲目"), candidate.artist].filter(Boolean).join(" · ");
+    const itemState = job.kind === "filename_tags" ? ({ written: "已写入", unchanged: "无需变更", excluded: "本轮排除", failed: "失败", stale: "文件已变化", needs_verification: "需要核对", not_started: "未处理", pending: "等待处理", writing: "正在写入", unreadable: "无法读取", ambiguous: "有歧义", unmatched: "不匹配", invalid: "字段无效", index_missing: "索引缺失" })[item.status] || item.status : item.status;
+    const what = [itemState, candidate.source, item.score != null ? `匹配分 ${item.score}` : ""].filter(Boolean).join(" · ");
     return ui.el("div", { class: "job-detail-row" }, [ui.el("span", { text: who }), ui.el("span", { text: what })]);
   }));
   const truncated = result.details_truncated === true;

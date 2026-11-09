@@ -18,7 +18,7 @@ jobs:
   ui:
     name: 浏览器界面验收
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,6 +37,8 @@ jobs:
           node tests/ui-filtered-selection.mjs
           node tests/ui-palette.mjs
           node tests/ui-library-tools.mjs
+          node tests/ui-library-links.mjs
+          node tests/ui-filename-tags.mjs
           node tests/ui-metadata-editor.mjs
           node tests/ui-edit-sequence.mjs
           node tests/ui-collections.mjs
@@ -176,7 +178,7 @@ jobs:
       # 先清库：验收里断言「索引 5 首」，前面的自检留下的行会让它假红。
       - name: 端到端验收（真实服务 + Postgres + Redis + 真实数据源）
         run: |
-          psql "$DATABASE_URL" -c 'TRUNCATE tracks, jobs, move_plans, alias_artist, alias_album RESTART IDENTITY;' || true
+          psql "$DATABASE_URL" -c 'TRUNCATE tracks, jobs, move_plans, filename_tag_plan_items, filename_tag_plans, alias_artist, alias_album RESTART IDENTITY;'
           python "$GITHUB_WORKSPACE/tests/e2e_acceptance.py" "$GITHUB_WORKSPACE" /tmp/metatidy-e2e
 
       # 零构建前端没有编译器，语法错误只能等浏览器报错；这里用 runner 自带的 node 兜住。

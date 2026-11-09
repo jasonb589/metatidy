@@ -10,6 +10,7 @@
 import { api, coverUrl, pollJob } from "./api.js";
 import * as ui from "./ui.js";
 import { openTrackDetails } from "./track-inspector.js";
+import { openAlbumDetail } from "./album-detail.js";
 import { initSavedFilters } from "./saved-filters.js";
 import { showKeyboardHelp } from "./keyboard-help.js";
 import { normalizeAlbumGroup, albumGroupLabel } from "./album-group.js";
@@ -327,6 +328,7 @@ export function init() {
   });
 
   nodes.tbody.addEventListener("click", (event) => {
+    if (followLibraryLink(event)) return;
     const listen = event.target.closest("button[data-play-id]");
     if (listen) { listenToTrack(listen.dataset.playId); return; }
     const detail = event.target.closest("button[data-detail-id]");
@@ -451,6 +453,7 @@ function initLibraryViews() {
   nodes.grid = ui.el("ul", { id: "tracks-grid", class: "tracks-grid", "aria-label": "曲目封面卡片", hidden: true });
   nodes.tableWrap.after(nodes.gridControls, nodes.grid);
   nodes.grid.addEventListener("click", (event) => {
+    if (followLibraryLink(event)) return;
     const listen = event.target.closest("button[data-play-id]");
     if (listen) { listenToTrack(listen.dataset.playId); return; }
     const button = event.target.closest("button[data-edit-id], button[data-scrape-id], button[data-detail-id]");
@@ -515,6 +518,52 @@ function inspectTrack(id, trigger) {
     onEdit: (track) => openEdit([track]),
     onScrape: (track) => { setCurrentTrack(track); location.hash = "#scrape"; },
   });
+}
+
+function trackAlbumGroup(row) {
+  const trim = value => String(value || "").replace(/^ +| +$/g, "");
+  const encoded = normalizeAlbumGroup(JSON.stringify([trim(row.album), trim(row.albumartist) || trim(row.artist)]));
+  if (!encoded) return null;
+  const [album, album_artist] = JSON.parse(encoded);
+  return { album, album_artist };
+}
+
+/** Link text remains metadata: only known names become navigation controls. */
+function libraryLink(row, kind, fallback = "—") {
+  const text = String(row[kind] || "");
+  const available = kind === "artist" ? Boolean(trimQueryText(text)) : Boolean(trackAlbumGroup(row));
+  if (!available) return ui.el("span", { class: "truncate", text: fallback });
+  const label = kind === "artist" ? `查看 ${text} 的曲目` : `查看 ${text} 的专辑详情`;
+  return ui.el("button", {
+    type: "button", class: "library-meta-link truncate", text,
+    dataset: kind === "artist" ? { libraryArtist: String(row.id) } : { libraryAlbum: String(row.id) },
+    title: label, "aria-label": label,
+  });
+}
+
+function followLibraryLink(event) {
+  const link = event.target.closest("button[data-library-artist], button[data-library-album]");
+  if (!link) return false;
+  event.stopPropagation();
+  if (!canEditWorkspace() || state.edit.open || hasOverlayAboveEditor()) return true;
+  const id = link.dataset.libraryArtist || link.dataset.libraryAlbum;
+  const row = state.tracks.items.find(item => String(item.id) === id);
+  if (!row) return true;
+  if (link.dataset.libraryArtist) {
+    const artist = trimQueryText(String(row.artist || ""));
+    if (!artist) return true;
+    resetFilters();
+    state.tracks.filters.artist = artist;
+    syncControls();
+    // The old link is replaced by the filtered rows, so keep keyboard focus on
+    // a stable control rather than dropping it to the document body.
+    nodes.q.focus({ preventScroll: true });
+    void refresh();
+  } else {
+    const group = trackAlbumGroup(row);
+    if (group) openAlbumDetail(group);
+  }
+  return true;
 }
 
 /** 只在用户切换视图时轻淡入，不让后台轮询重播动画。 */
@@ -1086,7 +1135,9 @@ function renderCollection({ animate = true } = {}) {
     : focused?.matches("button[data-play-id]") ? "button[data-play-id]"
       : focused?.matches("button[data-edit-id]") ? "button[data-edit-id]"
       : focused?.matches("button[data-scrape-id]") ? "button[data-scrape-id]"
-        : focused?.matches("button[data-detail-id]") ? "button[data-detail-id]" : null;
+        : focused?.matches("button[data-detail-id]") ? "button[data-detail-id]"
+          : focused?.matches("button[data-library-artist]") ? "button[data-library-artist]"
+            : focused?.matches("button[data-library-album]") ? "button[data-library-album]" : null;
   if (state.tracks.view === "cards") {
     ui.clear(nodes.tbody);
     renderCards({ animate });
@@ -1161,8 +1212,8 @@ function renderCards({ animate = true } = {}) {
           type: "button", class: "track-title-button truncate", dataset: { detailId: String(row.id) },
           title: row.path || title, "aria-label": `查看 ${title} 的详细资料`, text: title,
         })]),
-        ui.el("p", { class: "track-card-artist truncate", title: row.artist || "未知艺术家", text: row.artist || "未知艺术家" }),
-        ui.el("p", { class: "track-card-album truncate", title: row.album || "尚未填写专辑", text: row.album || "尚未填写专辑" }),
+        ui.el("p", { class: "track-card-artist" }, [libraryLink(row, "artist", "未知艺术家")]),
+        ui.el("p", { class: "track-card-album" }, [libraryLink(row, "album", "尚未填写专辑")]),
         ui.el("div", { class: "track-card-meta" }, [
           format ? ui.el("span", { class: "format-tag", text: format }) : null,
           ui.el("span", { text: [ui.fmtDuration(row.duration), row.year].filter(Boolean).join(" · ") || "待完善资料" }),
@@ -1195,7 +1246,6 @@ function renderTable({ animate = true } = {}) {
     const tr = ui.el("tr", { dataset: { id: row.id } });
     const format = String(row.ext || (row.filename || "").match(/\.([^./\\]+)$/)?.[1] || "").replace(/^\./, "").toUpperCase();
     const duration = ui.fmtDuration(row.duration);
-    const mobileMeta = [row.artist || "未知艺术家", row.album].filter(Boolean).join(" · ");
     if (isSelected(row.id)) tr.setAttribute("aria-selected", "true");
     if (animate && index < 12) {
       tr.classList.add("enter");
@@ -1225,7 +1275,11 @@ function renderTable({ animate = true } = {}) {
           title: row.path || row.filename || "",
           text: row.title || "（无标题）",
         }),
-        ui.el("span", { class: "truncate cell-mobile-meta", title: mobileMeta, text: mobileMeta }),
+        ui.el("span", { class: "truncate cell-mobile-meta" }, [
+          libraryLink(row, "artist", "未知艺术家"),
+          trackAlbumGroup(row) ? ui.el("span", { class: "library-meta-divider", text: "·", "aria-hidden": "true" }) : null,
+          trackAlbumGroup(row) ? libraryLink(row, "album") : null,
+        ]),
         ui.el("span", { class: "cell-meta" }, [
           format ? ui.el("span", { class: "format-tag", text: format }) : null,
           duration ? ui.el("span", { class: "track-duration", text: duration }) : null,
@@ -1233,9 +1287,9 @@ function renderTable({ animate = true } = {}) {
         ]),
       ]),
       ui.el("td", {}, [
-        ui.el("span", { class: "truncate", title: row.artist || "无歌手", text: row.artist || "—" }),
+        libraryLink(row, "artist"),
       ]),
-      ui.el("td", {}, [ui.el("span", { class: "truncate", title: row.album || "无专辑", text: row.album || "—" })]),
+      ui.el("td", {}, [libraryLink(row, "album")]),
       ui.el("td", { class: "num", text: row.year || "—" }),
       ui.el("td", { class: "num col-track", text: row.track || "—" }),
       ui.el("td", { class: "col-language" }, [ui.el("span", { class: "truncate", text: row.language || "—" })]),
@@ -1299,9 +1353,10 @@ function renderSelectionBar() {
     const screen = window.matchMedia("(max-width: 700px), (max-width: 1000px) and (max-height: 500px)");
     const total = ui.el("strong"), note = ui.el("span"), chips = ui.el("div", { class: "selection-tracks" });
     const review = ui.el("button", { type: "button", id: "selection-review", class: "btn btn-sm", text: "审阅已选", onClick: () => emit("library:review-selection") });
+    const scrape = ui.el("button", { type: "button", id: "selection-scrape", class: "btn btn-sm", onClick: () => emit("library:batch-scrape") });
     const extra = ui.el("div", { id: "selection-more-actions", class: "selection-more-actions" }, [
       ui.el("button", { type: "button", id: "selection-edit", class: "btn btn-sm btn-primary", text: "编辑已选", onClick: () => openEdit(selectionRows()) }),
-      ui.el("button", { type: "button", id: "selection-scrape", class: "btn btn-sm", text: "批量刮削", onClick: () => emit("library:batch-scrape") }),
+      scrape,
       ui.el("button", { type: "button", id: "selection-clear", class: "btn btn-sm btn-ghost", text: "清空选择", onClick: () => {
         clearSelection();
         const pageCheck = state.tracks.view === "cards" ? nodes.checkGridPage : nodes.checkPage;
@@ -1321,7 +1376,7 @@ function renderSelectionBar() {
       selectionControls.measure?.();
     }
     nodes.selectionBar.append(ui.el("div", { class: "selection-summary", role: "status", "aria-live": "polite" }, [total, note]), chips, ui.el("div", { class: "spacer" }), review, more, extra);
-    selectionControls = { total, note, chips, more, extra, expanded: false, setMore };
+    selectionControls = { total, note, chips, more, extra, scrape, expanded: false, setMore };
     screen.addEventListener("change", () => setMore(false));
     nodes.selectionBar.addEventListener("keydown", event => {
       if (event.defaultPrevented || event.key !== "Escape" || !screen.matches || !selectionControls.expanded || document.querySelector("dialog[open]")) return;
@@ -1350,6 +1405,8 @@ function renderSelectionBar() {
   const rows = selectionRows().slice(0, 2);
   const onPage = state.tracks.items.filter((row) => isSelected(row.id)).length;
   selectionControls.total.textContent = `已选 ${count} 首`;
+  selectionControls.scrape.textContent = count === 1 ? "刮削" : "批量刮削";
+  selectionControls.scrape.title = count === 1 ? "为这首曲目搜索并审阅元数据候选" : `处理全部已选 ${count} 首曲目`;
   selectionControls.note.textContent = count > onPage ? `当前页 ${onPage} 首 · 其他页 ${count - onPage} 首` : "跨页保留选择";
   selectionControls.chips.replaceChildren(
     ...rows.map((row) =>

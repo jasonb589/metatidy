@@ -45,7 +45,7 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
   const pageLabel = ui.el("span", { id: "selection-review-page" });
   const range = ui.el("span", { id: "selection-review-range" });
   const actions = [
-    ["edit", "编辑"], ["edit-sequence", "逐首编辑"], ["scrape", "批量刮削"], ["move", "整理"],
+    ["edit", "编辑"], ["edit-sequence", "逐首编辑"], ["filename-tags", "从文件名提取标签"], ["scrape", "批量刮削"], ["move", "整理"],
   ].map(([action, text]) => ui.el("button", { id: `selection-review-${action}`, type: "button", class: `btn btn-sm${action === "edit" ? " btn-primary" : action === "edit-sequence" ? " sr-sequence-action" : ""}`, "aria-describedby": action.startsWith("edit") ? "selection-review-edit-note" : null, dataset: { action, label: text }, onClick: () => {
     if (!rows.length || checking) return;
     const scope = { rows: rows.map((row) => ({ ...row })), revision: selectionRevision() };
@@ -135,7 +135,10 @@ export function openSelectionReview({ onAction = () => {} } = {}) {
     checkButton.textContent = checking ? "正在核对全部已选…" : checked ? "重新核对全部已选索引" : "核对全部已选索引";
     const missing = checked ? [...checked.values()].filter((item) => item.status === "missing").length : 0;
     removeMissing.hidden = !missing; removeMissing.textContent = `移除全部索引缺失 ${ui.fmtNum(missing)} 首`;
-    for (const button of actions) { button.textContent = `${button.dataset.label}全部已选 ${ui.fmtNum(rows.length)} 首`; button.disabled = !rows.length || checking; }
+    for (const button of actions) {
+      const actionLabel = button.dataset.action === "scrape" && rows.length === 1 ? "刮削" : button.dataset.label;
+      button.textContent = `${actionLabel}全部已选 ${ui.fmtNum(rows.length)} 首`; button.disabled = !rows.length || checking;
+    }
     saveCollection.textContent = `保存全部已选 ${ui.fmtNum(rows.length)} 首为清单`;
     saveCollection.disabled = !rows.length || checking;
     previous.disabled = page <= 1; next.disabled = page >= pages;

@@ -34,6 +34,7 @@ mod audio;
 mod collections;
 mod duplicates;
 mod filtered_selection;
+pub(crate) mod filename_tags;
 mod folders;
 mod moves;
 mod portraits;
@@ -833,6 +834,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/navidrome/test", post(portraits::connection))
         .route("/api/navidrome/artists", get(portraits::targets))
         .route("/api/tracks/selection", post(tracks::selection))
+        .route("/api/tracks/filename-tags/parse", post(filename_tags::parse))
+        .route("/api/tracks/filename-tags/preview", post(filename_tags::preview))
+        .route("/api/tracks/filename-tags/apply", post(filename_tags::apply))
+        .route("/api/tracks/filename-tags/plans/:token", get(filename_tags::detail))
+        .route("/api/tracks/filename-tags/plans/:token/items", get(filename_tags::items))
         .route(
             "/api/tracks/filtered-selection",
             post(filtered_selection::prepare),

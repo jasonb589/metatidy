@@ -36,6 +36,7 @@ from tests.auto_scan_acceptance import check_auto_scan  # noqa: E402
 from tests.storage_acceptance import check_storage, check_cache_totals  # noqa: E402
 from tests.albums_acceptance import check_albums  # noqa: E402
 from tests.write_acceptance import check_writes  # noqa: E402
+from tests.filename_tags_acceptance import check_filename_tags  # noqa: E402
 from tests.move_acceptance import check_moves  # noqa: E402
 from tests.jobs_acceptance import check_jobs  # noqa: E402
 from tests.selection_acceptance import check_selection  # noqa: E402
@@ -513,6 +514,8 @@ def main() -> int:
         check_albums(BASE, music, check, wait_job)
         print("\n=== 11. 写入预览与真实文件一致性 ===")
         check_writes(BASE, music, check, wait_job)
+        print("\n=== 11.1. 从文件名提取标签：不可变计划、幂等和逐项恢复 ===")
+        check_filename_tags(BASE, music, check, wait_job)
         print("\n=== 12. 完整整理计划审阅与一次执行 ===")
         check_moves(BASE, music, check, wait_job)
         print("\n=== 13. 任务历史、结果报告与状态一致性 ===")

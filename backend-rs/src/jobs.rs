@@ -211,7 +211,7 @@ const SUMMARY_COLUMNS: &str = "id, kind, state, total, done, message, error, cre
         FROM jsonb_each(CASE WHEN jsonb_typeof(result) = 'object' THEN result ELSE '{}'::jsonb END) AS field \
         WHERE field.key IN ('added','updated','skipped','removed','failed','scanned','parsed', \
             'total_seconds','seconds','trigger','root','fast_mode','applied','search_only','moved','renamed', \
-            'details_total','details_truncated') \
+            'details_total','details_truncated','token','revision','written','needs_verification','stale','not_started') \
         AND jsonb_typeof(field.value) IN ('string','number','boolean')), '{}'::jsonb) AS summary";
 
 #[derive(sqlx::FromRow)]

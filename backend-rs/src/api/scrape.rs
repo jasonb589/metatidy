@@ -518,6 +518,16 @@ pub async fn apply_candidate(
     } else {
         Some(lyrics.as_str())
     };
+    // Downloads run without holding the library lock. Once they finish, check
+    // that this indexed identity still names the same path, and retain the
+    // lock through both the disk write and index synchronization.
+    let _library_guard = crate::scanner::lock_library_scan().await;
+    let current = repo::get_track(&state.db, track.id)
+        .await?
+        .ok_or_else(|| ApiError::conflict("曲目已从索引移除，请重新选择"))?;
+    if current.path != track.path {
+        return Err(ApiError::conflict("曲目路径已变化，请重新选择并预览"));
+    }
     let mut outcome = tagio::apply_update(path, &values, overwrite, cover, lyrics_for_write)
         .map_err(|err| {
             ApiError::Status(

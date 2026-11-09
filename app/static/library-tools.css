@@ -2,6 +2,10 @@
 .track-title-button { appearance: none; display: block; width: 100%; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; text-align: left; cursor: pointer; }
 .track-title-button:hover { color: var(--accent-2); text-decoration: underline; text-underline-offset: 4px; }
 .track-title-button:focus-visible { outline-offset: 2px; }
+.library-meta-link { appearance: none; max-width: 100%; padding: 3px 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 25%, transparent); text-underline-offset: 4px; transition: color var(--t-fast), text-decoration-color var(--t-fast); }
+.library-meta-link:hover { color: var(--accent-2); text-decoration-color: currentColor; }
+.library-meta-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; color: var(--accent-2); }
+.track-card-artist .library-meta-link, .track-card-album .library-meta-link { width: 100%; }
 .track-art-button { appearance: none; display: block; position: relative; width: 100%; padding: 0; border: 0; background: transparent; color: var(--fg); cursor: pointer; }
 .track-art-button:focus-visible { outline-offset: -4px; outline: 2px solid var(--accent); }
 .track-art-button .track-card-art > img { transition: transform 240ms var(--ease-out); }
@@ -53,7 +57,15 @@ body:has(#selection-bar:not([hidden])) .table-wrap.scroll { scroll-padding-botto
   .keyboard-shortcuts { gap: 13px 14px; }
   .keyboard-shortcuts dd { font-size: 11px; }
 }
+@media (max-width: 700px) {
+  #tracks-table .cell-mobile-meta { display: flex; gap: 5px; align-items: center; }
+  #tracks-table .cell-mobile-meta > .truncate { flex: 0 1 auto; min-width: 0; }
+  #tracks-table .cell-mobile-meta > .library-meta-divider { flex: none; opacity: .6; }
+  #tracks-table .cell-mobile-meta .library-meta-link { min-height: 28px; }
+  .track-card-artist .library-meta-link, .track-card-album .library-meta-link { min-height: 28px; }
+}
 @media (prefers-reduced-motion: reduce) {
+  .library-meta-link { transition: none; }
   .track-art-button .track-card-art > img, .art-detail-hint { transition: none; transform: none; }
   #selection-bar.selection-enter { animation: none; }
 }

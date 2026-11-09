@@ -686,5 +686,5 @@ export function jobStateBadge(state) {
 }
 
 export function jobKindLabel(kind) {
-  return { scan: "扫描库", scrape: "批量刮削", move: "整理移动" }[kind] || kind || "任务";
+  return { scan: "扫描库", scrape: "批量刮削", move: "整理移动", filename_tags: "文件名提取标签" }[kind] || kind || "任务";
 }

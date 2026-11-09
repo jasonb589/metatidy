@@ -25,6 +25,7 @@ mod portraits;
 
 use std::sync::Arc;
 mod fixtures;
+mod filename_tags;
 mod folders;
 mod language;
 mod models;
@@ -148,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
              设置该环境变量即可启用登录"
         ),
     }
+    api::filename_tags::recover(&state).await?;
+    api::filename_tags::start_recovery(state.clone());
     let _auto_scan = auto_scan::start(state.clone());
     let app = build_router(state, &config);
 

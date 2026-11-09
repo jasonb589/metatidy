@@ -5,7 +5,7 @@
 
 import { api, ApiError } from "./api.js";
 import * as ui from "./ui.js";
-import { state, on, selectionRevision } from "./store.js";
+import { state, on, selectionRevision, selectionRows, setCurrentTrack } from "./store.js";
 import * as tracks from "./tracks.js";
 import { init as initLibraryLayout } from "./library-layout.js";
 import * as albums from "./albums.js";
@@ -21,6 +21,7 @@ import { renderJobs, parseResult } from "./jobs-panel.js";
 import { initJobsHistory, refreshVisibleJobs, onJobsCenterOpen, updateJobsOverview } from "./jobs-history.js";
 import { initKeyboardHelp } from "./keyboard-help.js";
 import { openSelectionReview } from "./selection-review.js";
+import { openFilenameTags, openFilenameTagResults, closeFilenameTags, initFilenameTagsRecovery } from "./filename-tags.js";
 import { openDuplicateReview, invalidateDuplicateReview } from "./duplicate-review.js";
 import { openFolderBrowser } from "./folder-browser.js";
 import { initAudioPlayer } from "./audio-player.js";
@@ -76,6 +77,7 @@ function boot() {
   wireSidebar();
   wireTabs();
   wireJobs();
+  initFilenameTagsRecovery();
   wireShortcuts();
   wireSessionGuard();
   wireLibraryUpdates();
@@ -102,6 +104,11 @@ function boot() {
     if (!canUseWorkspace()) return;
     closeJobs();
     openSelectionReview({ onAction: (action, scope) => void handoffSelection(action, scope) });
+  });
+  on("filename-tags:results", (token) => {
+    if (!canUseWorkspace() || document.querySelector("dialog[open]")) return;
+    closeJobs({ restoreFocus: false });
+    openFilenameTagResults(token);
   });
   const showDuplicates = () => {
     if (!canUseWorkspace() || document.querySelector("dialog[open]")) return;
@@ -130,13 +137,8 @@ function boot() {
   ui.byId("btn-library-folders")?.addEventListener("click", showFolders);
   on("library:batch-scrape", (scope) => {
     if (!canUseWorkspace() || !state.selection.size) return;
-    activateTab("scrape", { focus: false }).then(() => {
-      if (state.tab !== "scrape" || !canUseWorkspace()) return;
-      if (scope && scope.revision !== selectionRevision()) { ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后继续。"); return; }
-      const button = ui.byId("btn-batch-run");
-      button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
-      document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
-    }).catch(reportNavigationError);
+    const snapshot = scope || { rows: selectionRows().map(row => ({ ...row })), revision: selectionRevision() };
+    void handoffSelection("scrape", snapshot);
   });
   on("albums:open", (group) => {
     if (!canUseWorkspace() || !tracks.setAlbumScope(group)) return;
@@ -171,17 +173,28 @@ async function handoffSelection(action, scope) {
       else ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后再保存清单。");
       return;
     }
-    const tab = action === "edit" || action === "edit-sequence" ? "tracks" : action === "scrape" ? "scrape" : "move";
+    const tab = ["edit", "edit-sequence", "filename-tags"].includes(action) ? "tracks" : action === "scrape" ? "scrape" : "move";
     await activateTab(tab, { focus: false });
     if (!canUseWorkspace() || state.tab !== tab || scope.revision !== selectionRevision()) {
       ui.toast("warn", "选择范围已变化", "请重新审阅已选曲目后继续。"); return;
     }
     if (action === "edit") tracks.editSelection(scope.rows);
     else if (action === "edit-sequence") tracks.editSelectionSequence(scope.rows);
+    else if (action === "filename-tags") openFilenameTags(scope);
     else if (action === "scrape") {
-      const button = ui.byId("btn-batch-run"); button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
-      document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
-      ui.toast("info", `批量刮削范围：全部已选 ${scope.rows.length} 首`, "请选择处理模式后手动开始；仅搜索审阅最多 200 首。");
+      if (scope.rows.length === 1) {
+        const row = scope.rows[0];
+        const current = state.scrape.pickItems.find(item => Number(item.id) === Number(row.id));
+        setCurrentTrack(current || row);
+        ui.byId("scrape-library-tab")?.click();
+        const input = ui.byId("search-keyword");
+        input.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
+        input.focus({ preventScroll: true });
+      } else {
+        const button = ui.byId("btn-batch-run"); button.closest(".card")?.scrollIntoView({ block: "start", behavior: "instant" });
+        document.querySelector('input[name="batch-mode"]:checked')?.focus({ preventScroll: true });
+        ui.toast("info", `批量刮削范围：全部已选 ${scope.rows.length} 首`, "请选择处理模式后手动开始；仅搜索审阅最多 200 首。");
+      }
     } else if (move.selectSelectedScope()) {
       ui.byId("btn-move-preview").scrollIntoView({ block: "center", behavior: "instant" }); ui.byId("btn-move-preview").focus({ preventScroll: true });
     } else ui.toast("warn", "当前整理操作尚未结束", "请等待本次操作结束后，再从已选审阅进入整理。");
@@ -354,6 +367,7 @@ function reportNavigationError(err) {
 async function activateTab(name, { focus = true, dismissSidebar = true, scroll = true } = {}) {
   if (!TABS.includes(name) || !canUseWorkspace()) return;
   const changed = name !== state.tab;
+  if (changed) closeFilenameTags({ restoreFocus: false });
   if (state.tab === "tracks" && name !== "tracks") tracks.leave();
   if (state.tab === "albums" && name !== "albums") albums.leave();
   if (state.tab === "collections" && name !== "collections") collections.leave();
@@ -423,6 +437,7 @@ function canUseWorkspace() {
 
 function setWorkspaceLocked(locked) {
   if (locked) {
+    closeFilenameTags({ restoreFocus: false });
     tracks.leave();
     closeSidebar({ restoreFocus: false });
     closeJobs({ restoreFocus: false });

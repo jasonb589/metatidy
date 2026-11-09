@@ -9,11 +9,14 @@
 //! - `apply_update` 只保存有效变化，并读回确认实际结果
 
 use lofty::config::WriteOptions;
-use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
+use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem, TagType};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs::{File, Metadata, OpenOptions};
+use std::io::{BufReader, Seek};
 use std::path::Path;
 
 use crate::models::{FieldChange, EDITABLE_FIELDS};
@@ -283,6 +286,140 @@ pub struct UpdateOutcome {
     pub file_changed: bool,
 }
 
+/// Private, persisted precondition for a reviewed write. Never accept this
+/// structure from a client: only the server's immutable plan may supply it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GuardedBaseline {
+    version: u8,
+    file: FileFingerprint,
+    tags_digest: String,
+    desired: HashMap<String, String>,
+    overwrite: bool,
+    effective_fields: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct FileFingerprint {
+    requested_path: String,
+    canonical_path: String,
+    length: u64,
+    modified_ns: String,
+    identity: String,
+}
+
+fn file_identity(meta: &Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{}:{}:{}",
+            meta.dev(),
+            meta.ino(),
+            meta.ctime(),
+            meta.ctime_nsec()
+        )
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Stable Rust exposes creation time on Windows. Unix also checks the
+        // inode/device; real tag content is independently checked on both.
+        format!("{}:{}", meta.creation_time(), meta.file_attributes())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        format!("{:?}", meta.created().ok())
+    }
+}
+
+fn fingerprint(path: &Path, file: &File) -> Result<FileFingerprint, UpdateError> {
+    let result = (|| -> std::io::Result<FileFingerprint> {
+        let opened = file.metadata()?;
+        let named = std::fs::metadata(path)?;
+        if !opened.is_file()
+            || !named.is_file()
+            || opened.len() != named.len()
+            || opened.modified()? != named.modified()?
+            || file_identity(&opened) != file_identity(&named)
+        {
+            return Err(std::io::Error::other("路径指向的文件在读取期间发生变化"));
+        }
+        let modified = opened.modified()?;
+        let modified_ns = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(value) => value.as_nanos().to_string(),
+            Err(value) => format!("-{}", value.duration().as_nanos()),
+        };
+        Ok(FileFingerprint {
+            requested_path: path.to_string_lossy().into_owned(),
+            canonical_path: path.canonicalize()?.to_string_lossy().into_owned(),
+            length: opened.len(),
+            modified_ns,
+            identity: file_identity(&opened),
+        })
+    })();
+    result.map_err(|err| update_error("stale", false, format!("文件状态已改变，请重新预览：{err}")))
+}
+
+fn read_open_file(path: &Path, file: &mut File) -> Result<TaggedFile, UpdateError> {
+    file.rewind()
+        .map_err(|err| update_error("read", false, err.to_string()))?;
+    let reader = BufReader::new(file);
+    let probe = match FileType::from_path(path) {
+        Some(kind) => Probe::with_file_type(reader, kind),
+        None => Probe::new(reader),
+    };
+    probe
+        .read()
+        .map_err(|err| update_error("read", false, format!("读取标签失败：{err}")))
+}
+
+/// Hash tag values, including custom fields, lyrics and artwork, without
+/// copying large binary pictures into debug strings or reading all audio data.
+fn tags_digest(tagged: &TaggedFile) -> String {
+    fn part(hash: &mut Sha256, bytes: &[u8]) {
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    }
+    let mut hash = Sha256::new();
+    part(&mut hash, b"metatidy-reviewed-tags-v1");
+    for tag in tagged.tags() {
+        part(&mut hash, format!("{:?}", tag.tag_type()).as_bytes());
+        for item in tag.items() {
+            part(&mut hash, format!("{:?}", item.key()).as_bytes());
+            part(&mut hash, item.lang());
+            part(&mut hash, item.description().as_bytes());
+            match item.value() {
+                ItemValue::Text(text) => {
+                    part(&mut hash, b"text");
+                    part(&mut hash, text.as_bytes());
+                }
+                ItemValue::Locator(text) => {
+                    part(&mut hash, b"locator");
+                    part(&mut hash, text.as_bytes());
+                }
+                ItemValue::Binary(bytes) => {
+                    part(&mut hash, b"binary");
+                    part(&mut hash, bytes);
+                }
+            }
+        }
+        for picture in tag.pictures() {
+            part(&mut hash, format!("{:?}", picture.pic_type()).as_bytes());
+            part(
+                &mut hash,
+                picture
+                    .mime_type()
+                    .map(|value| value.as_str())
+                    .unwrap_or("")
+                    .as_bytes(),
+            );
+            part(&mut hash, picture.description().unwrap_or("").as_bytes());
+            part(&mut hash, picture.data());
+        }
+    }
+    format!("{:x}", hash.finalize())
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct UpdateError {
@@ -435,6 +572,80 @@ pub fn preview_update(
     Ok(plan_update(&tagged, path, desired, overwrite, lyrics))
 }
 
+/// Read-only, real-file preview. Callers hold the shared library lock through
+/// index lookup and this call so an in-process move cannot change the path.
+pub fn preview_guarded(
+    path: &Path,
+    desired: &HashMap<String, String>,
+    overwrite: bool,
+) -> Result<(UpdatePlan, GuardedBaseline), UpdateError> {
+    let mut file = File::open(path)
+        .map_err(|err| update_error("read", false, format!("读取文件失败：{err}")))?;
+    let before = fingerprint(path, &file)?;
+    let tagged = read_open_file(path, &mut file)?;
+    if fingerprint(path, &file)? != before {
+        return Err(update_error(
+            "stale",
+            false,
+            "文件在预览期间发生变化，请重新预览",
+        ));
+    }
+    let plan = plan_update(&tagged, path, desired, overwrite, None);
+    let baseline = GuardedBaseline {
+        version: 1,
+        file: before,
+        tags_digest: tags_digest(&tagged),
+        desired: desired.clone(),
+        overwrite,
+        effective_fields: plan.effective_fields.clone(),
+    };
+    Ok((plan, baseline))
+}
+
+/// Verify and save using the same opened file, then read that handle back.
+/// This detects normal external edits/replacements; it is not an operating
+/// system transaction against arbitrary external software. Application writers
+/// must hold the shared library lock until index synchronization completes.
+pub fn apply_guarded(
+    path: &Path,
+    desired: &HashMap<String, String>,
+    overwrite: bool,
+    baseline: &GuardedBaseline,
+) -> Result<UpdateOutcome, UpdateError> {
+    if baseline.version != 1 || baseline.desired != *desired || baseline.overwrite != overwrite {
+        return Err(update_error(
+            "stale",
+            false,
+            "写入参数与已预览计划不一致，请重新预览",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| update_error("read", false, format!("打开文件失败：{err}")))?;
+    if fingerprint(path, &file)? != baseline.file {
+        return Err(update_error(
+            "stale",
+            false,
+            "文件在预览后发生变化，请重新预览",
+        ));
+    }
+    let tagged = read_open_file(path, &mut file)?;
+    let plan = plan_update(&tagged, path, desired, overwrite, None);
+    if fingerprint(path, &file)? != baseline.file
+        || tags_digest(&tagged) != baseline.tags_digest
+        || plan.effective_fields != baseline.effective_fields
+    {
+        return Err(update_error(
+            "stale",
+            false,
+            "真实标签与已预览内容不一致，请重新预览",
+        ));
+    }
+    write_plan(path, tagged, plan, None, Some((&mut file, baseline)))
+}
+
 /// 把单个字段写进标签对象。
 fn set_one(tag: &mut Tag, key: &str, value: &str) -> bool {
     let item_key = match key {
@@ -483,7 +694,23 @@ pub fn apply_update(
     lyrics: Option<&str>,
 ) -> Result<UpdateOutcome, UpdateError> {
     let tagged = open_for_update(path)?;
-    let mut plan = plan_update(&tagged, path, desired, overwrite, lyrics);
+    let plan = plan_update(&tagged, path, desired, overwrite, lyrics);
+    write_plan(
+        path,
+        tagged,
+        plan,
+        cover.map(|cover| (cover, overwrite)),
+        None,
+    )
+}
+
+fn write_plan(
+    path: &Path,
+    tagged: TaggedFile,
+    mut plan: UpdatePlan,
+    cover: Option<((Vec<u8>, String), bool)>,
+    guarded_file: Option<(&mut File, &GuardedBaseline)>,
+) -> Result<UpdateOutcome, UpdateError> {
     let original = tagged.primary_tag().or_else(|| tagged.first_tag());
     let mut tag = original
         .cloned()
@@ -505,7 +732,7 @@ pub fn apply_update(
 
     let mut cover_written = false;
     let mut expected_cover = None;
-    if let Some((data, mime)) = cover {
+    if let Some(((data, mime), overwrite)) = cover {
         if data.is_empty() {
             plan.skipped.push(SkippedField::new("cover", "blank"));
         } else if !overwrite && !tag.pictures().is_empty() {
@@ -534,15 +761,50 @@ pub fn apply_update(
     let lyrics_written = plan.lyrics.is_some();
     let file_changed = !plan.effective_fields.is_empty() || lyrics_written || cover_written;
     let after = if file_changed {
-        tag.save_to_path(path, WriteOptions::default())
-            .map_err(|err| {
+        let readback = if let Some((file, baseline)) = guarded_file {
+            if fingerprint(path, file)? != baseline.file {
+                return Err(update_error(
+                    "stale",
+                    false,
+                    "文件在写入前发生变化，请重新预览",
+                ));
+            }
+            file.rewind()
+                .map_err(|err| update_error("read", false, err.to_string()))?;
+            tag.save_to(file, WriteOptions::default()).map_err(|err| {
                 update_error(
                     "write",
                     true,
                     format!("保存标签失败，文件可能已部分改变：{err}"),
                 )
             })?;
-        open_for_update(path).map_err(|err| {
+            let after = read_open_file(path, file);
+            // A renamed/replaced path after saving must not be synchronized to
+            // the index as if it still referred to the file we just wrote.
+            let named =
+                fingerprint(path, file).map_err(|err| update_error("verify", true, err.message))?;
+            if named.requested_path != baseline.file.requested_path
+                || named.canonical_path != baseline.file.canonical_path
+            {
+                return Err(update_error(
+                    "verify",
+                    true,
+                    "标签已保存，但文件路径已变化；请核对文件并重新扫描",
+                ));
+            }
+            after
+        } else {
+            tag.save_to_path(path, WriteOptions::default())
+                .map_err(|err| {
+                    update_error(
+                        "write",
+                        true,
+                        format!("保存标签失败，文件可能已部分改变：{err}"),
+                    )
+                })?;
+            open_for_update(path)
+        };
+        readback.map_err(|err| {
             update_error(
                 "verify",
                 true,
@@ -647,7 +909,11 @@ mod tests {
         let path = std::env::temp_dir().join("metatidy-tagio-synthetic.flac");
         fixtures::make_flac(&path).unwrap();
         let tags = read_tags(&path);
-        assert!(tags.error.is_none(), "合成 FLAC 应能被解析：{:?}", tags.error);
+        assert!(
+            tags.error.is_none(),
+            "合成 FLAC 应能被解析：{:?}",
+            tags.error
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -720,7 +986,11 @@ mod tests {
         desired.insert("albumtype".to_string(), "专辑".to_string());
 
         let written = apply_update(&path, &desired, true, None, None).unwrap();
-        assert!(written.written.len() >= 6, "至少写了 6 个字段，实际 {:?}", written.written);
+        assert!(
+            written.written.len() >= 6,
+            "至少写了 6 个字段，实际 {:?}",
+            written.written
+        );
 
         let back = read_tags(&path);
         assert!(back.error.is_none(), "读回失败：{:?}", back.error);
@@ -879,7 +1149,9 @@ mod tests {
     fn cover_roundtrip() {
         let Some(path) = require("flac") else { return };
         // 只要字节能原样存回即可，不校验图片内容
-        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03];
+        let png = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03,
+        ];
         let mut desired = HashMap::new();
         desired.insert("title".to_string(), "带封面".to_string());
         apply_update(
@@ -986,8 +1258,339 @@ mod tests {
         let tags = read_tags(Path::new("/definitely/not/here.flac"));
         assert!(tags.error.is_some());
     }
-}
 
+    struct GuardedFixture(std::path::PathBuf);
+
+    impl Drop for GuardedFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Local guarded tests always execute. CI must use the real encoder
+    /// fixtures, so a missing CI fixture is a failure instead of a silent skip.
+    fn guarded_fixture(kind: &str) -> GuardedFixture {
+        let env_key = if kind == "flac" {
+            "METATIDY_TEST_FLAC"
+        } else {
+            "METATIDY_TEST_MP3"
+        };
+        if let Some(path) = fixtures::real_fixture(env_key, &format!("guarded.{kind}")) {
+            return GuardedFixture(path);
+        }
+        assert!(
+            std::env::var("CI").is_err(),
+            "CI guarded tests require a real {kind} fixture in {env_key}"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "metatidy-guarded-{}.{kind}",
+            uuid::Uuid::new_v4()
+        ));
+        if kind == "flac" {
+            fixtures::make_flac(&path).unwrap();
+            // Lofty 0.21's writer expects a metadata block after STREAMINFO
+            // when adding padding. Give the synthetic file a valid PADDING
+            // block like real encoder output, without changing the audio frame.
+            let bytes = std::fs::read(&path).unwrap();
+            let mut padded = bytes[..42].to_vec();
+            padded[4] = 0;
+            padded.extend_from_slice(&[0x81, 0, 0x10, 0]);
+            padded.resize(padded.len() + 4096, 0);
+            padded.extend_from_slice(&bytes[42..]);
+            std::fs::write(&path, padded).unwrap();
+        } else {
+            fixtures::make_mp3(&path, 16).unwrap();
+        }
+        GuardedFixture(path)
+    }
+
+    fn seed_guarded_tags(path: &Path) {
+        let tagged = open_for_update(path).unwrap();
+        let mut tag = tagged
+            .primary_tag()
+            .or_else(|| tagged.first_tag())
+            .cloned()
+            .unwrap_or_else(|| Tag::new(pick_tag_type(path)));
+        for key in [
+            ItemKey::TrackArtist,
+            ItemKey::AlbumTitle,
+            ItemKey::TrackNumber,
+            ItemKey::DiscNumber,
+        ] {
+            tag.remove_key(&key);
+        }
+        tag.remove_year();
+        tag.insert_text(ItemKey::TrackTitle, "原曲名 e\u{301} 🎼".into());
+        tag.insert_text(ItemKey::Comment, "保留注释".into());
+        tag.insert_text(ItemKey::Lyrics, "[00:01.00] 原歌词\n第二行".into());
+        tag.insert_unchecked(TagItem::new(
+            ItemKey::Unknown("METATIDY_TEST_CUSTOM".into()),
+            ItemValue::Text("自定义资料 e\u{301} 🎵".into()),
+        ));
+        while !tag.pictures().is_empty() {
+            tag.remove_picture(0);
+        }
+        tag.push_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(MimeType::Png),
+            Some("保留封面".into()),
+            vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3],
+        ));
+        tag.save_to_path(path, WriteOptions::default()).unwrap();
+    }
+
+    fn untouched_payload(path: &Path) -> serde_json::Value {
+        let tagged = open_for_update(path).unwrap();
+        let tag = tagged.primary_tag().or_else(|| tagged.first_tag()).unwrap();
+        let custom: Vec<_> = tag
+            .items()
+            .filter(|item| {
+                matches!(item.key(), ItemKey::Unknown(key) if key == "METATIDY_TEST_CUSTOM")
+            })
+            .map(|item| item.value().text().unwrap().to_owned())
+            .collect();
+        assert_eq!(custom, vec!["自定义资料 e\u{301} 🎵"]);
+        let pictures: Vec<_> = tag
+            .pictures()
+            .iter()
+            .map(|picture| {
+                serde_json::json!({
+                    "kind":format!("{:?}", picture.pic_type()),
+                    "mime":picture.mime_type().map(|value| value.as_str()),
+                    "description":picture.description(),
+                    "data":picture.data(),
+                })
+            })
+            .collect();
+        assert_eq!(pictures.len(), 1);
+        serde_json::json!({
+            "custom":custom,
+            "comment":tag.get_string(&ItemKey::Comment),
+            "lyrics":lyrics_in(Some(tag)),
+            "pictures":pictures,
+        })
+    }
+
+    fn guarded_error(
+        path: &Path,
+        desired: &HashMap<String, String>,
+        overwrite: bool,
+        baseline: &GuardedBaseline,
+    ) -> UpdateError {
+        match apply_guarded(path, desired, overwrite, baseline) {
+            Ok(_) => panic!("changed reviewed preconditions must reject the write"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn guarded_preview_is_read_only_and_persisted_baseline_roundtrips() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([("artist".into(), "新艺术家 🎹".into())]);
+            let bytes = std::fs::read(path).unwrap();
+            let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+            let (plan, baseline) = preview_guarded(path, &desired, false).unwrap();
+            assert_eq!(plan.changes["artist"].old, "");
+            assert_eq!(plan.changes["artist"].new, "新艺术家 🎹");
+            assert_eq!(std::fs::read(path).unwrap(), bytes, "{kind} preview wrote bytes");
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+            let serialized = serde_json::to_value(&baseline).unwrap();
+            let restored: GuardedBaseline = serde_json::from_value(serialized.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&restored).unwrap(), serialized);
+            let outcome = apply_guarded(path, &desired, false, &restored).unwrap();
+            assert_eq!(outcome.written, vec!["artist"]);
+            assert_eq!(read_tags(path).artist, "新艺术家 🎹");
+        }
+    }
+
+    #[test]
+    fn guarded_fill_blank_canonicalizes_numbers_and_preserves_unrequested_payloads() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let retained = untouched_payload(path);
+            let desired = HashMap::from([
+                ("title".into(), "不得覆盖".into()),
+                ("artist".into(), "  新艺术家 e\u{301} 🎹  ".into()),
+                ("album".into(), "  ".into()),
+                ("track".into(), "003".into()),
+                ("disc".into(), "02".into()),
+                ("year".into(), "2004-11-01".into()),
+                ("unsupported".into(), "不会写入".into()),
+            ]);
+            let (plan, baseline) = preview_guarded(path, &desired, false).unwrap();
+            assert_eq!(plan.effective_fields["track"], "3");
+            assert_eq!(plan.effective_fields["disc"], "2");
+            assert_eq!(plan.effective_fields["year"], "2004");
+            assert!(plan.skipped.iter().any(|item| item.field == "title" && item.reason == "existing"));
+            assert!(plan.skipped.iter().any(|item| item.field == "album" && item.reason == "blank"));
+            assert!(plan.skipped.iter().any(|item| item.field == "unsupported" && item.reason == "unsupported"));
+            let outcome = apply_guarded(path, &desired, false, &baseline).unwrap();
+            assert!(outcome.file_changed);
+            assert!(!outcome.lyrics_written && !outcome.cover_written);
+            assert_eq!(outcome.written, vec!["artist", "disc", "track", "year"]);
+            assert_eq!(outcome.readback_fields["title"], "原曲名 e\u{301} 🎼");
+            assert!(!outcome.readback_fields.contains_key("album"));
+            assert!(!outcome.readback_fields.contains_key("comment"));
+            assert_eq!(untouched_payload(path), retained, "{kind} changed unrequested tags");
+            let tags = read_tags(path);
+            assert_eq!((tags.track.as_str(), tags.disc.as_str(), tags.year.as_str()), ("3", "2", "2004"));
+            assert_eq!(tags.artist, "新艺术家 e\u{301} 🎹");
+            assert_eq!(tags.title, "原曲名 e\u{301} 🎼");
+        }
+    }
+
+    #[test]
+    fn guarded_noop_never_saves_or_changes_file_times() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([
+                ("title".into(), "保持已有标题".into()),
+                ("album".into(), " ".into()),
+                ("track".into(), "2/12".into()),
+                ("disc".into(), "4294967296".into()),
+            ]);
+            let (plan, baseline) = preview_guarded(path, &desired, false).unwrap();
+            assert!(plan.effective_fields.is_empty() && plan.changes.is_empty());
+            let bytes = std::fs::read(path).unwrap();
+            let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+            let outcome = apply_guarded(path, &desired, false, &baseline).unwrap();
+            assert!(!outcome.file_changed && outcome.written.is_empty());
+            assert_eq!(outcome.readback_fields, HashMap::from([("title".into(), "原曲名 e\u{301} 🎼".into())]));
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+        }
+    }
+
+    #[test]
+    fn guarded_rejects_changed_request_and_persisted_preconditions_without_writing() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([("artist".into(), "已预览艺术家".into())]);
+            let (_, baseline) = preview_guarded(path, &desired, false).unwrap();
+            let before = std::fs::read(path).unwrap();
+            let modified = std::fs::metadata(path).unwrap().modified().unwrap();
+            let other = HashMap::from([("artist".into(), "未预览艺术家".into())]);
+            let mut wrong_version = baseline.clone();
+            wrong_version.version += 1;
+            let mut wrong_digest = baseline.clone();
+            wrong_digest.tags_digest = "invalid persisted tag digest".into();
+            let mut wrong_effective = baseline.clone();
+            wrong_effective.effective_fields.insert("artist".into(), "被篡改的计划".into());
+            for error in [
+                guarded_error(path, &other, false, &baseline),
+                guarded_error(path, &desired, true, &baseline),
+                guarded_error(path, &desired, false, &wrong_version),
+                guarded_error(path, &desired, false, &wrong_digest),
+                guarded_error(path, &desired, false, &wrong_effective),
+            ] {
+                assert_eq!(error.stage, "stale");
+                assert!(!error.file_changed);
+            }
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), modified);
+        }
+    }
+
+    #[test]
+    fn guarded_rejects_external_tag_edit_and_keeps_that_edit() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([("artist".into(), "准备写入".into())]);
+            let (_, baseline) = preview_guarded(path, &desired, false).unwrap();
+            apply_update(path, &HashMap::from([("comment".into(), "外部的新注释".into())]), true, None, None).unwrap();
+            let before = std::fs::read(path).unwrap();
+            let error = guarded_error(path, &desired, false, &baseline);
+            assert_eq!(error.stage, "stale");
+            assert!(!error.file_changed);
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(read_tags(path).comment, "外部的新注释");
+            assert_eq!(read_tags(path).artist, "");
+        }
+    }
+
+    #[test]
+    fn guarded_tag_digest_detects_edit_even_when_current_file_stat_is_supplied() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([("artist".into(), "准备写入".into())]);
+            let (_, mut baseline) = preview_guarded(path, &desired, false).unwrap();
+            apply_update(path, &HashMap::new(), true, None, Some("外部替换的歌词")).unwrap();
+            // Isolate the content guard independently from mtime/inode checks.
+            // The HTTP API never accepts or modifies this private baseline.
+            baseline.file = fingerprint(path, &File::open(path).unwrap()).unwrap();
+            let before = std::fs::read(path).unwrap();
+            let error = guarded_error(path, &desired, false, &baseline);
+            assert_eq!(error.stage, "stale");
+            assert!(!error.file_changed);
+            assert_eq!(read_lyrics(path), "外部替换的歌词");
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn guarded_rejects_mtime_only_change_without_saving() {
+        for kind in ["flac", "mp3"] {
+            let fixture = guarded_fixture(kind);
+            let path = &fixture.0;
+            seed_guarded_tags(path);
+            let desired = HashMap::from([("artist".into(), "准备写入".into())]);
+            let (_, baseline) = preview_guarded(path, &desired, false).unwrap();
+            let before = std::fs::read(path).unwrap();
+            let file = OpenOptions::new().write(true).open(path).unwrap();
+            let modified = file.metadata().unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+            file.set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+            drop(file);
+            let changed_time = std::fs::metadata(path).unwrap().modified().unwrap();
+            let error = guarded_error(path, &desired, false, &baseline);
+            assert_eq!(error.stage, "stale");
+            assert!(!error.file_changed);
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), changed_time);
+        }
+    }
+
+    #[test]
+    fn guarded_rejects_source_path_change_and_replacement() {
+        for kind in ["flac", "mp3"] {
+            let source = guarded_fixture(kind);
+            seed_guarded_tags(&source.0);
+            let desired = HashMap::from([("artist".into(), "准备写入".into())]);
+            let (_, baseline) = preview_guarded(&source.0, &desired, false).unwrap();
+            let moved = GuardedFixture(source.0.with_file_name(format!("moved-{}.{kind}", uuid::Uuid::new_v4())));
+            std::fs::rename(&source.0, &moved.0).unwrap();
+            let original = std::fs::read(&moved.0).unwrap();
+            let error = guarded_error(&moved.0, &desired, false, &baseline);
+            assert_eq!(error.stage, "stale");
+            assert!(!error.file_changed);
+            assert_eq!(std::fs::read(&moved.0).unwrap(), original);
+
+            let replacement = guarded_fixture(kind);
+            seed_guarded_tags(&replacement.0);
+            apply_update(&replacement.0, &HashMap::from([("title".into(), "替换后的文件".into())]), true, None, None).unwrap();
+            std::fs::rename(&replacement.0, &source.0).unwrap();
+            let replaced = std::fs::read(&source.0).unwrap();
+            let error = guarded_error(&source.0, &desired, false, &baseline);
+            assert_eq!(error.stage, "stale");
+            assert!(!error.file_changed);
+            assert_eq!(std::fs::read(&source.0).unwrap(), replaced);
+            assert_eq!(read_tags(&source.0).title, "替换后的文件");
+            assert_eq!(std::fs::read(&moved.0).unwrap(), original);
+        }
+    }
+}
 
 /// 从 `ItemKey::Unknown("X")` 里取出原始键名（其它变体返回 None）。
 fn unknown_key_name(key: &ItemKey) -> Option<&str> {

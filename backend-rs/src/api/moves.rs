@@ -433,7 +433,7 @@ fn parse_job_history_query(query: &RawQuery) -> Result<JobHistoryQuery, ApiError
         ));
     }
     let kind = query.str("kind", "").trim().to_string();
-    if !matches!(kind.as_str(), "" | "scan" | "scrape" | "move") {
+    if !matches!(kind.as_str(), "" | "scan" | "scrape" | "move" | "filename_tags") {
         return Err(ApiError::unprocessable(
             "value_error",
             vec!["query", "kind"],

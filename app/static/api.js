@@ -217,6 +217,11 @@ export const api = {
   trackLyrics: (id, options = {}) => request(`${API}/tracks/${id}/lyrics`, options),
   previewTracks: (payload) => request(`${API}/tracks/preview`, { method: "POST", body: payload, timeout: 90000 }),
   applyTracks: (payload) => request(`${API}/tracks/apply`, { method: "POST", body: payload, timeout: 300000 }),
+  filenameTagsParse: (payload, options = {}) => request(`${API}/tracks/filename-tags/parse`, { ...options, method: "POST", body: payload }),
+  filenameTagsPreview: (payload, options = {}) => request(`${API}/tracks/filename-tags/preview`, { ...options, method: "POST", body: payload, timeout: 300000 }),
+  filenameTagsPlan: (token, options = {}) => request(`${API}/tracks/filename-tags/plans/${encodeURIComponent(token)}`, options),
+  filenameTagsPlanItems: (token, options = {}) => request(`${API}/tracks/filename-tags/plans/${encodeURIComponent(token)}/items`, options),
+  filenameTagsApply: (payload, options = {}) => request(`${API}/tracks/filename-tags/apply`, { ...options, method: "POST", body: payload, timeout: 60000 }),
 
   scan: (body) => request(`${API}/scan`, { method: "POST", body }),
   job: (jobId, options = {}) => request(`${API}/jobs/${encodeURIComponent(jobId)}`, options),

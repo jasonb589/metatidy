@@ -33,8 +33,9 @@ pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-// Scans and file moves share a lifetime lock. A moved destination must not be
-// inserted as a new track before the original track's path is synchronized.
+// Scans, file moves and tag writers share an in-process lifetime lock. Hold it
+// through index synchronization so a moved destination cannot become a new
+// track and one writer cannot replace another writer's freshly saved tags.
 static SCAN_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
 pub(crate) async fn lock_library_scan() -> tokio::sync::MutexGuard<'static, ()> {

@@ -348,6 +348,9 @@ pub async fn apply(State(state): State<AppState>, body: Bytes) -> ApiResult {
     let mut failed: Vec<Value> = Vec::new();
     let mut items: Vec<Value> = Vec::new();
     let mut applied_fields = BTreeSet::new();
+    // Keep path lookup, tag writes and index synchronization serialized with
+    // scanning, moving and other writers, including reviewed filename plans.
+    let _library_guard = crate::scanner::lock_library_scan().await;
     for track_id in &ids {
         let track = match selection_lookup(*track_id, repo::get_track(&state.db, *track_id).await) {
             Ok(track) => track,
