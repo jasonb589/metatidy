@@ -102,6 +102,16 @@ export function openAlbumDetail(initial) {
 
   function renderSummary(summary, snapshot = false) {
     title.textContent = summary.album; artist.textContent = summary.album_artist || "未知专辑艺术家";
+    // A track link knows the album's identity, not the whole album's counts.
+    // Keep the initial view pending until the indexed summary has arrived.
+    if (snapshot && !Number.isSafeInteger(summary.track_count)) {
+      facts.textContent = "正在读取专辑概况…";
+      completeness.replaceChildren();
+      summaryNote.textContent = "正在读取最新专辑索引与曲序。";
+      artwork.dataset.state = "loading";
+      artwork.replaceChildren(ui.icon("album", { size: 56 }), ui.el("span", { text: "读取专辑封面…" }));
+      return;
+    }
     const minutes = Math.round(number(summary.duration) / 60);
     facts.textContent = [summary.year, `${ui.fmtNum(summary.track_count)} 首`, minutes ? `${ui.fmtNum(minutes)} 分钟` : "时长待补", ui.fmtBytes(summary.bytes)].filter(Boolean).join(" · ");
     completeness.replaceChildren(...[["missing_cover", "待补封面"], ["missing_lyrics", "待补歌词"], ["not_loaded", "待读标签"]]

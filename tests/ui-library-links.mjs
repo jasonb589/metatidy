@@ -18,6 +18,7 @@ const port = Number(process.env.METATIDY_LINKS_UI_PORT || 18991), base = `http:/
 const composite = '周杰伦 & A-Lin / 五月天; 合作计划', albumName = '相同专辑名称';
 const trim = value => String(value || '').replace(/^ +| +$/g, '');
 const flush = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 const rowsOf = (count = 106) => Array.from({ length: count }, (_, index) => {
   const id = index + 1;
   const special = [
@@ -49,6 +50,7 @@ function albumDetail(group, rows) {
 }
 async function withPage(action, { view = 'list', viewport = { width: 1440, height: 1000 }, colorScheme = 'light', long = false } = {}) {
   const context = await browser.newContext({ viewport, colorScheme, reducedMotion: 'reduce' }), page = await context.newPage(), calls = [], errors = [], rows = rowsOf();
+  const control = { albumGate: null };
   if (long) Object.assign(rows[0], { artist: '很长的合作歌手 名称与符号 & / ; '.repeat(25), album: '很长的专辑名称 现场纪念版 '.repeat(35), albumartist: '专辑艺术家 '.repeat(25) });
   page.setDefaultTimeout(10000);
   await page.route('**/api/**', async route => {
@@ -62,18 +64,21 @@ async function withPage(action, { view = 'list', viewport = { width: 1440, heigh
       const size = Number(call.query.page_size) || 100, pages = Math.max(1, Math.ceil(matches.length / size)), number = Math.min(pages, Math.max(1, Number(call.query.page) || 1));
       return route.fulfill({ json: { items: matches.slice((number - 1) * size, number * size), total: matches.length, page: number, page_size: size, pages } });
     }
-    if (call.path === '/api/albums/detail') return route.fulfill({ json: albumDetail(JSON.parse(call.query.album_group), rows) });
+    if (call.path === '/api/albums/detail') {
+      if (control.albumGate) { control.albumGate.entered.resolve(); await control.albumGate.release.promise; }
+      return route.fulfill({ json: albumDetail(JSON.parse(call.query.album_group), rows) });
+    }
     return route.continue();
   });
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.goto(base); await page.locator('#tracks-tbody tr[data-id]').first().waitFor();
     if (view === 'cards') { await page.locator('#view-cards').click(); await page.locator('#tracks-grid .track-card').first().waitFor(); }
-    await flush(page); await action({ page, context, rows, calls, view });
+    await flush(page); await action({ page, context, rows, calls, view, control });
     assert.deepEqual(errors, [], 'Library navigation must not raise browser errors');
     assert.deepEqual(calls.filter(call => !['GET', 'HEAD'].includes(call.method)), [], 'Navigation and scraper handoff must not search, scan or write automatically');
     assert.equal(calls.some(call => call.path.endsWith('/audio')), false, 'Artist and album links must not start playback');
-  } finally { await context.close(); }
+  } finally { control.albumGate?.release.resolve(); await context.close(); }
 }
 async function selection(page) { return page.evaluate(async () => { const store = await import('/store.js'); return { ids: store.selectionIds(), rows: store.selectionRows(), revision: store.selectionRevision() }; }); }
 async function seed(page, rows) { await page.evaluate(async rows => { const store = await import('/store.js'); store.clearSelection(); store.selectRows(rows); }, rows); }
@@ -153,6 +158,29 @@ try {
         assert.deepEqual(await selection(page), before); assert.deepEqual(await scope(page), prior);
         await page.locator('#album-detail-close').click(); await page.locator('#album-detail-dialog').waitFor({ state: 'detached' });
       }
+    }, { view });
+  });
+
+  await check('Album identity-only entry never invents zero counts or complete artwork while loading', async () => {
+    for (const view of ['list', 'cards']) await withPage(async ({ page, rows, control }) => {
+      await seed(page, [rows[105]]); const before = await selection(page);
+      control.albumGate = { entered: deferred(), release: deferred() };
+      await albumLink(page, view, 1).click(); await control.albumGate.entered.promise;
+      await page.locator('#album-detail-dialog[open]').waitFor();
+      assert.equal(await page.locator('#album-detail-title').textContent(), albumName);
+      assert.equal(await page.locator('.ad-artist').textContent(), '唱片艺术家甲');
+      assert.equal(await page.locator('#album-detail-list').getAttribute('aria-busy'), 'true');
+      assert.match(await page.locator('#album-detail-facts').textContent(), /读取|载入/);
+      assert.doesNotMatch(await page.locator('#album-detail-dialog').textContent(), /(?:^|\D)0\s*首|封面.{0,4}歌词已齐备|0\s*(?:B|字节)/);
+      assert.equal(await page.locator('#album-detail-completeness .badge').count(), 0);
+      assert.equal(await page.locator('#album-detail-prepare').isDisabled(), true);
+      assert.deepEqual(await selection(page), before);
+      control.albumGate.release.resolve();
+      await page.waitForFunction(() => document.getElementById('album-detail-list').getAttribute('aria-busy') === 'false');
+      assert.match(await page.locator('#album-detail-facts').textContent(), /1\s*首/);
+      assert.match(await page.locator('#album-detail-completeness').textContent(), /待补封面 1/);
+      assert.match(await page.locator('#album-detail-completeness').textContent(), /待补歌词 1/);
+      assert.equal(await page.locator('#album-detail-prepare').isDisabled(), false);
     }, { view });
   });
 
